@@ -1,12 +1,19 @@
-# MemPalace RS
+# mempalace-rs
 
-A local memory palace for AI assistants — complete Rust rewrite of [mempalace](../mempalace).
+A local memory palace for AI assistants, implemented in Rust.
 
-**Why Rust over Python for memory:**
-- No GIL, no reference-counted leaks, deterministic `Drop`
-- Embeddings + vector search happen natively in-process via ONNX Runtime ([fastembed](https://docs.rs/fastembed))
-- Single statically-linked binary — install is `cargo install`
-- Sync stdio MCP loop with zero overhead
+This project stores verbatim text, embeds it locally, and retrieves relevant
+drawers with semantic search. It can be used as a CLI, an MCP stdio server, or
+as a Rust library through the `Palace` facade.
+
+## What It Does
+
+- Stores project files and conversation turns in a local SQLite database.
+- Generates local embeddings with ONNX Runtime and `all-MiniLM-L6-v2`.
+- Retrieves memories by semantic similarity with optional wing/room filters.
+- Provides a knowledge graph for temporal entity relationships.
+- Exposes MCP tools for assistants that support Model Context Protocol.
+- Offers a small Rust library API for embedding memory into other services.
 
 ## Storage
 
@@ -18,19 +25,19 @@ Collapses Python's dual-store (ChromaDB + SQLite) into **one file** at `~/.mempa
 | `entities` | KG entity nodes |
 | `triples` | KG temporal relationship edges |
 
-Embeddings are 384-dim `f32` vectors from `all-MiniLM-L6-v2`. Search is brute-force cosine similarity — instant for < 500K drawers.
+Embeddings are stored as `f32` vectors from `all-MiniLM-L6-v2`. Search uses local cosine similarity over the stored vectors.
 
 ---
 
 ## Installation
 
 ```bash
-git clone https://github.com/your-user/mempalace-rs
+git clone https://github.com/AncientiCe/mempalace-rs
 cd mempalace-rs
 cargo install --path .
 ```
 
-The first time you run `mine`, the embedding model (`all-MiniLM-L6-v2`, ~90 MB) is downloaded automatically from HuggingFace and cached.
+The first time you run `mine`, the embedding model is downloaded automatically from HuggingFace and cached.
 
 ---
 
@@ -124,9 +131,10 @@ Or add manually to `~/.claude/mcp_servers.json`:
 }
 ```
 
-### 19 MCP Tools
+### MCP Tools
 
-All tool names and input schemas are identical to the Python version:
+The server exposes tools for status, taxonomy, search, drawer CRUD, knowledge
+graph operations, graph tunnels, hook acknowledgements, and agent diaries:
 
 | Tool | Description |
 |---|---|
@@ -201,7 +209,7 @@ rooms:
 
 ---
 
-## 4-Layer Memory Stack
+## Memory Stack
 
 | Layer | Name | Description |
 |---|---|---|

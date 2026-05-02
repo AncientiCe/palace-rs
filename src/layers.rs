@@ -223,10 +223,11 @@ impl Layer3 {
             room: room.map(String::from),
         };
 
-        let results = match crate::store::vector_search(conn, &embedding, &filter, n_results) {
-            Ok(r) => r,
-            Err(e) => return format!("Search error: {e}"),
-        };
+        let results =
+            match crate::ranker::hybrid_search(conn, query, Some(&embedding), &filter, n_results) {
+                Ok(r) => r,
+                Err(e) => return format!("Search error: {e}"),
+            };
 
         if results.is_empty() {
             return "No results found.".to_string();
@@ -234,7 +235,7 @@ impl Layer3 {
 
         let mut lines = vec![format!("## L3 — SEARCH RESULTS for \"{query}\"")];
         for (i, r) in results.iter().enumerate() {
-            let snippet = r.text.trim().replace('\n', " ");
+            let snippet = r.drawer.text.trim().replace('\n', " ");
             let snippet = if snippet.len() > 300 {
                 format!("{}...", &snippet[..297])
             } else {
@@ -243,13 +244,13 @@ impl Layer3 {
             lines.push(format!(
                 "  [{}] {}/{} (sim={:.3})",
                 i + 1,
-                r.wing,
-                r.room,
-                r.similarity
+                r.drawer.wing,
+                r.drawer.room,
+                r.combined
             ));
             lines.push(format!("      {snippet}"));
-            if !r.source_file.is_empty() {
-                lines.push(format!("      src: {}", r.source_file));
+            if !r.drawer.source_file.is_empty() {
+                lines.push(format!("      src: {}", r.drawer.source_file));
             }
         }
 
@@ -273,7 +274,9 @@ impl Layer3 {
             room: room.map(String::from),
         };
 
-        crate::store::vector_search(conn, &embedding, &filter, n_results).unwrap_or_default()
+        crate::ranker::hybrid_search(conn, query, Some(&embedding), &filter, n_results)
+            .map(|results| results.into_iter().map(|result| result.drawer).collect())
+            .unwrap_or_default()
     }
 }
 

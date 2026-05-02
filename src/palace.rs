@@ -1,7 +1,7 @@
 //! High-level facade for embedding the memory palace as a library.
 //!
 //! `Palace` owns the SQLite connection and config, exposing an ergonomic API
-//! that callers (e.g. aice-backend) can use without importing individual modules.
+//! that callers can use without importing individual modules.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -12,12 +12,12 @@ use crate::embedder::embed_one;
 use crate::general_extractor::{extract_memories, Memory};
 use crate::knowledge_graph::{self as kg, KgStats, Triple};
 use crate::layers::{Layer3, MemoryStack};
-use crate::store::{self, DrawerFilter, SearchResult};
+use crate::store::{self, Drawer, DrawerFilter, SearchResult};
 
 const CONVO_WING: &str = "conversations";
 const CONVO_ROOM: &str = "voice_turns";
 const DEFAULT_IMPORTANCE: f64 = 3.0;
-const INGEST_ADDED_BY: &str = "aice";
+const DEFAULT_INGEST_LABEL: &str = "mempalace";
 
 /// High-level handle to a memory palace instance.
 ///
@@ -27,6 +27,7 @@ pub struct Palace {
     conn: Connection,
     config: MempalaceConfig,
     stack: MemoryStack,
+    ingest_label: String,
 }
 
 impl Palace {
@@ -41,6 +42,7 @@ impl Palace {
             conn,
             config,
             stack,
+            ingest_label: DEFAULT_INGEST_LABEL.to_string(),
         })
     }
 
@@ -54,6 +56,7 @@ impl Palace {
             conn,
             config,
             stack,
+            ingest_label: DEFAULT_INGEST_LABEL.to_string(),
         })
     }
 
@@ -67,7 +70,26 @@ impl Palace {
             conn,
             config,
             stack,
+            ingest_label: DEFAULT_INGEST_LABEL.to_string(),
         })
+    }
+
+    /// Set the label used for memories ingested through this facade.
+    ///
+    /// Library consumers can use this to identify their integration without
+    /// baking private downstream names into the public crate.
+    pub fn set_ingest_label(&mut self, label: impl Into<String>) {
+        let label = label.into();
+        self.ingest_label = if label.trim().is_empty() {
+            DEFAULT_INGEST_LABEL.to_string()
+        } else {
+            label
+        };
+    }
+
+    /// Label used in the `added_by` column for facade-driven ingestion.
+    pub fn ingest_label(&self) -> &str {
+        &self.ingest_label
     }
 
     // ── Layer stack ──────────────────────────────────────────────────────────
@@ -98,7 +120,14 @@ impl Palace {
     /// Deep L3 semantic search, returning structured results.
     pub fn search(&self, query: &str, n_results: usize) -> Result<Vec<SearchResult>> {
         let embedding = embed_one(query)?;
-        store::vector_search(&self.conn, &embedding, &DrawerFilter::default(), n_results)
+        let results = crate::ranker::hybrid_search(
+            &self.conn,
+            query,
+            Some(&embedding),
+            &DrawerFilter::default(),
+            n_results,
+        )?;
+        Ok(results.into_iter().map(|result| result.drawer).collect())
     }
 
     /// Filtered semantic search.
@@ -114,7 +143,26 @@ impl Palace {
             wing: wing.map(String::from),
             room: room.map(String::from),
         };
-        store::vector_search(&self.conn, &embedding, &filter, n_results)
+        let results =
+            crate::ranker::hybrid_search(&self.conn, query, Some(&embedding), &filter, n_results)?;
+        Ok(results.into_iter().map(|result| result.drawer).collect())
+    }
+
+    /// Return the best-matching drawer plus adjacent chunks from the same source file.
+    pub fn drawer_grep(&self, query: &str, context_radius: usize) -> Result<Vec<Drawer>> {
+        let best = self.search(query, 1)?.into_iter().next();
+        let Some(best) = best else {
+            return Ok(Vec::new());
+        };
+        let Some(drawer) = store::get_drawer(&self.conn, &best.id)? else {
+            return Ok(Vec::new());
+        };
+        store::source_context(
+            &self.conn,
+            &drawer.source_file,
+            drawer.chunk_index,
+            context_radius,
+        )
     }
 
     // ── Drawer operations ────────────────────────────────────────────────────
@@ -139,7 +187,7 @@ impl Palace {
             Some(&embedding),
             source,
             0,
-            INGEST_ADDED_BY,
+            &self.ingest_label,
             importance,
         )
     }
@@ -168,7 +216,7 @@ impl Palace {
             Some(&embedding),
             "voice_turn",
             0,
-            INGEST_ADDED_BY,
+            &self.ingest_label,
             DEFAULT_IMPORTANCE,
         )?;
 
@@ -190,7 +238,7 @@ impl Palace {
             Some(&embedding),
             "extracted",
             mem.chunk_index,
-            INGEST_ADDED_BY,
+            &self.ingest_label,
             DEFAULT_IMPORTANCE + 1.0,
         )?;
         Ok(())
@@ -285,6 +333,25 @@ mod tests {
             .ingest_turn("What is the weather?", "The weather is sunny today.")
             .unwrap();
         assert!(palace.drawer_count().unwrap() >= 1);
+    }
+
+    #[test]
+    fn ingest_turn_uses_public_default_ingest_label() {
+        let palace = Palace::open_in_memory().unwrap();
+        palace
+            .ingest_turn("Remember this", "Stored for later.")
+            .unwrap();
+
+        let added_by: String = palace
+            .conn()
+            .query_row(
+                "SELECT added_by FROM drawers WHERE source_file = 'voice_turn'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(added_by, "mempalace");
     }
 
     #[test]

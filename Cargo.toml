@@ -1,9 +1,16 @@
 [package]
-name = "mempalace"
-version = "3.0.0"
+name = "mempalace-rust"
+version = "0.1.0"
 edition = "2021"
 description = "Local memory palace for AI assistants — Rust edition"
 license = "MIT"
+repository = "https://github.com/AncientiCe/mempalace-rs"
+homepage = "https://github.com/AncientiCe/mempalace-rs"
+documentation = "https://docs.rs/mempalace-rust"
+readme = "README.md"
+rust-version = "1.82"
+keywords = ["memory", "ai", "mcp", "llm", "embeddings"]
+categories = ["database", "text-processing"]
 
 [[bin]]
 name = "mempalace"
@@ -17,6 +24,7 @@ path = "src/lib.rs"
 [features]
 default = ["cli"]
 cli = ["dep:clap"]
+llm = []
 
 [dependencies]
 # CLI (optional — only needed for the binary)

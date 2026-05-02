@@ -41,7 +41,7 @@ Fix any failure before marking the task complete.
 
 ## 4. Library-First Design
 
-- This crate is **consumed as a library** by `aice-backend` and potentially other Rust crates. Every public API change can break consumers.
+- This crate is **consumed as a library** by Rust applications. Every public API change can break consumers.
 - Before changing public types, functions, or module structure, consider: downstream callers, the `Palace` facade, SQLite schema migrations, and embedding model compatibility.
 - Keep the public API surface minimal and ergonomic. The `Palace` struct in `src/palace.rs` is the primary facade for library consumers.
 - The CLI (`src/cli.rs`) is behind the `cli` feature flag and is secondary to the library API.

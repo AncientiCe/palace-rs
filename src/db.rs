@@ -3,7 +3,7 @@
 //! Single palace.db file replaces both ChromaDB (drawers) and SQLite KG (triples).
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags};
 use std::path::Path;
 
 /// Open (or create) the palace SQLite database with WAL mode enabled.
@@ -39,6 +39,12 @@ pub fn open_in_memory() -> Result<Connection> {
 fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
+        -- ── Metadata ─────────────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
         -- ── Drawers ──────────────────────────────────────────────────────────
         -- Replaces ChromaDB mempalace_drawers collection.
         -- embedding is a little-endian f32 byte array (384 floats = 1536 bytes).
@@ -52,11 +58,58 @@ fn migrate(conn: &Connection) -> Result<()> {
             chunk_index INTEGER NOT NULL DEFAULT 0,
             added_by    TEXT NOT NULL DEFAULT 'mempalace',
             filed_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            importance  REAL NOT NULL DEFAULT 3.0
+            importance  REAL NOT NULL DEFAULT 3.0,
+            created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            entity_metadata TEXT NOT NULL DEFAULT '{}',
+            hall        TEXT,
+            normalize_version INTEGER NOT NULL DEFAULT 0,
+            metadata    TEXT NOT NULL DEFAULT '{}'
         );
         CREATE INDEX IF NOT EXISTS idx_drawers_wing ON drawers(wing);
         CREATE INDEX IF NOT EXISTS idx_drawers_room ON drawers(room);
         CREATE INDEX IF NOT EXISTS idx_drawers_source ON drawers(source_file);
+
+        -- ── Closets ──────────────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS closets (
+            id          TEXT PRIMARY KEY,
+            wing        TEXT NOT NULL,
+            room        TEXT NOT NULL,
+            topic       TEXT NOT NULL,
+            pointer_drawer_ids TEXT NOT NULL DEFAULT '[]',
+            embedding   BLOB,
+            created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_closets_wing_room ON closets(wing, room);
+        CREATE INDEX IF NOT EXISTS idx_closets_topic ON closets(topic);
+
+        -- ── Tunnels ──────────────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS tunnels (
+            id          TEXT PRIMARY KEY,
+            wing_a      TEXT NOT NULL,
+            room_a      TEXT NOT NULL,
+            wing_b      TEXT NOT NULL,
+            room_b      TEXT NOT NULL,
+            kind        TEXT NOT NULL DEFAULT 'explicit',
+            created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(wing_a, room_a, wing_b, room_b, kind)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tunnels_a ON tunnels(wing_a, room_a);
+        CREATE INDEX IF NOT EXISTS idx_tunnels_b ON tunnels(wing_b, room_b);
+
+        -- ── BM25 index ───────────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS bm25_terms (
+            drawer_id   TEXT NOT NULL REFERENCES drawers(id) ON DELETE CASCADE,
+            term        TEXT NOT NULL,
+            tf          INTEGER NOT NULL,
+            PRIMARY KEY(drawer_id, term)
+        );
+        CREATE INDEX IF NOT EXISTS idx_bm25_terms_term ON bm25_terms(term);
+
+        CREATE TABLE IF NOT EXISTS bm25_doc_stats (
+            drawer_id   TEXT PRIMARY KEY REFERENCES drawers(id) ON DELETE CASCADE,
+            doc_len     INTEGER NOT NULL,
+            updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
 
         -- ── KG Entities ───────────────────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS entities (
@@ -87,5 +140,60 @@ fn migrate(conn: &Connection) -> Result<()> {
         "#,
     )
     .context("running schema migrations")?;
+
+    add_column_if_missing(conn, "drawers", "created_at", "TEXT NOT NULL DEFAULT ''")?;
+    add_column_if_missing(
+        conn,
+        "drawers",
+        "entity_metadata",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )?;
+    add_column_if_missing(conn, "drawers", "hall", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "drawers",
+        "normalize_version",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "drawers", "metadata", "TEXT NOT NULL DEFAULT '{}'")?;
+
+    conn.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_drawers_created_at ON drawers(created_at);
+        CREATE INDEX IF NOT EXISTS idx_drawers_hall ON drawers(hall);
+        "#,
+    )
+    .context("creating phase one drawer indexes")?;
+
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params!["schema_version", "1"],
+    )
+    .context("recording schema version")?;
+    Ok(())
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .with_context(|| format!("reading columns for {table}"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if columns.iter().any(|existing| existing == column) {
+        return Ok(());
+    }
+
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    )
+    .with_context(|| format!("adding {table}.{column}"))?;
     Ok(())
 }

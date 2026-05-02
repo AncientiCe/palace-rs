@@ -20,6 +20,21 @@ pub const DEFAULT_TOPIC_WINGS: &[&str] = &[
     "creative",
 ];
 
+pub fn normalize_wing_name(name: &str) -> String {
+    let mut normalized = String::new();
+    let mut previous_was_separator = false;
+    for ch in name.trim().to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch);
+            previous_was_separator = false;
+        } else if !previous_was_separator && !normalized.is_empty() {
+            normalized.push('_');
+            previous_was_separator = true;
+        }
+    }
+    normalized.trim_matches('_').to_string()
+}
+
 fn default_hall_keywords() -> HashMap<String, Vec<String>> {
     let mut m = HashMap::new();
     m.insert(
@@ -100,6 +115,7 @@ struct FileConfig {
     topic_wings: Option<Vec<String>>,
     hall_keywords: Option<HashMap<String, Vec<String>>>,
     people_map: Option<HashMap<String, String>>,
+    entity_languages: Option<Vec<String>>,
 }
 
 /// Runtime configuration for MemPalace.
@@ -196,6 +212,22 @@ impl MempalaceConfig {
         self.file_config.people_map.clone().unwrap_or_default()
     }
 
+    pub fn entity_languages(&self) -> Vec<String> {
+        if let Ok(value) = std::env::var("MEMPALACE_ENTITY_LANGUAGES") {
+            let langs: Vec<String> = value
+                .split(',')
+                .filter_map(crate::i18n::canonical_language)
+                .collect();
+            if !langs.is_empty() {
+                return langs;
+            }
+        }
+        self.file_config
+            .entity_languages
+            .clone()
+            .unwrap_or_else(|| vec!["en".to_string()])
+    }
+
     pub fn identity_path(&self) -> PathBuf {
         self.config_dir.join("identity.txt")
     }
@@ -214,6 +246,7 @@ impl MempalaceConfig {
                 "collection_name": DEFAULT_COLLECTION_NAME,
                 "topic_wings": DEFAULT_TOPIC_WINGS,
                 "hall_keywords": default_hall_keywords(),
+                "entity_languages": ["en"],
             });
             std::fs::write(&config_file, serde_json::to_string_pretty(&default)?)?;
         }

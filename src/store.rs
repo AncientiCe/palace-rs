@@ -21,7 +21,12 @@ pub struct Drawer {
     pub chunk_index: i64,
     pub added_by: String,
     pub filed_at: String,
+    pub created_at: String,
     pub importance: f64,
+    pub entity_metadata: serde_json::Value,
+    pub hall: Option<String>,
+    pub normalize_version: i64,
+    pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +36,7 @@ pub struct SearchResult {
     pub wing: String,
     pub room: String,
     pub source_file: String,
+    pub created_at: String,
     pub similarity: f64,
 }
 
@@ -68,15 +74,36 @@ pub fn add_drawer(
     let id = drawer_id(wing, room, source_file, chunk_index);
     let blob = embedding.map(vec_to_blob);
     let filed_at = Utc::now().to_rfc3339();
+    let entity_metadata = crate::entity_detector::entity_metadata(content);
+    let entity_metadata_text =
+        serde_json::to_string(&entity_metadata).unwrap_or_else(|_| "{}".to_string());
+    let hall = crate::hall_router::detect_hall(content);
 
     let rows = conn
         .execute(
             "INSERT OR IGNORE INTO drawers
-             (id, wing, room, content, embedding, source_file, chunk_index, added_by, filed_at, importance)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![id, wing, room, content, blob, source_file, chunk_index as i64, added_by, filed_at, importance],
+             (id, wing, room, content, embedding, source_file, chunk_index, added_by, filed_at,
+              importance, created_at, entity_metadata, hall)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?9, ?11, ?12)",
+            params![
+                id,
+                wing,
+                room,
+                content,
+                blob,
+                source_file,
+                chunk_index as i64,
+                added_by,
+                filed_at,
+                importance,
+                entity_metadata_text,
+                hall
+            ],
         )
         .context("inserting drawer")?;
+    if rows > 0 {
+        index_bm25_terms(conn, &id, content)?;
+    }
 
     Ok((rows > 0, id))
 }
@@ -96,35 +123,41 @@ pub fn add_drawer_with_id(
 ) -> Result<bool> {
     let blob = embedding.map(vec_to_blob);
     let filed_at = Utc::now().to_rfc3339();
-
-    // Extra metadata (hall, topic, type, agent, date) stored in source_file field as JSON suffix.
-    let effective_source = if let Some(meta) = extra_meta {
-        format!(
-            "{}\x00{}",
-            source_file,
-            serde_json::to_string(meta).unwrap_or_default()
-        )
-    } else {
-        source_file.to_string()
-    };
+    let metadata = extra_meta.cloned().unwrap_or_else(|| serde_json::json!({}));
+    let metadata_text = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+    let hall = metadata
+        .get("hall")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::hall_router::detect_hall(content));
+    let entity_metadata = crate::entity_detector::entity_metadata(content);
+    let entity_metadata_text =
+        serde_json::to_string(&entity_metadata).unwrap_or_else(|_| "{}".to_string());
 
     let rows = conn
         .execute(
             "INSERT OR IGNORE INTO drawers
-             (id, wing, room, content, embedding, source_file, chunk_index, added_by, filed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)",
+             (id, wing, room, content, embedding, source_file, chunk_index, added_by, filed_at,
+              created_at, entity_metadata, hall, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?8, ?9, ?10, ?11)",
             params![
                 id,
                 wing,
                 room,
                 content,
                 blob,
-                effective_source,
+                source_file,
                 added_by,
-                filed_at
+                filed_at,
+                entity_metadata_text,
+                hall,
+                metadata_text
             ],
         )
         .context("inserting drawer with id")?;
+    if rows > 0 {
+        index_bm25_terms(conn, id, content)?;
+    }
     Ok(rows > 0)
 }
 
@@ -133,6 +166,25 @@ pub fn delete_drawer(conn: &Connection, id: &str) -> Result<bool> {
     let rows = conn
         .execute("DELETE FROM drawers WHERE id = ?1", params![id])
         .context("deleting drawer")?;
+    Ok(rows > 0)
+}
+
+pub fn update_drawer_content(conn: &Connection, id: &str, content: &str) -> Result<bool> {
+    let entity_metadata = crate::entity_detector::entity_metadata(content);
+    let entity_metadata_text =
+        serde_json::to_string(&entity_metadata).unwrap_or_else(|_| "{}".to_string());
+    let hall = crate::hall_router::detect_hall(content);
+    let rows = conn
+        .execute(
+            "UPDATE drawers
+             SET content = ?1, entity_metadata = ?2, hall = ?3
+             WHERE id = ?4",
+            params![content, entity_metadata_text, hall, id],
+        )
+        .context("updating drawer content")?;
+    if rows > 0 {
+        index_bm25_terms(conn, id, content)?;
+    }
     Ok(rows > 0)
 }
 
@@ -158,7 +210,8 @@ pub fn count_drawers(conn: &Connection) -> Result<i64> {
 pub fn list_drawers(conn: &Connection, filter: &DrawerFilter, limit: usize) -> Result<Vec<Drawer>> {
     let (where_clause, where_params) = build_where(filter);
     let sql = format!(
-        "SELECT id, wing, room, content, source_file, chunk_index, added_by, filed_at, importance
+        "SELECT id, wing, room, content, source_file, chunk_index, added_by, filed_at, created_at,
+                importance, entity_metadata, hall, normalize_version, metadata
          FROM drawers {where_clause} ORDER BY filed_at DESC LIMIT ?",
     );
 
@@ -168,19 +221,7 @@ pub fn list_drawers(conn: &Connection, filter: &DrawerFilter, limit: usize) -> R
 
     let rows = stmt.query_map(
         rusqlite::params_from_iter(bind_params.iter().map(|p| p.as_ref())),
-        |r| {
-            Ok(Drawer {
-                id: r.get(0)?,
-                wing: r.get(1)?,
-                room: r.get(2)?,
-                content: r.get(3)?,
-                source_file: r.get(4)?,
-                chunk_index: r.get(5)?,
-                added_by: r.get(6)?,
-                filed_at: r.get(7)?,
-                importance: r.get(8)?,
-            })
-        },
+        drawer_from_row,
     )?;
 
     rows.map(|r| r.context("reading drawer row")).collect()
@@ -189,28 +230,48 @@ pub fn list_drawers(conn: &Connection, filter: &DrawerFilter, limit: usize) -> R
 /// Get a single drawer by ID.
 pub fn get_drawer(conn: &Connection, id: &str) -> Result<Option<Drawer>> {
     let result = conn.query_row(
-        "SELECT id, wing, room, content, source_file, chunk_index, added_by, filed_at, importance
+        "SELECT id, wing, room, content, source_file, chunk_index, added_by, filed_at, created_at,
+                importance, entity_metadata, hall, normalize_version, metadata
          FROM drawers WHERE id = ?1",
         params![id],
-        |r| {
-            Ok(Drawer {
-                id: r.get(0)?,
-                wing: r.get(1)?,
-                room: r.get(2)?,
-                content: r.get(3)?,
-                source_file: r.get(4)?,
-                chunk_index: r.get(5)?,
-                added_by: r.get(6)?,
-                filed_at: r.get(7)?,
-                importance: r.get(8)?,
-            })
-        },
+        drawer_from_row,
     );
     match result {
         Ok(d) => Ok(Some(d)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Return drawers adjacent to a chunk from the same source file.
+pub fn source_context(
+    conn: &Connection,
+    source_file: &str,
+    center_chunk_index: i64,
+    radius: usize,
+) -> Result<Vec<Drawer>> {
+    let radius = radius as i64;
+    let mut stmt = conn.prepare(
+        "SELECT id, wing, room, content, source_file, chunk_index, added_by, filed_at, created_at,
+                importance, entity_metadata, hall, normalize_version, metadata
+         FROM drawers
+         WHERE source_file = ?1
+           AND chunk_index BETWEEN ?2 AND ?3
+         ORDER BY chunk_index",
+    )?;
+    let rows = stmt.query_map(
+        params![
+            source_file,
+            center_chunk_index.saturating_sub(radius),
+            center_chunk_index.saturating_add(radius)
+        ],
+        drawer_from_row,
+    )?;
+    rows.map(|row| row.context("source context row")).collect()
+}
+
+pub fn get_search_result_drawer(conn: &Connection, id: &str) -> Result<Option<Drawer>> {
+    get_drawer(conn, id)
 }
 
 /// Semantic vector search over drawers.
@@ -225,7 +286,7 @@ pub fn vector_search(
 ) -> Result<Vec<SearchResult>> {
     let (where_clause, where_params) = build_where(filter);
     let sql = format!(
-        "SELECT id, wing, room, content, source_file, embedding
+        "SELECT id, wing, room, content, source_file, created_at, embedding
          FROM drawers WHERE embedding IS NOT NULL {extra} ORDER BY filed_at DESC",
         extra = if where_clause.is_empty() {
             String::new()
@@ -245,14 +306,15 @@ pub fn vector_search(
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
-                r.get::<_, Vec<u8>>(5)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, Vec<u8>>(6)?,
             ))
         },
     )?;
 
     let mut scored: Vec<SearchResult> = rows
         .filter_map(|r| {
-            let (id, wing, room, content, source_file, blob) = r.ok()?;
+            let (id, wing, room, content, source_file, created_at, blob) = r.ok()?;
             let emb = blob_to_vec(&blob);
             let sim = cosine_similarity(query_vec, &emb) as f64;
             Some(SearchResult {
@@ -264,6 +326,7 @@ pub fn vector_search(
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| source_file.clone()),
+                created_at,
                 similarity: (sim * 1000.0).round() / 1000.0,
             })
         })
@@ -339,22 +402,11 @@ pub fn taxonomy(conn: &Connection) -> Result<HashMap<String, HashMap<String, i64
 /// List all drawers ordered by importance DESC, limited to `limit`.
 pub fn list_by_importance(conn: &Connection, limit: usize) -> Result<Vec<Drawer>> {
     let mut stmt = conn.prepare(
-        "SELECT id, wing, room, content, source_file, chunk_index, added_by, filed_at, importance
+        "SELECT id, wing, room, content, source_file, chunk_index, added_by, filed_at, created_at,
+                importance, entity_metadata, hall, normalize_version, metadata
          FROM drawers ORDER BY importance DESC LIMIT ?1",
     )?;
-    let rows = stmt.query_map(params![limit as i64], |r| {
-        Ok(Drawer {
-            id: r.get(0)?,
-            wing: r.get(1)?,
-            room: r.get(2)?,
-            content: r.get(3)?,
-            source_file: r.get(4)?,
-            chunk_index: r.get(5)?,
-            added_by: r.get(6)?,
-            filed_at: r.get(7)?,
-            importance: r.get(8)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![limit as i64], drawer_from_row)?;
     rows.map(|r| r.context("importance list row")).collect()
 }
 
@@ -407,4 +459,64 @@ fn build_where(filter: &DrawerFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>)
     } else {
         (format!("WHERE {}", clauses.join(" AND ")), params)
     }
+}
+
+fn drawer_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Drawer> {
+    let entity_metadata_text: String = row.get(10)?;
+    let metadata_text: String = row.get(13)?;
+    Ok(Drawer {
+        id: row.get(0)?,
+        wing: row.get(1)?,
+        room: row.get(2)?,
+        content: row.get(3)?,
+        source_file: row.get(4)?,
+        chunk_index: row.get(5)?,
+        added_by: row.get(6)?,
+        filed_at: row.get(7)?,
+        created_at: row.get(8)?,
+        importance: row.get(9)?,
+        entity_metadata: parse_json_object(&entity_metadata_text),
+        hall: row.get(11)?,
+        normalize_version: row.get(12)?,
+        metadata: parse_json_object(&metadata_text),
+    })
+}
+
+fn parse_json_object(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn index_bm25_terms(conn: &Connection, drawer_id: &str, content: &str) -> Result<()> {
+    let terms = crate::ranker::tokenize(content);
+    let doc_len = terms.len() as i64;
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    for term in terms {
+        *counts.entry(term).or_default() += 1;
+    }
+
+    conn.execute(
+        "INSERT INTO bm25_doc_stats (drawer_id, doc_len)
+         VALUES (?1, ?2)
+         ON CONFLICT(drawer_id) DO UPDATE SET
+            doc_len = excluded.doc_len,
+            updated_at = CURRENT_TIMESTAMP",
+        params![drawer_id, doc_len],
+    )
+    .context("upserting BM25 doc stats")?;
+
+    conn.execute(
+        "DELETE FROM bm25_terms WHERE drawer_id = ?1",
+        params![drawer_id],
+    )
+    .context("clearing old BM25 terms")?;
+
+    for (term, tf) in counts {
+        conn.execute(
+            "INSERT INTO bm25_terms (drawer_id, term, tf) VALUES (?1, ?2, ?3)",
+            params![drawer_id, term, tf],
+        )
+        .context("inserting BM25 term")?;
+    }
+
+    Ok(())
 }

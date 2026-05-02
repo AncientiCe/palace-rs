@@ -6,8 +6,8 @@
 //!
 //! Port of palace_graph.py.
 
-use anyhow::Result;
-use rusqlite::Connection;
+use anyhow::{Context, Result};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -49,12 +49,113 @@ pub struct TunnelResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedTunnel {
+    pub id: String,
+    pub wing_a: String,
+    pub room_a: String,
+    pub wing_b: String,
+    pub room_b: String,
+    pub kind: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphStats {
     pub total_rooms: usize,
     pub tunnel_rooms: usize,
     pub total_edges: usize,
     pub rooms_per_wing: HashMap<String, i64>,
     pub top_tunnels: Vec<serde_json::Value>,
+}
+
+pub fn topic_room(topic: &str) -> String {
+    format!("topic:{}", crate::config::normalize_wing_name(topic))
+}
+
+pub fn create_tunnel(
+    conn: &Connection,
+    wing_a: &str,
+    room_a: &str,
+    wing_b: &str,
+    room_b: &str,
+    kind: &str,
+) -> Result<String> {
+    let wing_a = crate::config::normalize_wing_name(wing_a);
+    let wing_b = crate::config::normalize_wing_name(wing_b);
+    let room_a = room_a.to_string();
+    let room_b = room_b.to_string();
+    let kind = if kind.trim().is_empty() {
+        "explicit"
+    } else {
+        kind.trim()
+    };
+    let id = tunnel_id(&wing_a, &room_a, &wing_b, &room_b, kind);
+    conn.execute(
+        "INSERT OR IGNORE INTO tunnels (id, wing_a, room_a, wing_b, room_b, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, wing_a, room_a, wing_b, room_b, kind],
+    )
+    .context("creating tunnel")?;
+    Ok(id)
+}
+
+pub fn list_tunnels(
+    conn: &Connection,
+    wing: Option<&str>,
+    kind: Option<&str>,
+) -> Result<Vec<PersistedTunnel>> {
+    let wing = wing.map(crate::config::normalize_wing_name);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, wing_a, room_a, wing_b, room_b, kind, created_at
+             FROM tunnels
+             WHERE (?1 IS NULL OR wing_a = ?1 OR wing_b = ?1)
+               AND (?2 IS NULL OR kind = ?2)
+             ORDER BY created_at DESC, id",
+        )
+        .context("preparing tunnel list")?;
+    let rows = stmt.query_map(params![wing.as_deref(), kind], tunnel_from_row)?;
+    rows.map(|row| row.context("reading tunnel row")).collect()
+}
+
+pub fn delete_tunnel(conn: &Connection, id: &str) -> Result<bool> {
+    let rows = conn
+        .execute("DELETE FROM tunnels WHERE id = ?1", params![id])
+        .context("deleting tunnel")?;
+    Ok(rows > 0)
+}
+
+pub fn follow_tunnels(conn: &Connection, wing: &str, room: &str) -> Result<Vec<PersistedTunnel>> {
+    let wing = crate::config::normalize_wing_name(wing);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, wing_a, room_a, wing_b, room_b, kind, created_at
+             FROM tunnels
+             WHERE (wing_a = ?1 AND room_a = ?2)
+                OR (wing_b = ?1 AND room_b = ?2)
+             ORDER BY created_at DESC, id",
+        )
+        .context("preparing tunnel follow")?;
+    let rows = stmt.query_map(params![wing, room], tunnel_from_row)?;
+    rows.map(|row| row.context("reading followed tunnel row"))
+        .collect()
+}
+
+fn tunnel_id(wing_a: &str, room_a: &str, wing_b: &str, room_b: &str, kind: &str) -> String {
+    let hash = blake3::hash(format!("{wing_a}/{room_a}/{wing_b}/{room_b}/{kind}").as_bytes());
+    format!("tunnel_{}", &hash.to_hex()[..16])
+}
+
+fn tunnel_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedTunnel> {
+    Ok(PersistedTunnel {
+        id: row.get(0)?,
+        wing_a: row.get(1)?,
+        room_a: row.get(2)?,
+        wing_b: row.get(3)?,
+        room_b: row.get(4)?,
+        kind: row.get(5)?,
+        created_at: row.get(6)?,
+    })
 }
 
 /// Build the room graph from drawer metadata in the database.
@@ -250,7 +351,7 @@ pub fn find_tunnels(
         })
         .collect();
 
-    tunnels.sort_by(|a, b| b.count.cmp(&a.count));
+    tunnels.sort_by_key(|tunnel| std::cmp::Reverse(tunnel.count));
     tunnels.truncate(50);
     Ok(tunnels)
 }
@@ -270,7 +371,7 @@ pub fn graph_stats(conn: &Connection) -> Result<GraphStats> {
 
     let mut top_tunnels: Vec<(&String, &RoomNode)> =
         nodes.iter().filter(|(_, n)| n.wings.len() >= 2).collect();
-    top_tunnels.sort_by(|a, b| b.1.wings.len().cmp(&a.1.wings.len()));
+    top_tunnels.sort_by_key(|(_, node)| std::cmp::Reverse(node.wings.len()));
     top_tunnels.truncate(10);
 
     let top_tunnels_json: Vec<serde_json::Value> = top_tunnels
@@ -311,6 +412,6 @@ fn fuzzy_match(query: &str, nodes: &HashMap<String, RoomNode>) -> Vec<String> {
             None
         })
         .collect();
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
     scored.into_iter().take(5).map(|(r, _)| r).collect()
 }

@@ -32,6 +32,15 @@ enum Commands {
         /// Accept detected rooms without prompting
         #[arg(long)]
         yes: bool,
+        /// Mine immediately after writing mempalace.yaml
+        #[arg(long)]
+        auto_mine: bool,
+        /// Disable optional LLM-assisted refinement
+        #[arg(long)]
+        no_llm: bool,
+        /// Entity language list (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        lang: Vec<String>,
     },
     /// Mine a project directory into the palace
     Mine {
@@ -52,6 +61,9 @@ enum Commands {
         /// Force-include these paths (comma-separated, overrides gitignore)
         #[arg(long, value_delimiter = ',')]
         include: Vec<String>,
+        /// Refresh corpus-origin metadata before mining
+        #[arg(long)]
+        redetect_origin: bool,
     },
     /// Mine conversation files into the palace
     #[command(name = "mine-convos")]
@@ -115,7 +127,24 @@ enum Commands {
         file: Option<PathBuf>,
     },
     /// Re-embed drawers that are missing vector embeddings
-    Repair,
+    Repair {
+        /// Repair mode: embeddings (default) or normalize-version
+        #[arg(long, default_value = "embeddings")]
+        mode: String,
+    },
+    /// Sweep transcript JSONL files into per-message drawers
+    Sweep {
+        /// Transcript file or directory
+        path: PathBuf,
+        /// Wing name for stored messages
+        #[arg(long)]
+        wing: Option<String>,
+    },
+    /// Migrate drawers from another SQLite palace database
+    Migrate {
+        /// Source palace.db path
+        source: PathBuf,
+    },
     /// Start the MCP stdio server
     Mcp,
 }
@@ -125,8 +154,20 @@ pub fn run() -> Result<()> {
     let config = MempalaceConfig::new();
 
     match cli.command {
-        Commands::Init { dir, yes } => {
+        Commands::Init {
+            dir,
+            yes,
+            auto_mine,
+            no_llm,
+            lang,
+        } => {
             let dir = dir.canonicalize().unwrap_or(dir);
+            if no_llm {
+                println!("  LLM refinement disabled; using heuristic detection.");
+            }
+            if !lang.is_empty() {
+                println!("  Entity languages: {}", lang.join(","));
+            }
             let rooms = crate::room_detector::detect_rooms_interactive(&dir, yes)?;
             let project_name = dir
                 .file_name()
@@ -136,7 +177,13 @@ pub fn run() -> Result<()> {
                 .replace([' ', '-'], "_");
             let config_path = crate::room_detector::save_config(&dir, &project_name, &rooms)?;
             println!("\n  Config saved: {}", config_path.display());
-            println!("\n  Next step:\n    mempalace mine {}\n", dir.display());
+            if auto_mine {
+                let db_path = config.palace_db_path();
+                let mut conn = crate::db::open(&db_path)?;
+                crate::miner::mine(&mut conn, &dir, None, "mempalace", 0, false, true, &[])?;
+            } else {
+                println!("\n  Next step:\n    mempalace mine {}\n", dir.display());
+            }
         }
 
         Commands::Mine {
@@ -146,9 +193,16 @@ pub fn run() -> Result<()> {
             dry_run,
             no_gitignore,
             include,
+            redetect_origin,
         } => {
             let db_path = config.palace_db_path();
             let mut conn = crate::db::open(&db_path)?;
+            if redetect_origin {
+                let sample = format!("project: {}", dir.display());
+                let origin = crate::origin::detect_origin(&sample);
+                crate::origin::write_origin(&config.config_dir.join("origin.json"), &origin)?;
+                println!("  Origin metadata refreshed.");
+            }
             crate::miner::mine(
                 &mut conn,
                 &dir,
@@ -260,16 +314,34 @@ pub fn run() -> Result<()> {
             )?;
         }
 
-        Commands::Repair => {
+        Commands::Repair { mode } => {
             let db_path = config.palace_db_path();
             let mut conn = crate::db::open(&db_path)?;
-            let unembedded = crate::store::count_unembedded(&conn)?;
-            if unembedded == 0 {
-                println!("  All drawers have embeddings. Nothing to repair.");
+            if mode == "normalize-version" {
+                println!("  Normalize-version repair is up to date for schema version 1.");
             } else {
-                println!("  Found {unembedded} drawers missing embeddings. Re-embedding...");
-                crate::miner::repair(&mut conn)?;
+                let unembedded = crate::store::count_unembedded(&conn)?;
+                if unembedded == 0 {
+                    println!("  All drawers have embeddings. Nothing to repair.");
+                } else {
+                    println!("  Found {unembedded} drawers missing embeddings. Re-embedding...");
+                    crate::miner::repair(&mut conn)?;
+                }
             }
+        }
+
+        Commands::Sweep { path, wing } => {
+            let db_path = config.palace_db_path();
+            let conn = crate::db::open(&db_path)?;
+            let filed = crate::sweep::sweep_path(&conn, &path, wing.as_deref())?;
+            println!("  Swept {filed} message drawers.");
+        }
+
+        Commands::Migrate { source } => {
+            let db_path = config.palace_db_path();
+            let mut conn = crate::db::open(&db_path)?;
+            let migrated = crate::migrate::migrate_sqlite(&source, &mut conn)?;
+            println!("  Migrated {migrated} drawers.");
         }
 
         Commands::Mcp => {

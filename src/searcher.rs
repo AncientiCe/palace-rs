@@ -4,7 +4,8 @@
 //! returns verbatim text with similarity scores. Port of searcher.py.
 
 use crate::embedder::embed_one;
-use crate::store::{vector_search, DrawerFilter};
+use crate::ranker::hybrid_search;
+use crate::store::DrawerFilter;
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -21,7 +22,7 @@ pub fn search_and_print(
         wing: wing.map(String::from),
         room: room.map(String::from),
     };
-    let results = vector_search(conn, &embedding, &filter, n_results)?;
+    let results = hybrid_search(conn, query, Some(&embedding), &filter, n_results)?;
 
     println!("\n{}", "=".repeat(60));
     println!("  Results for: \"{query}\"");
@@ -39,11 +40,17 @@ pub fn search_and_print(
     }
 
     for (i, result) in results.iter().enumerate() {
-        println!("  [{}] {} / {}", i + 1, result.wing, result.room);
-        println!("      Source: {}", result.source_file);
-        println!("      Match:  {:.3}", result.similarity);
+        println!(
+            "  [{}] {} / {}",
+            i + 1,
+            result.drawer.wing,
+            result.drawer.room
+        );
+        println!("      Source: {}", result.drawer.source_file);
+        println!("      Match:  {:.3}", result.combined);
+        println!("      cosine={:.3} bm25={:.3}", result.cosine, result.bm25);
         println!();
-        for line in result.text.trim().lines() {
+        for line in result.drawer.text.trim().lines() {
             println!("      {line}");
         }
         println!();
@@ -76,7 +83,7 @@ pub fn search_memories(
         room: room.map(String::from),
     };
 
-    let results = match vector_search(conn, &embedding, &filter, n_results) {
+    let results = match hybrid_search(conn, query, Some(&embedding), &filter, n_results) {
         Ok(r) => r,
         Err(e) => {
             return serde_json::json!({
@@ -89,11 +96,14 @@ pub fn search_memories(
         .iter()
         .map(|r| {
             serde_json::json!({
-                "text": r.text,
-                "wing": r.wing,
-                "room": r.room,
-                "source_file": r.source_file,
-                "similarity": r.similarity,
+                "text": r.drawer.text,
+                "wing": r.drawer.wing,
+                "room": r.drawer.room,
+                "source_file": r.drawer.source_file,
+                "created_at": r.drawer.created_at,
+                "similarity": r.combined,
+                "cosine": r.cosine,
+                "bm25": r.bm25,
             })
         })
         .collect();

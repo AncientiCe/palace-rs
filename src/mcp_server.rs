@@ -20,7 +20,7 @@ use crate::palace_graph;
 use crate::searcher::search_memories;
 use crate::store::{
     add_drawer_with_id, check_duplicate, count_drawers, delete_drawer, diary_id, get_drawer,
-    room_counts, taxonomy, wing_counts,
+    list_drawers, room_counts, taxonomy, update_drawer_content, wing_counts, DrawerFilter,
 };
 
 /// Run the MCP stdio server. Blocks until stdin closes.
@@ -86,11 +86,17 @@ fn handle_request(conn: &Connection, config: &MempalaceConfig, req: &Value) -> O
     let req_id = req.get("id").cloned().unwrap_or(Value::Null);
 
     let result = match method {
-        "initialize" => Some(json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "mempalace", "version": env!("CARGO_PKG_VERSION")},
-        })),
+        "initialize" => {
+            let protocol_version = params
+                .get("protocolVersion")
+                .and_then(|value| value.as_str())
+                .unwrap_or("2024-11-05");
+            Some(json!({
+                "protocolVersion": protocol_version,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "mempalace", "version": env!("CARGO_PKG_VERSION")},
+            }))
+        }
         "notifications/initialized" => return None,
         "tools/list" => Some(json!({"tools": tool_list()})),
         "tools/call" => {
@@ -142,6 +148,16 @@ fn dispatch_tool(conn: &Connection, config: &MempalaceConfig, name: &str, args: 
         "mempalace_traverse" => tool_traverse(conn, args),
         "mempalace_find_tunnels" => tool_find_tunnels(conn, args),
         "mempalace_graph_stats" => tool_graph_stats(conn),
+        "mempalace_create_tunnel" => tool_create_tunnel(conn, args),
+        "mempalace_list_tunnels" => tool_list_tunnels(conn, args),
+        "mempalace_delete_tunnel" => tool_delete_tunnel(conn, args),
+        "mempalace_follow_tunnels" => tool_follow_tunnels(conn, args),
+        "mempalace_get_drawer" => tool_get_drawer(conn, args),
+        "mempalace_list_drawers" => tool_list_drawers(conn, args),
+        "mempalace_update_drawer" => tool_update_drawer(conn, args),
+        "mempalace_hook_settings" => json!({"save_enabled": true, "precompact_enabled": true}),
+        "mempalace_memories_filed_away" => json!({"success": true}),
+        "mempalace_list_agents" => tool_list_agents(conn),
         "mempalace_diary_write" => tool_diary_write(conn, args),
         "mempalace_diary_read" => tool_diary_read(conn, args),
         _ => json!({"error": format!("Unknown tool: {name}")}),
@@ -418,6 +434,118 @@ fn tool_graph_stats(conn: &Connection) -> Value {
     }
 }
 
+fn tool_create_tunnel(conn: &Connection, args: &Value) -> Value {
+    let wing_a = match str_arg(args, "wing_a") {
+        Some(value) => value,
+        None => return json!({"error": "wing_a is required"}),
+    };
+    let room_a = match str_arg(args, "room_a") {
+        Some(value) => value,
+        None => return json!({"error": "room_a is required"}),
+    };
+    let wing_b = match str_arg(args, "wing_b") {
+        Some(value) => value,
+        None => return json!({"error": "wing_b is required"}),
+    };
+    let room_b = match str_arg(args, "room_b") {
+        Some(value) => value,
+        None => return json!({"error": "room_b is required"}),
+    };
+    let kind = str_arg(args, "kind").unwrap_or_else(|| "explicit".to_string());
+    match palace_graph::create_tunnel(conn, &wing_a, &room_a, &wing_b, &room_b, &kind) {
+        Ok(id) => json!({"success": true, "tunnel_id": id}),
+        Err(err) => json!({"success": false, "error": err.to_string()}),
+    }
+}
+
+fn tool_list_tunnels(conn: &Connection, args: &Value) -> Value {
+    let wing = str_arg(args, "wing");
+    let kind = str_arg(args, "kind");
+    match palace_graph::list_tunnels(conn, wing.as_deref(), kind.as_deref()) {
+        Ok(tunnels) => json!({"tunnels": tunnels, "count": tunnels.len()}),
+        Err(err) => json!({"error": err.to_string()}),
+    }
+}
+
+fn tool_delete_tunnel(conn: &Connection, args: &Value) -> Value {
+    let id = match str_arg(args, "tunnel_id") {
+        Some(value) => value,
+        None => return json!({"success": false, "error": "tunnel_id is required"}),
+    };
+    match palace_graph::delete_tunnel(conn, &id) {
+        Ok(deleted) => json!({"success": deleted, "tunnel_id": id}),
+        Err(err) => json!({"success": false, "error": err.to_string()}),
+    }
+}
+
+fn tool_follow_tunnels(conn: &Connection, args: &Value) -> Value {
+    let wing = match str_arg(args, "wing") {
+        Some(value) => value,
+        None => return json!({"error": "wing is required"}),
+    };
+    let room = match str_arg(args, "room") {
+        Some(value) => value,
+        None => return json!({"error": "room is required"}),
+    };
+    match palace_graph::follow_tunnels(conn, &wing, &room) {
+        Ok(tunnels) => json!({"tunnels": tunnels, "count": tunnels.len()}),
+        Err(err) => json!({"error": err.to_string()}),
+    }
+}
+
+fn tool_get_drawer(conn: &Connection, args: &Value) -> Value {
+    let id = match str_arg(args, "drawer_id") {
+        Some(value) => value,
+        None => return json!({"error": "drawer_id is required"}),
+    };
+    match get_drawer(conn, &id) {
+        Ok(Some(drawer)) => json!({"drawer": drawer}),
+        Ok(None) => json!({"error": format!("Drawer not found: {id}")}),
+        Err(err) => json!({"error": err.to_string()}),
+    }
+}
+
+fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
+    let filter = DrawerFilter {
+        wing: str_arg(args, "wing"),
+        room: str_arg(args, "room"),
+    };
+    let limit = int_arg(args, "limit").unwrap_or(50) as usize;
+    match list_drawers(conn, &filter, limit) {
+        Ok(drawers) => json!({"drawers": drawers, "count": drawers.len()}),
+        Err(err) => json!({"error": err.to_string()}),
+    }
+}
+
+fn tool_update_drawer(conn: &Connection, args: &Value) -> Value {
+    let id = match str_arg(args, "drawer_id") {
+        Some(value) => value,
+        None => return json!({"success": false, "error": "drawer_id is required"}),
+    };
+    let content = match str_arg(args, "content") {
+        Some(value) => value,
+        None => return json!({"success": false, "error": "content is required"}),
+    };
+    match update_drawer_content(conn, &id, &content) {
+        Ok(updated) => json!({"success": updated, "drawer_id": id}),
+        Err(err) => json!({"success": false, "error": err.to_string()}),
+    }
+}
+
+fn tool_list_agents(conn: &Connection) -> Value {
+    match wing_counts(conn) {
+        Ok(wings) => {
+            let agents: Vec<_> = wings
+                .keys()
+                .filter(|wing| wing.starts_with("wing_"))
+                .cloned()
+                .collect();
+            json!({"agents": agents})
+        }
+        Err(err) => json!({"error": err.to_string()}),
+    }
+}
+
 fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     let agent_name = match str_arg(args, "agent_name") {
         Some(n) => n,
@@ -494,20 +622,15 @@ fn tool_diary_read(conn: &Connection, args: &Value) -> Value {
             let entries: Vec<Value> = drawers
                 .iter()
                 .map(|d| {
-                    // Try to extract date/topic from source_file metadata suffix
-                    let meta: Option<Value> = d
-                        .source_file
-                        .find('\x00')
-                        .and_then(|pos| serde_json::from_str(&d.source_file[pos + 1..]).ok());
-                    let date = meta
-                        .as_ref()
-                        .and_then(|m| m.get("date"))
+                    let date = d
+                        .metadata
+                        .get("date")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let topic = meta
-                        .as_ref()
-                        .and_then(|m| m.get("topic"))
+                    let topic = d
+                        .metadata
+                        .get("topic")
                         .and_then(|v| v.as_str())
                         .unwrap_or("general")
                         .to_string();
@@ -702,6 +825,83 @@ fn tool_list() -> Value {
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
+            "name": "mempalace_create_tunnel",
+            "description": "Create a persisted tunnel between two wing/room pairs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wing_a": {"type": "string"},
+                    "room_a": {"type": "string"},
+                    "wing_b": {"type": "string"},
+                    "room_b": {"type": "string"},
+                    "kind": {"type": "string"}
+                },
+                "required": ["wing_a", "room_a", "wing_b", "room_b"]
+            }
+        },
+        {
+            "name": "mempalace_list_tunnels",
+            "description": "List persisted tunnels.",
+            "inputSchema": {"type": "object", "properties": {
+                "wing": {"type": "string"},
+                "kind": {"type": "string"}
+            }}
+        },
+        {
+            "name": "mempalace_delete_tunnel",
+            "description": "Delete a persisted tunnel.",
+            "inputSchema": {"type": "object", "properties": {
+                "tunnel_id": {"type": "string"}
+            }, "required": ["tunnel_id"]}
+        },
+        {
+            "name": "mempalace_follow_tunnels",
+            "description": "Follow persisted tunnels from a wing/room pair.",
+            "inputSchema": {"type": "object", "properties": {
+                "wing": {"type": "string"},
+                "room": {"type": "string"}
+            }, "required": ["wing", "room"]}
+        },
+        {
+            "name": "mempalace_get_drawer",
+            "description": "Get a drawer by ID.",
+            "inputSchema": {"type": "object", "properties": {
+                "drawer_id": {"type": "string"}
+            }, "required": ["drawer_id"]}
+        },
+        {
+            "name": "mempalace_list_drawers",
+            "description": "List drawers with optional wing/room filters.",
+            "inputSchema": {"type": "object", "properties": {
+                "wing": {"type": "string"},
+                "room": {"type": "string"},
+                "limit": {"type": "integer"}
+            }}
+        },
+        {
+            "name": "mempalace_update_drawer",
+            "description": "Update drawer content and refresh metadata.",
+            "inputSchema": {"type": "object", "properties": {
+                "drawer_id": {"type": "string"},
+                "content": {"type": "string"}
+            }, "required": ["drawer_id", "content"]}
+        },
+        {
+            "name": "mempalace_hook_settings",
+            "description": "Return hook settings.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "mempalace_memories_filed_away",
+            "description": "Acknowledge that memories have been filed.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "mempalace_list_agents",
+            "description": "List agent diary wings.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
             "name": "mempalace_diary_write",
             "description": "Write to your personal agent diary in AAAK format.",
             "inputSchema": {
@@ -732,7 +932,11 @@ fn tool_list() -> Value {
 // ── Argument helpers ──────────────────────────────────────────────────────
 
 fn str_arg(args: &Value, key: &str) -> Option<String> {
-    args.get(key).and_then(|v| v.as_str()).map(String::from)
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from)
 }
 
 fn int_arg(args: &Value, key: &str) -> Option<i64> {

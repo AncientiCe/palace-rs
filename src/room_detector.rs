@@ -230,7 +230,7 @@ pub fn detect_rooms_from_files(project_dir: &Path) -> Vec<Room> {
     walk(project_dir, &map, &mut counts, &skip);
 
     let mut sorted: Vec<(String, usize)> = counts.into_iter().filter(|(_, c)| *c >= 2).collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     sorted.truncate(6);
 
     if sorted.is_empty() {

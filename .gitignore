@@ -1,5 +1,6 @@
 /target/
 /.fastembed_cache/
+/.idea/
 
 # SQLite runtime/test artifacts
 *.db
