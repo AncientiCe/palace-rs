@@ -35,11 +35,21 @@ Embeddings are stored as `f32` vectors from `all-MiniLM-L6-v2`. Search uses loca
 
 ## Benchmarks
 
-LongMemEval, session granularity, `recall_any@K`:
+Retrieval recall on the LongMemEval `s_cleaned` split — 500 questions over conversational haystacks of ~50 sessions / ~115k tokens each (30 abstention questions are filtered out per the standard convention, leaving 470 evaluated).
+
+The recipe behind the numbers below:
+
+- **Granularity**: one drawer per session.
+- **Indexed content**: the **full session** — both user and assistant turns are stored and embedded together. No user-turn filtering, no summarization, no LLM extraction.
+- **Embedder**: `all-MiniLM-L6-v2` (384-dim, ONNX), 512-token cap, run locally — no API calls.
+- **Retrieval**: **hybrid** — BM25 (k1=1.5, b=0.75, weight 0.35) fused with cosine similarity (weight 0.65), top-K = 10. Pure score fusion, no hand-tuned keyword/temporal/preference boosters.
+- **No LLM at any stage**: no extraction, no rerank, no answer generation. The recall numbers measure the retriever in isolation.
+- **Metric**: `recall_any@K` at session granularity — does any gold session appear in the top-K results?
+- **Hardware**: Apple M1 Pro, 10 cores (8P + 2E), 32 GB RAM.
 
 | Split | R@1 | R@5 | R@10 |
 |---|---:|---:|---:|
-| `longmemeval_oracle` | 1.000 | 1.000 | 1.000 |
+| `longmemeval_oracle` (sanity check) | 1.000 | 1.000 | 1.000 |
 | `longmemeval_s_cleaned` | **0.889** | **0.981** | **0.991** |
 
 Per-question-type on `s_cleaned`:
