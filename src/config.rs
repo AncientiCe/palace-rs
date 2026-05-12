@@ -174,23 +174,42 @@ impl PalaceConfig {
             .unwrap_or_else(|| PathBuf::from(".palace"))
     }
 
-    /// Migrate the legacy `~/.mempalace` directory to `~/.palace` if the new
-    /// directory does not exist yet. This is a one-shot, idempotent copy.
+    /// Migrate the legacy `~/.mempalace` directory to `~/.palace`.
+    ///
+    /// This performs a per-file merge: any file in the legacy directory that
+    /// does not yet exist in the new directory is copied over. Files that
+    /// already exist in the new directory (e.g. a freshly-written `config.json`
+    /// from `palace init`) are left untouched, so the migration is safe to run
+    /// even when the new directory has been partially initialised.
+    ///
     /// A breadcrumb file is left in the source directory so users know what
     /// happened. The source is never deleted automatically.
     pub fn migrate_legacy_dir(&self) {
-        let new_dir = &self.config_dir;
-        if new_dir.exists() {
-            return;
-        }
         let legacy_dir = UserDirs::new()
             .map(|u| u.home_dir().join(".mempalace"))
             .unwrap_or_else(|| PathBuf::from(".mempalace"));
+        self.migrate_legacy_from(&legacy_dir);
+    }
+
+    /// Migrate from an explicit legacy directory into this config's directory.
+    ///
+    /// Exposed for tests and for callers that store the legacy data in a
+    /// non-default location. Idempotent: re-running never overwrites files
+    /// that already exist in the destination.
+    pub fn migrate_legacy_from(&self, legacy_dir: &Path) {
+        let new_dir = &self.config_dir;
         if !legacy_dir.exists() {
             return;
         }
-        if let Err(e) = copy_dir_all(&legacy_dir, new_dir) {
-            warn!(error = %e, "could not migrate ~/.mempalace to ~/.palace");
+        // Avoid copying onto ourselves if a user points the new config at the
+        // legacy directory.
+        if let (Ok(a), Ok(b)) = (legacy_dir.canonicalize(), new_dir.canonicalize()) {
+            if a == b {
+                return;
+            }
+        }
+        if let Err(e) = merge_dir(legacy_dir, new_dir) {
+            warn!(error = %e, "could not migrate legacy directory to {}", new_dir.display());
             return;
         }
         let breadcrumb = legacy_dir.join("MIGRATED_TO_PALACE.txt");
@@ -333,16 +352,24 @@ impl Default for PalaceConfig {
     }
 }
 
-/// Recursively copy a directory tree from `src` to `dst`.
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+/// Recursively merge `src` into `dst`: copy files that don't yet exist at the
+/// destination, descend into directories, and leave existing destination files
+/// untouched. The migration breadcrumb is skipped so re-running never produces
+/// a stale copy in the new directory.
+fn merge_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
-        let dst_path = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_all(&entry.path(), &dst_path)?;
-        } else {
-            std::fs::copy(entry.path(), dst_path)?;
+        let name = entry.file_name();
+        if name == "MIGRATED_TO_PALACE.txt" {
+            continue;
+        }
+        let dst_path = dst.join(&name);
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            merge_dir(&entry.path(), &dst_path)?;
+        } else if !dst_path.exists() {
+            std::fs::copy(entry.path(), &dst_path)?;
         }
     }
     Ok(())
