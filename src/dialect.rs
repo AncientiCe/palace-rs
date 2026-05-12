@@ -4,12 +4,14 @@
 //! Also provides token counting and basic compression stats. Port of dialect.py.
 
 /// Protocol instructions embedded in the MCP status response.
-pub const PALACE_PROTOCOL: &str = "MANDATORY — MemPalace Memory Protocol (no exceptions, every session):
-1. SESSION START: Call mempalace_status BEFORE doing anything else — you are reading this because you did. Do the same next session.
-2. BEFORE RESPONDING about any person, project, or past event: call mempalace_kg_query or mempalace_search FIRST. Never guess — verify.
-3. IF UNSURE about a fact (name, gender, age, relationship): say \"let me check\" and query the palace. Wrong is worse than slow.
-4. AFTER EACH SESSION: call mempalace_diary_write to record what happened, what you learned, what matters.
-5. WHEN FACTS CHANGE: call mempalace_kg_invalidate on the old fact, mempalace_kg_add for the new one.
+pub const PALACE_PROTOCOL: &str = "MANDATORY — Palace Memory Protocol (no exceptions, every session):
+1. SESSION START: Call palace_status BEFORE doing anything else — you are reading this because you did. Do the same next session.
+2. BEFORE RESPONDING about any person, project, or past event: call palace_kg_query or palace_search FIRST. Never guess — verify.
+3. FOR PREFERENCES / CONVENTIONS: call palace_preference_search — it surfaces preference drawers BM25 misses.
+4. IF UNSURE about a fact (name, gender, age, relationship): say \"let me check\" and query the palace. Wrong is worse than slow.
+5. AFTER EACH SESSION: call palace_diary_write to record what happened, what you learned, what matters.
+6. WHEN FACTS CHANGE: call palace_kg_invalidate on the old fact, palace_kg_add for the new one.
+7. TO FILE A KEY FACT: use palace_remember (sets importance=5). To delete outdated info: use palace_forget.
 
 Skipping any step is a protocol violation. Storage is not memory — but storage + this protocol = memory.";
 

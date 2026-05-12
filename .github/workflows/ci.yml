@@ -113,39 +113,43 @@ jobs:
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
-          mkdir -p "dist/mempalace-local-${{ matrix.target }}"
-          cp target/release/mempalace "dist/mempalace-local-${{ matrix.target }}/"
-          tar -C dist -czf "dist/mempalace-local-${{ matrix.target }}.tar.gz" "mempalace-local-${{ matrix.target }}"
+          mkdir -p "dist/palace-local-${{ matrix.target }}"
+          cp target/release/palace "dist/palace-local-${{ matrix.target }}/"
+          cp target/release/mempalace "dist/palace-local-${{ matrix.target }}/"
+          tar -C dist -czf "dist/palace-local-${{ matrix.target }}.tar.gz" "palace-local-${{ matrix.target }}"
       - name: Package Windows artifact
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "dist/mempalace-local-${{ matrix.target }}" | Out-Null
-          Copy-Item "target/release/mempalace.exe" "dist/mempalace-local-${{ matrix.target }}/"
-          Compress-Archive -Path "dist/mempalace-local-${{ matrix.target }}/*" -DestinationPath "dist/mempalace-local-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Force -Path "dist/palace-local-${{ matrix.target }}" | Out-Null
+          Copy-Item "target/release/palace.exe" "dist/palace-local-${{ matrix.target }}/"
+          Copy-Item "target/release/mempalace.exe" "dist/palace-local-${{ matrix.target }}/"
+          Compress-Archive -Path "dist/palace-local-${{ matrix.target }}/*" -DestinationPath "dist/palace-local-${{ matrix.target }}.zip"
       - name: Run Unix install script
         if: matrix.archive == 'tar.gz'
         shell: bash
         env:
-          MEMPALACE_VERSION: local
-          MEMPALACE_LOCAL_ARCHIVE: ${{ github.workspace }}/dist/mempalace-local-${{ matrix.target }}.tar.gz
-          MEMPALACE_INSTALL_DIR: ${{ runner.temp }}/mempalace-bin
-          HOME: ${{ runner.temp }}/mempalace-home
+          PALACE_VERSION: local
+          PALACE_LOCAL_ARCHIVE: ${{ github.workspace }}/dist/palace-local-${{ matrix.target }}.tar.gz
+          PALACE_INSTALL_DIR: ${{ runner.temp }}/palace-bin
+          HOME: ${{ runner.temp }}/palace-home
         run: |
           mkdir -p "$HOME"
           sh scripts/install.sh
-          "$MEMPALACE_INSTALL_DIR/mempalace" --version
+          "$PALACE_INSTALL_DIR/palace" --version
+          "$PALACE_INSTALL_DIR/mempalace" --version
           test -f "$HOME/.cursor/mcp.json"
       - name: Run Windows install script
         if: matrix.archive == 'zip'
         shell: pwsh
         env:
-          MEMPALACE_VERSION: local
-          MEMPALACE_LOCAL_ARCHIVE: ${{ github.workspace }}/dist/mempalace-local-${{ matrix.target }}.zip
-          MEMPALACE_INSTALL_DIR: ${{ runner.temp }}\mempalace-bin
+          PALACE_VERSION: local
+          PALACE_LOCAL_ARCHIVE: ${{ github.workspace }}/dist/palace-local-${{ matrix.target }}.zip
+          PALACE_INSTALL_DIR: ${{ runner.temp }}\palace-bin
         run: |
-          $env:HOME = Join-Path $env:RUNNER_TEMP "mempalace-home"
+          $env:HOME = Join-Path $env:RUNNER_TEMP "palace-home"
           New-Item -ItemType Directory -Force -Path $env:HOME | Out-Null
           ./scripts/install.ps1
-          & (Join-Path $env:MEMPALACE_INSTALL_DIR "mempalace.exe") --version
+          & (Join-Path $env:PALACE_INSTALL_DIR "palace.exe") --version
+          & (Join-Path $env:PALACE_INSTALL_DIR "mempalace.exe") --version
           if (-not (Test-Path (Join-Path $env:HOME ".cursor/mcp.json"))) { throw "Cursor config was not written" }

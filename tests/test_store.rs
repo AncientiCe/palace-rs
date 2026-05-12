@@ -1,5 +1,5 @@
-use mempalace::db;
-use mempalace::store::*;
+use palace::db;
+use palace::store::*;
 use rusqlite::Connection;
 
 fn open_test_db() -> rusqlite::Connection {
@@ -143,7 +143,7 @@ fn add_drawer_with_id_stores_metadata_separately_from_source_file() {
     let meta = serde_json::json!({
         "hall": "technical",
         "topic": "schema",
-        "agent": "mempalace"
+        "agent": "palace"
     });
 
     let added = add_drawer_with_id(

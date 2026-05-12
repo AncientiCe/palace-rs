@@ -1,10 +1,10 @@
-use mempalace::db;
-use mempalace::general_extractor::extract_memories;
-use mempalace::mcp_server::dispatch_tool;
-use mempalace::palace::Palace;
-use mempalace::ranker::hybrid_search;
-use mempalace::searcher::search_memories;
-use mempalace::store::{add_drawer, preference_search_filtered, DrawerFilter};
+use palace::db;
+use palace::general_extractor::extract_memories;
+use palace::mcp_server::dispatch_tool;
+use palace::palace::Palace;
+use palace::ranker::hybrid_search;
+use palace::searcher::search_memories;
+use palace::store::{add_drawer, preference_search_filtered, DrawerFilter};
 
 fn test_db() -> rusqlite::Connection {
     db::open_in_memory().expect("in-memory DB should open")
@@ -282,11 +282,11 @@ fn palace_structured_search_exposes_score_provenance() {
 #[test]
 fn session_context_returns_recent_diary_metadata_and_compact_text() {
     let conn = test_db();
-    let config = mempalace::config::MempalaceConfig::new();
+    let config = palace::config::PalaceConfig::new();
     let write = dispatch_tool(
         &conn,
         &config,
-        "mempalace_diary_write",
+        "palace_diary_write",
         &serde_json::json!({
             "agent_name": "Codex",
             "entry": "PROJ:mempalace_rs | Implemented preference recall reliability.",
@@ -301,7 +301,7 @@ fn session_context_returns_recent_diary_metadata_and_compact_text() {
     let context = dispatch_tool(
         &conn,
         &config,
-        "mempalace_session_context",
+        "palace_session_context",
         &serde_json::json!({
             "agent_name": "Codex"
         }),

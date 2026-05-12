@@ -1,11 +1,15 @@
 //! Project file ingestor.
 //!
-//! Reads mempalace.yaml, walks project with gitignore respect (via `ignore` crate),
-//! chunks text (~800 chars, 100 overlap), routes to rooms, embeds and stores drawers.
-//! Port of miner.py.
+//! Reads palace.yaml (or mempalace.yaml as a legacy fallback), walks the project
+//! with gitignore respect (via `ignore` crate), chunks text (~800 chars, 100 overlap),
+//! routes to rooms, embeds and stores drawers.
+//!
+//! File reading and embedding are parallelised with Rayon; SQLite writes remain
+//! single-threaded (rusqlite Connection is not Send).
 
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
+use rayon::prelude::*;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::Path;
@@ -17,12 +21,14 @@ pub const CHUNK_SIZE: usize = 800;
 pub const CHUNK_OVERLAP: usize = 100;
 pub const MIN_CHUNK_SIZE: usize = 50;
 
-static READABLE_EXTENSIONS: &[&str] = &[
+pub static READABLE_EXTENSIONS: &[&str] = &[
     "txt", "md", "py", "js", "ts", "jsx", "tsx", "json", "yaml", "yml", "html", "css", "java",
     "go", "rs", "rb", "sh", "csv", "sql", "toml",
 ];
 
-static SKIP_FILENAMES: &[&str] = &[
+pub static SKIP_FILENAMES: &[&str] = &[
+    "palace.yaml",
+    "palace.yml",
     "mempalace.yaml",
     "mempalace.yml",
     "mempal.yaml",
@@ -240,46 +246,81 @@ pub fn mine(
     let mut files_skipped = 0usize;
     let mut room_counts: HashMap<String, usize> = HashMap::new();
 
-    for (i, filepath) in files.iter().enumerate() {
+    // ── Phase 1: filter already-mined files (serial, DB read) ──────────────
+    let pending: Vec<_> = files
+        .iter()
+        .filter(|fp| {
+            if dry_run {
+                return true;
+            }
+            let source = fp.to_string_lossy();
+            match file_already_mined(conn, &source) {
+                Ok(true) => {
+                    files_skipped += 1;
+                    false
+                }
+                _ => true,
+            }
+        })
+        .collect();
+
+    // ── Phase 2: read + chunk + embed in parallel (Rayon) ──────────────────
+    // Each element: (filepath, room, chunks_with_embeddings)
+    let file_count_total = files.len();
+    type ChunkEntry = (String, usize, Vec<f32>); // (text, chunk_index, embedding)
+    let prepared: Vec<(std::path::PathBuf, String, Vec<ChunkEntry>)> = pending
+        .par_iter()
+        .filter_map(|filepath| {
+            let content = std::fs::read_to_string(filepath).ok()?;
+            let content = content.trim().to_string();
+            if content.len() < MIN_CHUNK_SIZE {
+                return None;
+            }
+            let room = detect_room(filepath, &content, &rooms, &project_path);
+            let chunks = chunk_text(&content);
+            if chunks.is_empty() {
+                return None;
+            }
+            let chunk_texts: Vec<&str> = chunks.iter().map(|(t, _)| t.as_str()).collect();
+            let embeddings = crate::embedder::embed_batch(&chunk_texts).unwrap_or_default();
+            let chunk_entries: Vec<ChunkEntry> = chunks
+                .into_iter()
+                .enumerate()
+                .map(|(idx, (text, ci))| {
+                    let emb = embeddings.get(idx).cloned().unwrap_or_default();
+                    (text, ci, emb)
+                })
+                .collect();
+            Some(((*filepath).clone(), room, chunk_entries))
+        })
+        .collect();
+
+    // ── Phase 3: write to DB (serial, SQLite requirement) ──────────────────
+    for (i, (filepath, room, chunk_entries)) in prepared.iter().enumerate() {
         let source_file = filepath.to_string_lossy().to_string();
-
-        if !dry_run && file_already_mined(conn, &source_file)? {
-            files_skipped += 1;
-            continue;
-        }
-
-        let content = match std::fs::read_to_string(filepath) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let content = content.trim().to_string();
-        if content.len() < MIN_CHUNK_SIZE {
-            continue;
-        }
-
-        let room = detect_room(filepath, &content, &rooms, &project_path);
-        let chunks = chunk_text(&content);
 
         if dry_run {
             println!(
                 "    [DRY RUN] {} → room:{room} ({} drawers)",
                 filepath.file_name().unwrap_or_default().to_string_lossy(),
-                chunks.len()
+                chunk_entries.len()
             );
-            total_drawers += chunks.len();
-            *room_counts.entry(room).or_default() += 1;
+            total_drawers += chunk_entries.len();
+            *room_counts.entry(room.clone()).or_default() += 1;
             continue;
         }
 
         let mut drawers_added = 0usize;
-        let chunk_texts: Vec<&str> = chunks.iter().map(|(t, _)| t.as_str()).collect();
-        let embeddings = crate::embedder::embed_batch(&chunk_texts).unwrap_or_default();
-        for (idx, (chunk_text, chunk_index)) in chunks.iter().enumerate() {
-            let embedding = embeddings.get(idx).map(|e| e.as_slice());
+        for (chunk_text, chunk_index, emb) in chunk_entries {
+            let embedding = if emb.is_empty() {
+                None
+            } else {
+                Some(emb.as_slice())
+            };
             let (added, _) = add_drawer(
                 conn,
                 &wing,
-                &room,
+                room,
                 chunk_text,
                 embedding,
                 &source_file,
@@ -298,7 +339,7 @@ pub fn mine(
             println!(
                 "  ✓ [{:4}/{}] {:50} +{drawers_added}",
                 i + 1,
-                files.len(),
+                file_count_total,
                 filepath.file_name().unwrap_or_default().to_string_lossy()
             );
         }
@@ -338,29 +379,70 @@ pub fn repair(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-/// Print palace status.
+/// Print palace status dashboard.
 pub fn status(conn: &Connection, palace_path: &Path) -> Result<()> {
     let total = crate::store::count_drawers(conn)?;
     let wings = crate::store::wing_counts(conn)?;
 
-    println!("\n{}", "=".repeat(55));
-    println!("  MemPalace Status — {total} drawers");
-    println!("  Palace: {}", palace_path.display());
-    println!("{}\n", "=".repeat(55));
+    let db_size = palace_path
+        .metadata()
+        .map(|m| format!("{:.1} MB", m.len() as f64 / 1_048_576.0))
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let unembedded = crate::store::count_unembedded(conn).unwrap_or(0);
+
+    println!();
+    println!("  ╔══════════════════════════════════════════════════════╗");
+    println!("  ║  Palace Status Dashboard                             ║");
+    println!("  ╠══════════════════════════════════════════════════════╣");
+    println!(
+        "  ║  Database : {:<42}║",
+        palace_path
+            .display()
+            .to_string()
+            .chars()
+            .take(42)
+            .collect::<String>()
+    );
+    println!("  ║  Size     : {db_size:<42}║");
+    println!("  ║  Drawers  : {total:<42}║");
+    if unembedded > 0 {
+        println!("  ║  ⚠ Missing embeddings: {unembedded:<34}║");
+    }
+    println!("  ╠══════════════════════════════════════════════════════╣");
 
     let mut sorted_wings: Vec<(&String, &i64)> = wings.iter().collect();
-    sorted_wings.sort_by_key(|(k, _)| k.as_str());
+    sorted_wings.sort_by(|a, b| b.1.cmp(a.1));
 
-    for (wing, _) in &sorted_wings {
-        println!("  WING: {wing}");
+    for (wing, wing_count) in &sorted_wings {
+        println!("  ║                                                      ║");
+        println!(
+            "  ║  WING  {:<45}║",
+            format!("{wing} ({wing_count} drawers)")
+        );
         let rooms = crate::store::room_counts(conn, Some(wing))?;
         let mut sorted_rooms: Vec<(&String, &i64)> = rooms.iter().collect();
         sorted_rooms.sort_by(|a, b| b.1.cmp(a.1));
-        for (room, count) in sorted_rooms {
-            println!("    ROOM: {:20} {:5} drawers", room, count);
+        for (room, count) in sorted_rooms.iter().take(10) {
+            println!("  ║    {:<22} {:>5} drawers                 ║", room, count);
         }
-        println!();
+        if sorted_rooms.len() > 10 {
+            println!(
+                "  ║    … and {} more rooms                               ║",
+                sorted_rooms.len() - 10
+            );
+        }
     }
-    println!("{}\n", "=".repeat(55));
+
+    println!("  ║                                                      ║");
+    println!("  ╚══════════════════════════════════════════════════════╝");
+
+    if total == 0 {
+        println!();
+        println!("  No drawers yet. Get started:");
+        println!("    palace init <project-dir>");
+        println!("    palace mine <project-dir>");
+    }
+    println!();
     Ok(())
 }

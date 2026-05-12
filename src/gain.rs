@@ -1,4 +1,4 @@
-//! Aggregation and rendering for `mempalace gain`.
+//! Aggregation and rendering for `palace gain`.
 
 use anyhow::{bail, Context, Result};
 use chrono::{Duration, Utc};
@@ -316,7 +316,7 @@ fn build_report(events: Vec<UsageRow>, options: &GainOptions) -> GainReport {
         latencies.push(event.duration_ms);
         tokens_saved_est += event.est_tokens_saved;
 
-        if event.tool == "mempalace_search" {
+        if event.tool == "palace_search" {
             search_calls += 1;
         }
         if event.outcome == "hit" {

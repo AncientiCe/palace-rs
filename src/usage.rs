@@ -138,11 +138,11 @@ fn classify_event(
     }
 
     match tool {
-        "mempalace_search" => classify_search(&mut event, result),
-        "mempalace_check_duplicate" => classify_check_duplicate(conn, &mut event, result)?,
-        "mempalace_add_drawer" => classify_add_drawer(conn, &mut event, result)?,
-        "mempalace_kg_query" => classify_kg_query(&mut event, result),
-        "mempalace_diary_read" => classify_diary_read(&mut event, result),
+        "palace_search" => classify_search(&mut event, result),
+        "palace_check_duplicate" => classify_check_duplicate(conn, &mut event, result)?,
+        "palace_add_drawer" => classify_add_drawer(conn, &mut event, result)?,
+        "palace_kg_query" => classify_kg_query(&mut event, result),
+        "palace_diary_read" => classify_diary_read(&mut event, result),
         _ => {}
     }
 

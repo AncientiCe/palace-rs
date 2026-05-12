@@ -11,6 +11,21 @@ const BM25_B: f64 = 0.75;
 const COSINE_WEIGHT: f64 = 0.65;
 const BM25_WEIGHT: f64 = 0.35;
 const MAX_CODING_BOOST: f64 = 0.35;
+/// Maximum recency bonus applied to brand-new drawers (filed today).
+const RECENCY_WEIGHT: f64 = 0.05;
+/// Exponential decay constant — half-life ≈ 35 days.
+const RECENCY_LAMBDA: f64 = 0.02;
+
+/// Compute an exponential recency bonus based on `filed_at` (RFC 3339 string).
+/// Returns a value in [0, RECENCY_WEIGHT].
+fn recency_boost(filed_at: &str) -> f64 {
+    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(filed_at) else {
+        return 0.0;
+    };
+    let now = chrono::Utc::now();
+    let age_days = (now - ts.to_utc()).num_days().max(0) as f64;
+    RECENCY_WEIGHT * (-RECENCY_LAMBDA * age_days).exp()
+}
 
 #[derive(Debug, Clone)]
 pub struct HybridResult {
@@ -65,6 +80,7 @@ pub fn hybrid_search(
                         room: drawer.room,
                         source_file: drawer.source_file,
                         created_at: drawer.created_at,
+                        filed_at: drawer.filed_at,
                         similarity: 0.0,
                     },
                     cosine: 0.0,
@@ -88,8 +104,11 @@ pub fn hybrid_search(
             0.0
         };
         result.coding_boost = coding_agent_boost(query, &result.drawer.text, &result.drawer.room);
-        result.combined =
-            (result.cosine * COSINE_WEIGHT) + (normalized_bm25 * BM25_WEIGHT) + result.coding_boost;
+        let recency = recency_boost(&result.drawer.filed_at);
+        result.combined = (result.cosine * COSINE_WEIGHT)
+            + (normalized_bm25 * BM25_WEIGHT)
+            + result.coding_boost
+            + recency;
         result.drawer.similarity = (result.combined * 1000.0).round() / 1000.0;
     }
 

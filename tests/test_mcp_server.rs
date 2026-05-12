@@ -1,8 +1,8 @@
 //! MCP server integration tests — verify all 19 tools respond correctly.
 
-use mempalace::db;
-use mempalace::knowledge_graph;
-use mempalace::store;
+use palace::db;
+use palace::knowledge_graph;
+use palace::store;
 
 fn test_db() -> rusqlite::Connection {
     db::open_in_memory().unwrap()
@@ -166,6 +166,115 @@ fn check_duplicate_returns_no_matches_on_empty_palace() {
     let dups = store::check_duplicate(&conn, "test content", 0.9);
     // Embedding will be generated but DB is empty so no matches
     assert!(dups.is_err() || dups.unwrap().is_empty());
+}
+
+// ── palace_remember / palace_forget / palace_explain ─────────────────────
+
+#[test]
+fn remember_inserts_high_importance_drawer() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    let args = serde_json::json!({
+        "text": "The user always prefers dark mode",
+        "wing": "preferences",
+        "room": "ui"
+    });
+    let result = palace::mcp_server::dispatch_tool(&conn, &config, "palace_remember", &args);
+    assert_eq!(result["success"], true);
+    assert_eq!(result["inserted"], true);
+    let id = result["id"].as_str().unwrap();
+
+    // Verify the drawer actually landed in the DB.
+    let drawer = store::get_drawer(&conn, id).unwrap().unwrap();
+    assert_eq!(drawer.importance, 5.0);
+    assert_eq!(drawer.wing, "preferences");
+}
+
+#[test]
+fn forget_deletes_a_drawer() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    // Add via remember first.
+    let add_args =
+        serde_json::json!({"text": "Temporary fact to forget", "wing": "w", "room": "r"});
+    let added = palace::mcp_server::dispatch_tool(&conn, &config, "palace_remember", &add_args);
+    let id = added["id"].as_str().unwrap().to_string();
+
+    // Now forget it.
+    let forget_args = serde_json::json!({"id": id});
+    let result = palace::mcp_server::dispatch_tool(&conn, &config, "palace_forget", &forget_args);
+    assert_eq!(result["success"], true);
+
+    // Drawer should be gone.
+    let gone = store::get_drawer(&conn, &id).unwrap();
+    assert!(gone.is_none());
+}
+
+#[test]
+fn explain_returns_full_provenance() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    let add_args = serde_json::json!({"text": "Explain provenance test", "wing": "w", "room": "r"});
+    let added = palace::mcp_server::dispatch_tool(&conn, &config, "palace_remember", &add_args);
+    let id = added["id"].as_str().unwrap().to_string();
+
+    let explain_args = serde_json::json!({"id": id});
+    let result = palace::mcp_server::dispatch_tool(&conn, &config, "palace_explain", &explain_args);
+    assert_eq!(result["id"], id);
+    assert_eq!(result["wing"], "w");
+    assert_eq!(result["room"], "r");
+    assert!(result.get("added_by").is_some());
+    assert!(result.get("filed_at").is_some());
+}
+
+#[test]
+fn explain_unknown_id_returns_error() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    let args = serde_json::json!({"id": "nonexistent_id"});
+    let result = palace::mcp_server::dispatch_tool(&conn, &config, "palace_explain", &args);
+    assert!(result.get("error").is_some());
+}
+
+// ── palace_export ──────────────────────────────────────────────────────────
+
+#[test]
+fn export_returns_all_drawers() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    store::add_drawer(
+        &conn,
+        "w",
+        "r",
+        "export content one",
+        None,
+        "f1.txt",
+        0,
+        "t",
+        3.0,
+    )
+    .unwrap();
+    store::add_drawer(
+        &conn,
+        "w",
+        "r",
+        "export content two",
+        None,
+        "f2.txt",
+        0,
+        "t",
+        3.0,
+    )
+    .unwrap();
+
+    let result =
+        palace::mcp_server::dispatch_tool(&conn, &config, "palace_export", &serde_json::json!({}));
+    assert_eq!(result["total"], 2);
+    let drawers = result["drawers"].as_array().unwrap();
+    assert_eq!(drawers.len(), 2);
 }
 
 // ── Wing/room counts ──────────────────────────────────────────────────────

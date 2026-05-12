@@ -17,7 +17,8 @@ pub fn search_and_print(
     room: Option<&str>,
     n_results: usize,
 ) -> Result<()> {
-    let sanitized_query = crate::query_sanitizer::sanitize_query(query);
+    let rewritten = crate::query_rewriter::rewrite(query);
+    let sanitized_query = crate::query_sanitizer::sanitize_query(&rewritten);
     let effective_query = if sanitized_query.is_empty() {
         query
     } else {
@@ -74,7 +75,8 @@ pub fn search_memories(
     room: Option<&str>,
     n_results: usize,
 ) -> serde_json::Value {
-    let sanitized_query = crate::query_sanitizer::sanitize_query(query);
+    let rewritten = crate::query_rewriter::rewrite(query);
+    let sanitized_query = crate::query_sanitizer::sanitize_query(&rewritten);
     let effective_query = if sanitized_query.is_empty() {
         query
     } else {
@@ -85,7 +87,7 @@ pub fn search_memories(
         Err(e) => {
             return serde_json::json!({
                 "error": format!("Embedding error: {e}"),
-                "hint": "Run: mempalace mine <dir>"
+                "hint": "Run: palace mine <dir>"
             })
         }
     };

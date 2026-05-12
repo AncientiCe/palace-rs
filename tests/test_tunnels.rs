@@ -1,6 +1,6 @@
-use mempalace::config::normalize_wing_name;
-use mempalace::db;
-use mempalace::palace_graph::{
+use palace::config::normalize_wing_name;
+use palace::db;
+use palace::palace_graph::{
     create_tunnel, delete_tunnel, follow_tunnels, list_tunnels, topic_room,
 };
 

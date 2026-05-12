@@ -46,7 +46,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         );
 
         -- ── Drawers ──────────────────────────────────────────────────────────
-        -- Replaces ChromaDB mempalace_drawers collection.
+        -- Replaces ChromaDB palace_drawers collection.
         -- embedding is a little-endian f32 byte array (384 floats = 1536 bytes).
         CREATE TABLE IF NOT EXISTS drawers (
             id          TEXT PRIMARY KEY,
@@ -56,7 +56,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             embedding   BLOB,
             source_file TEXT NOT NULL DEFAULT '',
             chunk_index INTEGER NOT NULL DEFAULT 0,
-            added_by    TEXT NOT NULL DEFAULT 'mempalace',
+            added_by    TEXT NOT NULL DEFAULT 'palace',
             filed_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             importance  REAL NOT NULL DEFAULT 3.0,
             created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

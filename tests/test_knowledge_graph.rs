@@ -1,5 +1,5 @@
-use mempalace::db;
-use mempalace::knowledge_graph::*;
+use palace::db;
+use palace::knowledge_graph::*;
 
 fn test_db() -> rusqlite::Connection {
     db::open_in_memory().unwrap()

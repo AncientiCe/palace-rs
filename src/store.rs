@@ -37,6 +37,8 @@ pub struct SearchResult {
     pub room: String,
     pub source_file: String,
     pub created_at: String,
+    /// When this drawer was filed into the palace (used for recency scoring).
+    pub filed_at: String,
     pub similarity: f64,
 }
 
@@ -299,7 +301,7 @@ pub fn vector_search(
 ) -> Result<Vec<SearchResult>> {
     let (where_clause, where_params) = build_where(filter);
     let sql = format!(
-        "SELECT id, wing, room, content, source_file, created_at, embedding
+        "SELECT id, wing, room, content, source_file, created_at, filed_at, embedding
          FROM drawers WHERE embedding IS NOT NULL {extra} ORDER BY filed_at DESC",
         extra = if where_clause.is_empty() {
             String::new()
@@ -320,14 +322,15 @@ pub fn vector_search(
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
-                r.get::<_, Vec<u8>>(6)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, Vec<u8>>(7)?,
             ))
         },
     )?;
 
     let mut scored: Vec<SearchResult> = rows
         .filter_map(|r| {
-            let (id, wing, room, content, source_file, created_at, blob) = r.ok()?;
+            let (id, wing, room, content, source_file, created_at, filed_at, blob) = r.ok()?;
             let emb = blob_to_vec(&blob);
             let sim = cosine_similarity(query_vec, &emb) as f64;
             Some(SearchResult {
@@ -337,6 +340,7 @@ pub fn vector_search(
                 room,
                 source_file,
                 created_at,
+                filed_at,
                 similarity: (sim * 1000.0).round() / 1000.0,
             })
         })
@@ -377,7 +381,7 @@ pub fn preference_search_filtered(
         format!(" AND {}", &where_clause[6..])
     };
     let sql = format!(
-        "SELECT id, wing, room, content, source_file, created_at, embedding
+        "SELECT id, wing, room, content, source_file, created_at, filed_at, embedding
          FROM drawers
          WHERE json_extract(metadata, '$.preference') = 1
            AND embedding IS NOT NULL{extra_filter}",
@@ -393,14 +397,15 @@ pub fn preference_search_filtered(
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
-                r.get::<_, Vec<u8>>(6)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, Vec<u8>>(7)?,
             ))
         },
     )?;
 
     let mut scored: Vec<SearchResult> = rows
         .filter_map(|r| {
-            let (id, wing, room, content, source_file, created_at, blob) = r.ok()?;
+            let (id, wing, room, content, source_file, created_at, filed_at, blob) = r.ok()?;
             let emb = blob_to_vec(&blob);
             let sim = cosine_similarity(query_vec, &emb) as f64;
             Some(SearchResult {
@@ -410,6 +415,7 @@ pub fn preference_search_filtered(
                 room,
                 source_file,
                 created_at,
+                filed_at,
                 similarity: (sim * 1000.0).round() / 1000.0,
             })
         })

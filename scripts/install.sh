@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-repo="${MEMPALACE_REPO:-AncientiCe/mempalace-rs}"
-install_dir="${MEMPALACE_INSTALL_DIR:-$HOME/.local/bin}"
+repo="${PALACE_REPO:-${MEMPALACE_REPO:-AncientiCe/palace-rs}}"
+install_dir="${PALACE_INSTALL_DIR:-${MEMPALACE_INSTALL_DIR:-$HOME/.local/bin}}"
 tmp_dir="$(mktemp -d)"
 
 cleanup() {
@@ -46,47 +46,56 @@ checksum_verify() {
 
 target="$(detect_target)"
 
-if [ "${MEMPALACE_VERSION:-}" = "local" ]; then
-  if [ -z "${MEMPALACE_LOCAL_ARCHIVE:-}" ]; then
-    echo "MEMPALACE_LOCAL_ARCHIVE is required when MEMPALACE_VERSION=local" >&2
+version_override="${PALACE_VERSION:-${MEMPALACE_VERSION:-}}"
+local_archive="${PALACE_LOCAL_ARCHIVE:-${MEMPALACE_LOCAL_ARCHIVE:-}}"
+
+if [ "$version_override" = "local" ]; then
+  if [ -z "$local_archive" ]; then
+    echo "PALACE_LOCAL_ARCHIVE is required when PALACE_VERSION=local" >&2
     exit 1
   fi
-  archive="$MEMPALACE_LOCAL_ARCHIVE"
+  archive="$local_archive"
 else
-  if [ -n "${MEMPALACE_VERSION:-}" ]; then
-    tag="$MEMPALACE_VERSION"
+  if [ -n "$version_override" ]; then
+    tag="$version_override"
   else
     tag="$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)"
   fi
   version="${tag#v}"
-  asset="mempalace-$version-$target.tar.gz"
+  asset="palace-$version-$target.tar.gz"
   archive="$tmp_dir/$asset"
-  checksum="$tmp_dir/mempalace-$target.sha256"
+  checksum="$tmp_dir/palace-$target.sha256"
   curl -fL "https://github.com/$repo/releases/download/$tag/$asset" -o "$archive"
-  curl -fL "https://github.com/$repo/releases/download/$tag/mempalace-$target.sha256" -o "$checksum"
+  curl -fL "https://github.com/$repo/releases/download/$tag/palace-$target.sha256" -o "$checksum"
   checksum_verify "$archive" "$checksum"
 fi
 
 mkdir -p "$install_dir"
 tar -xzf "$archive" -C "$tmp_dir"
-binary="$(find "$tmp_dir" -type f -name mempalace | head -n 1)"
+binary="$(find "$tmp_dir" -type f -name palace | head -n 1)"
 if [ -z "$binary" ]; then
-  echo "Archive did not contain a mempalace binary" >&2
+  echo "Archive did not contain a palace binary" >&2
   exit 1
 fi
-cp "$binary" "$install_dir/mempalace"
-chmod +x "$install_dir/mempalace"
+cp "$binary" "$install_dir/palace"
+chmod +x "$install_dir/palace"
+
+shim="$(find "$tmp_dir" -type f -name mempalace | head -n 1)"
+if [ -n "$shim" ]; then
+  cp "$shim" "$install_dir/mempalace"
+  chmod +x "$install_dir/mempalace"
+fi
 
 case ":$PATH:" in
   *":$install_dir:"*) ;;
   *)
-    echo "Add MemPalace to PATH:"
+    echo "Add palace to PATH:"
     echo "  export PATH=\"$install_dir:\$PATH\""
     ;;
 esac
 
-"$install_dir/mempalace" install --all
+"$install_dir/palace" install --all
 
-echo "MemPalace installed."
-echo "Next: mempalace init <project> && mempalace mine <project>"
+echo "palace installed."
+echo "Next: palace init <project> && palace mine <project>"
 echo "Restart Cursor, Codex, or Claude Code to load the MCP server."

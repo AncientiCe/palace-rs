@@ -1,29 +1,36 @@
 [package]
-name = "mempalace-rust"
-version = "0.1.9"
+name = "palace-rs"
+version = "0.2.0"
 edition = "2021"
 description = "Local memory palace for AI assistants — Rust edition"
 license = "MIT"
-repository = "https://github.com/AncientiCe/mempalace-rs"
-homepage = "https://github.com/AncientiCe/mempalace-rs"
-documentation = "https://docs.rs/mempalace-rust"
+repository = "https://github.com/AncientiCe/palace-rs"
+homepage = "https://github.com/AncientiCe/palace-rs"
+documentation = "https://docs.rs/palace-rs"
 readme = "README.md"
 rust-version = "1.82"
 keywords = ["memory", "ai", "mcp", "llm", "embeddings"]
 categories = ["database", "text-processing"]
 
 [[bin]]
-name = "mempalace"
+name = "palace"
 path = "src/main.rs"
 required-features = ["cli"]
 
-[lib]
+# Backwards-compat shim: prints a deprecation notice and re-exec's palace.
+# Removed in 0.3.0.
+[[bin]]
 name = "mempalace"
+path = "src/bin/mempalace.rs"
+required-features = ["cli"]
+
+[lib]
+name = "palace"
 path = "src/lib.rs"
 
 [features]
 default = ["cli"]
-cli = ["dep:clap"]
+cli = ["dep:clap", "dep:tracing-subscriber"]
 llm = []
 
 [dependencies]
@@ -58,7 +65,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Hashing for deterministic IDs
 blake3 = "1"
 
-# Cross-platform config/data dirs (~/.mempalace)
+# Cross-platform config/data dirs (~/.palace)
 directories = "5"
 
 # Regex for general_extractor
@@ -66,6 +73,11 @@ regex = "1"
 
 # Lazy static (for compiled regexes)
 once_cell = "1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"], optional = true }
+
+rayon = "1"
+notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
 
 [dev-dependencies]
 tempfile = "3"

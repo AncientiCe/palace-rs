@@ -7,13 +7,14 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use tracing::warn;
 
-use crate::config::MempalaceConfig;
+use crate::config::PalaceConfig;
 use crate::convo_miner::ExtractMode;
 
 #[derive(Parser)]
 #[command(
-    name = "mempalace",
+    name = "palace",
     version = env!("CARGO_PKG_VERSION"),
     about = "Local memory palace for AI assistants",
     long_about = None,
@@ -25,14 +26,14 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Detect rooms and write mempalace.yaml for a project
+    /// Detect rooms and write palace.yaml for a project
     Init {
         /// Project directory
         dir: PathBuf,
         /// Accept detected rooms without prompting
         #[arg(long)]
         yes: bool,
-        /// Mine immediately after writing mempalace.yaml
+        /// Mine immediately after writing palace.yaml
         #[arg(long)]
         auto_mine: bool,
         /// Disable optional LLM-assisted refinement
@@ -44,7 +45,7 @@ enum Commands {
     },
     /// Mine a project directory into the palace
     Mine {
-        /// Project directory (must contain mempalace.yaml)
+        /// Project directory (must contain palace.yaml)
         dir: PathBuf,
         /// Override wing name
         #[arg(long)]
@@ -131,7 +132,7 @@ enum Commands {
     Compress,
     /// Split concatenated Claude Code mega transcripts into per-session files
     Split {
-        /// Source directory (default: MEMPALACE_SOURCE_DIR or ~/Desktop/transcripts)
+        /// Source directory (default: PALACE_SOURCE_DIR or ~/Desktop/transcripts)
         #[arg(long)]
         source: Option<PathBuf>,
         /// Output directory (default: same as source)
@@ -190,7 +191,7 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Remove the MemPalace MCP server from local AI clients
+    /// Remove the Palace MCP server from local AI clients
     Uninstall {
         /// Client to configure: cursor, codex, claude, claude-desktop, or all
         #[arg(long, default_value = "all")]
@@ -226,13 +227,37 @@ enum Commands {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    /// Export all palace drawers to a portable JSON file (embeddings excluded)
+    Export {
+        /// Output file path (default: palace-export.json)
+        #[arg(long, default_value = "palace-export.json")]
+        output: PathBuf,
+    },
+    /// Import palace drawers from a JSON export file
+    Import {
+        /// Path to the export JSON file produced by `palace export`
+        file: PathBuf,
+    },
+    /// Watch a project directory and re-mine changed files automatically
+    Watch {
+        /// Project directory (must contain palace.yaml)
+        dir: PathBuf,
+        /// Override wing name
+        #[arg(long)]
+        wing: Option<String>,
+    },
     /// Start the MCP stdio server
     Mcp,
+    /// Handle a Cursor agent hook event (used by hooks.json)
+    Hook {
+        /// Hook event name (e.g. session-start)
+        event: String,
+    },
 }
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-    let config = MempalaceConfig::new();
+    let config = PalaceConfig::new();
 
     match cli.command {
         Commands::Init {
@@ -261,9 +286,9 @@ pub fn run() -> Result<()> {
             if auto_mine {
                 let db_path = config.palace_db_path();
                 let mut conn = crate::db::open(&db_path)?;
-                crate::miner::mine(&mut conn, &dir, None, "mempalace", 0, false, true, &[])?;
+                crate::miner::mine(&mut conn, &dir, None, "palace", 0, false, true, &[])?;
             } else {
-                println!("\n  Next step:\n    mempalace mine {}\n", dir.display());
+                println!("\n  Next step:\n    palace mine {}\n", dir.display());
             }
         }
 
@@ -288,7 +313,7 @@ pub fn run() -> Result<()> {
                 &mut conn,
                 &dir,
                 wing.as_deref(),
-                "mempalace",
+                "palace",
                 limit,
                 dry_run,
                 !no_gitignore,
@@ -313,7 +338,7 @@ pub fn run() -> Result<()> {
                 &mut conn,
                 &dir,
                 wing.as_deref(),
-                "mempalace",
+                "palace",
                 limit,
                 dry_run,
                 extract_mode,
@@ -329,7 +354,7 @@ pub fn run() -> Result<()> {
             let query_str = query.join(" ");
             let db_path = config.palace_db_path();
             if !db_path.exists() {
-                eprintln!("No palace found. Run: mempalace init <dir> && mempalace mine <dir>");
+                warn!("No palace found. Run: palace init <dir> && palace mine <dir>");
                 std::process::exit(1);
             }
             let conn = crate::db::open(&db_path)?;
@@ -346,10 +371,9 @@ pub fn run() -> Result<()> {
             let db_path = config.palace_db_path();
             if !db_path.exists() {
                 println!(
-                    "{}\n\n## L1 — No palace found. Run: mempalace mine <dir>",
+                    "{}\n\n## L1 — No palace found. Run: palace mine <dir>",
                     std::fs::read_to_string(config.identity_path()).unwrap_or_else(|_| {
-                        "## L0 — No identity configured. Create ~/.mempalace/identity.txt"
-                            .to_string()
+                        "## L0 — No identity configured. Create ~/.palace/identity.txt".to_string()
                     })
                 );
                 return Ok(());
@@ -367,7 +391,7 @@ pub fn run() -> Result<()> {
             let db_path = config.palace_db_path();
             if !db_path.exists() {
                 println!("\n  No palace found at {}", db_path.display());
-                println!("  Run: mempalace init <dir> then mempalace mine <dir>");
+                println!("  Run: palace init <dir> then palace mine <dir>");
                 return Ok(());
             }
             let conn = crate::db::open(&db_path)?;
@@ -385,7 +409,7 @@ pub fn run() -> Result<()> {
             let db_path = config.palace_db_path();
             if !db_path.exists() {
                 println!("\n  No palace found at {}", db_path.display());
-                println!("  Run: mempalace init <dir> then mempalace mine <dir>");
+                println!("  Run: palace init <dir> then palace mine <dir>");
                 return Ok(());
             }
             let conn = crate::db::open(&db_path)?;
@@ -433,7 +457,7 @@ pub fn run() -> Result<()> {
 
         Commands::Compress => {
             println!("AAAK compression is written by the AI in AAAK format.");
-            println!("Use mempalace_diary_write via MCP to store AAAK-compressed memories.");
+            println!("Use palace_diary_write via MCP to store AAAK-compressed memories.");
         }
 
         Commands::Split {
@@ -527,8 +551,47 @@ pub fn run() -> Result<()> {
             crate::install::print_doctor_report(&report);
         }
 
+        Commands::Export { output } => {
+            let db_path = config.palace_db_path();
+            if !db_path.exists() {
+                warn!("No palace found. Run: palace init <dir> && palace mine <dir>");
+                std::process::exit(1);
+            }
+            let conn = crate::db::open(&db_path)?;
+            let doc = crate::export::export_drawers(&conn)?;
+            let json = serde_json::to_string_pretty(&doc)?;
+            std::fs::write(&output, &json)?;
+            println!("  Exported {} drawer(s) to {}", doc.total, output.display());
+        }
+
+        Commands::Import { file } => {
+            let db_path = config.palace_db_path();
+            let json = std::fs::read_to_string(&file)?;
+            let doc: crate::export::ExportDoc = serde_json::from_str(&json)?;
+            let conn = crate::db::open(&db_path)?;
+            let inserted = crate::export::import_drawers(&conn, &doc)?;
+            println!(
+                "  Imported {inserted} new drawer(s) from {} (skipped {} already present)",
+                file.display(),
+                doc.total.saturating_sub(inserted)
+            );
+        }
+
+        Commands::Watch { dir, wing } => {
+            let db_path = config.palace_db_path();
+            if !db_path.exists() {
+                warn!("No palace found. Run: palace init <dir> && palace mine <dir>");
+                std::process::exit(1);
+            }
+            crate::watcher::watch(&db_path, &dir, wing.as_deref())?;
+        }
+
         Commands::Mcp => {
             crate::mcp_server::run()?;
+        }
+
+        Commands::Hook { event } => {
+            crate::install::run_hook(&event)?;
         }
     }
 

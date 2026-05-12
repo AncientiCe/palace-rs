@@ -1,14 +1,25 @@
-//! Configuration system for MemPalace.
+//! Configuration system for Palace.
 //!
-//! Load order: env vars > ~/.mempalace/config.json > defaults.
+//! Load order: env vars > ~/.palace/config.json > defaults.
+//!
+//! # Upgrade notes (0.1.x → 0.2.0)
+//!
+//! The config/data directory changed from `~/.mempalace` to `~/.palace`.
+//! On first open, `PalaceConfig::migrate_legacy_dir()` copies the old directory
+//! into the new one (idempotent, never deletes the source).
+//!
+//! Environment variables changed from `MEMPALACE_*` to `PALACE_*`.
+//! The old `MEMPALACE_*` names are still accepted in 0.2.x with a printed
+//! deprecation notice; they will stop working in 0.3.0.
 
 use anyhow::Result;
 use directories::UserDirs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
-pub const DEFAULT_COLLECTION_NAME: &str = "mempalace_drawers";
+pub const DEFAULT_COLLECTION_NAME: &str = "palace_drawers";
 
 pub const DEFAULT_TOPIC_WINGS: &[&str] = &[
     "emotions",
@@ -118,16 +129,20 @@ struct FileConfig {
     entity_languages: Option<Vec<String>>,
 }
 
-/// Runtime configuration for MemPalace.
+/// Runtime configuration for Palace.
 ///
-/// Load priority: environment variables > ~/.mempalace/config.json > defaults.
+/// Load priority: environment variables > ~/.palace/config.json > defaults.
 #[derive(Debug, Clone)]
-pub struct MempalaceConfig {
+pub struct PalaceConfig {
     pub config_dir: PathBuf,
     file_config: FileConfig,
 }
 
-impl MempalaceConfig {
+/// Backwards-compatibility alias. Deprecated in 0.2.0; removed in 0.3.0.
+#[deprecated(since = "0.2.0", note = "renamed to PalaceConfig")]
+pub type MempalaceConfig = PalaceConfig;
+
+impl PalaceConfig {
     pub fn new() -> Self {
         Self::with_config_dir(None)
     }
@@ -155,8 +170,35 @@ impl MempalaceConfig {
 
     fn default_config_dir() -> PathBuf {
         UserDirs::new()
+            .map(|u| u.home_dir().join(".palace"))
+            .unwrap_or_else(|| PathBuf::from(".palace"))
+    }
+
+    /// Migrate the legacy `~/.mempalace` directory to `~/.palace` if the new
+    /// directory does not exist yet. This is a one-shot, idempotent copy.
+    /// A breadcrumb file is left in the source directory so users know what
+    /// happened. The source is never deleted automatically.
+    pub fn migrate_legacy_dir(&self) {
+        let new_dir = &self.config_dir;
+        if new_dir.exists() {
+            return;
+        }
+        let legacy_dir = UserDirs::new()
             .map(|u| u.home_dir().join(".mempalace"))
-            .unwrap_or_else(|| PathBuf::from(".mempalace"))
+            .unwrap_or_else(|| PathBuf::from(".mempalace"));
+        if !legacy_dir.exists() {
+            return;
+        }
+        if let Err(e) = copy_dir_all(&legacy_dir, new_dir) {
+            warn!(error = %e, "could not migrate ~/.mempalace to ~/.palace");
+            return;
+        }
+        let breadcrumb = legacy_dir.join("MIGRATED_TO_PALACE.txt");
+        let _ = std::fs::write(
+            &breadcrumb,
+            "This directory has been migrated to ~/.palace by palace-rs 0.2.0.\n\
+             You may delete this directory once you have verified the migration.\n",
+        );
     }
 
     /// Path to the SQLite palace database file.
@@ -164,9 +206,18 @@ impl MempalaceConfig {
         self.palace_path().join("palace.db")
     }
 
-    /// Palace data directory (mirrors Python's palace_path).
+    /// Palace data directory.
     pub fn palace_path(&self) -> PathBuf {
+        // New env var (0.2.0+)
+        if let Ok(v) = std::env::var("PALACE_PALACE_PATH") {
+            return PathBuf::from(v);
+        }
+        // Legacy env vars (0.1.x) — accepted with deprecation warning in 0.2.x
         if let Ok(v) = std::env::var("MEMPALACE_PALACE_PATH") {
+            warn!(
+                "MEMPALACE_PALACE_PATH is deprecated; \
+                 use PALACE_PALACE_PATH instead. Support will be removed in 0.3.0."
+            );
             return PathBuf::from(v);
         }
         if let Ok(v) = std::env::var("MEMPAL_PALACE_PATH") {
@@ -213,7 +264,22 @@ impl MempalaceConfig {
     }
 
     pub fn entity_languages(&self) -> Vec<String> {
+        // New env var (0.2.0+)
+        if let Ok(value) = std::env::var("PALACE_ENTITY_LANGUAGES") {
+            let langs: Vec<String> = value
+                .split(',')
+                .filter_map(crate::i18n::canonical_language)
+                .collect();
+            if !langs.is_empty() {
+                return langs;
+            }
+        }
+        // Legacy env var (0.1.x) — accepted with deprecation warning in 0.2.x
         if let Ok(value) = std::env::var("MEMPALACE_ENTITY_LANGUAGES") {
+            warn!(
+                "MEMPALACE_ENTITY_LANGUAGES is deprecated; \
+                 use PALACE_ENTITY_LANGUAGES instead. Support will be removed in 0.3.0."
+            );
             let langs: Vec<String> = value
                 .split(',')
                 .filter_map(crate::i18n::canonical_language)
@@ -261,8 +327,23 @@ impl MempalaceConfig {
     }
 }
 
-impl Default for MempalaceConfig {
+impl Default for PalaceConfig {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Recursively copy a directory tree from `src` to `dst`.
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &dst_path)?;
+        } else {
+            std::fs::copy(entry.path(), dst_path)?;
+        }
+    }
+    Ok(())
 }

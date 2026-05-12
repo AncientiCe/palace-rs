@@ -2,12 +2,20 @@
 //!
 //! `Palace` owns the SQLite connection and config, exposing an ergonomic API
 //! that callers can use without importing individual modules.
+//!
+//! # Quick start
+//!
+//! ```rust,no_run
+//! use palace::palace::PalaceBuilder;
+//!
+//! let palace = PalaceBuilder::new().build_in_memory().unwrap();
+//! ```
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
 
-use crate::config::MempalaceConfig;
+use crate::config::PalaceConfig;
 use crate::embedder::embed_one;
 use crate::general_extractor::{extract_memories, Memory};
 use crate::knowledge_graph::{self as kg, KgStats, Triple};
@@ -20,7 +28,7 @@ use std::collections::HashSet;
 const CONVO_WING: &str = "conversations";
 const CONVO_ROOM: &str = "voice_turns";
 const DEFAULT_IMPORTANCE: f64 = 3.0;
-const DEFAULT_INGEST_LABEL: &str = "mempalace";
+const DEFAULT_INGEST_LABEL: &str = "palace";
 
 /// High-level handle to a memory palace instance.
 ///
@@ -28,9 +36,87 @@ const DEFAULT_INGEST_LABEL: &str = "mempalace";
 /// open, search, add, ingest turns, wake-up context, and knowledge graph queries.
 pub struct Palace {
     conn: Connection,
-    config: MempalaceConfig,
+    config: PalaceConfig,
     stack: MemoryStack,
     ingest_label: String,
+}
+
+/// Builder for `Palace`. Preferred over `Palace::open` for new code.
+///
+/// ```rust,no_run
+/// use palace::palace::PalaceBuilder;
+/// use palace::config::PalaceConfig;
+///
+/// let palace = PalaceBuilder::new()
+///     .config(PalaceConfig::new())
+///     .ingest_label("my_app")
+///     .build()
+///     .unwrap();
+/// ```
+pub struct PalaceBuilder {
+    config: PalaceConfig,
+    ingest_label: String,
+}
+
+impl Default for PalaceBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PalaceBuilder {
+    pub fn new() -> Self {
+        Self {
+            config: PalaceConfig::new(),
+            ingest_label: DEFAULT_INGEST_LABEL.to_string(),
+        }
+    }
+
+    /// Override the configuration.
+    pub fn config(mut self, config: PalaceConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Override the label stored in `added_by` for all writes through this handle.
+    pub fn ingest_label(mut self, label: impl Into<String>) -> Self {
+        let label = label.into();
+        self.ingest_label = if label.trim().is_empty() {
+            DEFAULT_INGEST_LABEL.to_string()
+        } else {
+            label
+        };
+        self
+    }
+
+    /// Open (or create) a palace at the path resolved by the config.
+    pub fn build(self) -> Result<Palace> {
+        self.config.migrate_legacy_dir();
+        let db_path = self.config.palace_db_path();
+        let conn = crate::db::open(&db_path)
+            .with_context(|| format!("opening palace at {}", db_path.display()))?;
+        let identity_path = self.config.identity_path();
+        let stack = MemoryStack::new(&db_path, &identity_path);
+        Ok(Palace {
+            conn,
+            config: self.config,
+            stack,
+            ingest_label: self.ingest_label,
+        })
+    }
+
+    /// Open an in-memory palace (useful for testing and ephemeral contexts).
+    pub fn build_in_memory(self) -> Result<Palace> {
+        let conn = crate::db::open_in_memory()?;
+        let identity_path = self.config.identity_path();
+        let stack = MemoryStack::new(Path::new(":memory:"), &identity_path);
+        Ok(Palace {
+            conn,
+            config: self.config,
+            stack,
+            ingest_label: self.ingest_label,
+        })
+    }
 }
 
 /// Structured search result with score provenance for library consumers.
@@ -45,25 +131,18 @@ pub struct PalaceSearchResult {
 
 impl Palace {
     /// Open (or create) a palace at the path specified by `config`.
-    pub fn open(config: MempalaceConfig) -> Result<Self> {
-        let db_path = config.palace_db_path();
-        let conn = crate::db::open(&db_path)
-            .with_context(|| format!("opening palace at {}", db_path.display()))?;
-        let identity_path = config.identity_path();
-        let stack = MemoryStack::new(&db_path, &identity_path);
-        Ok(Self {
-            conn,
-            config,
-            stack,
-            ingest_label: DEFAULT_INGEST_LABEL.to_string(),
-        })
+    ///
+    /// Deprecated: use [`PalaceBuilder`] instead.
+    #[deprecated(since = "0.2.0", note = "use PalaceBuilder::new().config(c).build()")]
+    pub fn open(config: PalaceConfig) -> Result<Self> {
+        PalaceBuilder::new().config(config).build()
     }
 
     /// Open a palace with explicit database and identity paths.
     pub fn open_paths(db_path: &Path, identity_path: &Path) -> Result<Self> {
         let conn = crate::db::open(db_path)
             .with_context(|| format!("opening palace at {}", db_path.display()))?;
-        let config = MempalaceConfig::new();
+        let config = PalaceConfig::new();
         let stack = MemoryStack::new(db_path, identity_path);
         Ok(Self {
             conn,
@@ -75,16 +154,7 @@ impl Palace {
 
     /// Open an in-memory palace (useful for testing).
     pub fn open_in_memory() -> Result<Self> {
-        let conn = crate::db::open_in_memory()?;
-        let config = MempalaceConfig::new();
-        let identity_path = config.identity_path();
-        let stack = MemoryStack::new(Path::new(":memory:"), &identity_path);
-        Ok(Self {
-            conn,
-            config,
-            stack,
-            ingest_label: DEFAULT_INGEST_LABEL.to_string(),
-        })
+        PalaceBuilder::new().build_in_memory()
     }
 
     /// Set the label used for memories ingested through this facade.
@@ -329,7 +399,7 @@ impl Palace {
     // ── Accessors ────────────────────────────────────────────────────────────
 
     /// Reference to the underlying config.
-    pub fn config(&self) -> &MempalaceConfig {
+    pub fn config(&self) -> &PalaceConfig {
         &self.config
     }
 
@@ -393,6 +463,30 @@ mod tests {
     }
 
     #[test]
+    fn builder_in_memory_creates_empty_palace() {
+        let palace = PalaceBuilder::new().build_in_memory().unwrap();
+        assert_eq!(palace.drawer_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn builder_custom_ingest_label() {
+        let palace = PalaceBuilder::new()
+            .ingest_label("my_app")
+            .build_in_memory()
+            .unwrap();
+        assert_eq!(palace.ingest_label(), "my_app");
+    }
+
+    #[test]
+    fn builder_empty_label_falls_back_to_default() {
+        let palace = PalaceBuilder::new()
+            .ingest_label("")
+            .build_in_memory()
+            .unwrap();
+        assert_eq!(palace.ingest_label(), "palace");
+    }
+
+    #[test]
     fn add_memory_and_count() {
         let palace = Palace::open_in_memory().unwrap();
         let (inserted, _id) = palace
@@ -433,7 +527,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(added_by, "mempalace");
+        assert_eq!(added_by, "palace");
     }
 
     #[test]

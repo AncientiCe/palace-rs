@@ -1,6 +1,6 @@
-use mempalace::db;
-use mempalace::ranker::hybrid_search;
-use mempalace::store::{add_drawer, DrawerFilter};
+use palace::db;
+use palace::ranker::hybrid_search;
+use palace::store::{add_drawer, DrawerFilter};
 
 struct EvalDoc {
     id: &'static str,

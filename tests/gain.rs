@@ -1,6 +1,6 @@
 use chrono::{Duration, Utc};
-use mempalace::gain::{summarize, GainOptions, SinceWindow};
-use mempalace::usage::{insert_event, UsageEvent, UsageSession};
+use palace::gain::{summarize, GainOptions, SinceWindow};
+use palace::usage::{insert_event, UsageEvent, UsageSession};
 use serde_json::json;
 use std::time::Duration as StdDuration;
 
@@ -32,7 +32,7 @@ fn options(project: Option<&str>, since: SinceWindow) -> GainOptions {
 
 #[test]
 fn empty_gain_report_is_zeroed() {
-    let conn = mempalace::db::open_in_memory().expect("open test db");
+    let conn = palace::db::open_in_memory().expect("open test db");
     let report = summarize(&conn, &options(None, SinceWindow::All)).expect("summarize");
 
     assert_eq!(report.tool_calls, 0);
@@ -44,28 +44,23 @@ fn empty_gain_report_is_zeroed() {
 
 #[test]
 fn aggregates_value_metrics_by_project() {
-    let conn = mempalace::db::open_in_memory().expect("open test db");
+    let conn = palace::db::open_in_memory().expect("open test db");
     let now = Utc::now().to_rfc3339();
 
-    let mut search = event(now.clone(), "alpha", "mempalace_search", "hit");
+    let mut search = event(now.clone(), "alpha", "palace_search", "hit");
     search.result_count = 3;
     search.est_tokens_saved = 1200;
     insert_event(&conn, &search).expect("insert search");
 
-    let mut kg = event(now.clone(), "alpha", "mempalace_kg_query", "kg_fact");
+    let mut kg = event(now.clone(), "alpha", "palace_kg_query", "kg_fact");
     kg.result_count = 2;
     kg.est_tokens_saved = 200;
     insert_event(&conn, &kg).expect("insert kg");
 
-    let duplicate = event(
-        now.clone(),
-        "alpha",
-        "mempalace_add_drawer",
-        "duplicate_skip",
-    );
+    let duplicate = event(now.clone(), "alpha", "palace_add_drawer", "duplicate_skip");
     insert_event(&conn, &duplicate).expect("insert duplicate");
 
-    let mut diary = event(now, "beta", "mempalace_diary_read", "diary_recall");
+    let mut diary = event(now, "beta", "palace_diary_read", "diary_recall");
     diary.result_count = 4;
     diary.est_tokens_saved = 400;
     insert_event(&conn, &diary).expect("insert diary");
@@ -86,14 +81,14 @@ fn aggregates_value_metrics_by_project() {
 
 #[test]
 fn repeated_query_hashes_count_as_repeat_questions_avoided() {
-    let conn = mempalace::db::open_in_memory().expect("open test db");
+    let conn = palace::db::open_in_memory().expect("open test db");
     let now = Utc::now().to_rfc3339();
 
-    let mut first = event(now.clone(), "alpha", "mempalace_search", "hit");
+    let mut first = event(now.clone(), "alpha", "palace_search", "hit");
     first.query_hash = Some("same_hash".to_string());
     insert_event(&conn, &first).expect("insert first");
 
-    let mut second = event(now, "alpha", "mempalace_search", "hit");
+    let mut second = event(now, "alpha", "palace_search", "hit");
     second.query_hash = Some("same_hash".to_string());
     insert_event(&conn, &second).expect("insert second");
 
@@ -105,12 +100,12 @@ fn repeated_query_hashes_count_as_repeat_questions_avoided() {
 
 #[test]
 fn since_window_filters_old_events() {
-    let conn = mempalace::db::open_in_memory().expect("open test db");
+    let conn = palace::db::open_in_memory().expect("open test db");
     let old = (Utc::now() - Duration::days(10)).to_rfc3339();
     let recent = Utc::now().to_rfc3339();
 
-    insert_event(&conn, &event(old, "alpha", "mempalace_search", "hit")).expect("insert old");
-    insert_event(&conn, &event(recent, "alpha", "mempalace_search", "hit")).expect("insert recent");
+    insert_event(&conn, &event(old, "alpha", "palace_search", "hit")).expect("insert old");
+    insert_event(&conn, &event(recent, "alpha", "palace_search", "hit")).expect("insert recent");
 
     let report = summarize(&conn, &options(None, SinceWindow::Days(7))).expect("summarize");
 
@@ -119,7 +114,7 @@ fn since_window_filters_old_events() {
 
 #[test]
 fn recorder_classifies_search_hits_and_repeats() {
-    let conn = mempalace::db::open_in_memory().expect("open test db");
+    let conn = palace::db::open_in_memory().expect("open test db");
     let session = UsageSession {
         session_id: "session_record".to_string(),
         project: "alpha".to_string(),
@@ -136,19 +131,19 @@ fn recorder_classifies_search_hits_and_repeats() {
         ]
     });
 
-    mempalace::usage::record_event(
+    palace::usage::record_event(
         &conn,
         &session,
-        "mempalace_search",
+        "palace_search",
         &args,
         &result,
         StdDuration::from_millis(7),
     )
     .expect("record first");
-    mempalace::usage::record_event(
+    palace::usage::record_event(
         &conn,
         &session,
-        "mempalace_search",
+        "palace_search",
         &args,
         &result,
         StdDuration::from_millis(8),
@@ -164,18 +159,18 @@ fn recorder_classifies_search_hits_and_repeats() {
 
 #[test]
 fn mcp_dispatch_records_usage_event() {
-    let conn = mempalace::db::open_in_memory().expect("open test db");
-    let config = mempalace::config::MempalaceConfig::new();
+    let conn = palace::db::open_in_memory().expect("open test db");
+    let config = palace::config::PalaceConfig::new();
     let session = UsageSession {
         session_id: "session_mcp".to_string(),
         project: "alpha".to_string(),
     };
 
-    let result = mempalace::mcp_server::dispatch_tool_with_usage(
+    let result = palace::mcp_server::dispatch_tool_with_usage(
         &conn,
         &config,
         &session,
-        "mempalace_status",
+        "palace_status",
         &json!({}),
     );
 

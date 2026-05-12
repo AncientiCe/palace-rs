@@ -1,5 +1,5 @@
-use mempalace::miner::{chunk_text, detect_room, CHUNK_SIZE};
-use mempalace::room_detector::Room;
+use palace::miner::{chunk_text, detect_room, CHUNK_SIZE};
+use palace::room_detector::Room;
 use std::path::Path;
 
 #[test]

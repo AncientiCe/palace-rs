@@ -241,7 +241,7 @@ pub fn run(
         })
         .unwrap_or_else(|| home.join("Desktop/transcripts"));
 
-    let config_dir = home.join(".mempalace");
+    let config_dir = home.join(".palace");
     let known_people = load_known_people(&config_dir);
 
     let files: Vec<PathBuf> = if let Some(f) = file {

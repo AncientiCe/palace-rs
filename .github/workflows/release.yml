@@ -56,11 +56,13 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          asset="mempalace-${version}-${{ matrix.target }}"
+          asset="palace-${version}-${{ matrix.target }}"
           mkdir -p "dist/${asset}"
+          cp "target/${{ matrix.target }}/release/palace" "dist/${asset}/"
           cp "target/${{ matrix.target }}/release/mempalace" "dist/${asset}/"
+          strip "dist/${asset}/palace" || true
           strip "dist/${asset}/mempalace" || true
-          cp README.md LICENSE "dist/${asset}/"
+          cp README.md LICENSE CHANGELOG.md "dist/${asset}/"
           tar -C dist -czf "dist/${asset}.tar.gz" "${asset}"
 
       - name: Package Windows artifact
@@ -68,10 +70,11 @@ jobs:
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart("v")
-          $asset = "mempalace-$version-${{ matrix.target }}"
+          $asset = "palace-$version-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$asset" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/palace.exe" "dist/$asset/"
           Copy-Item "target/${{ matrix.target }}/release/mempalace.exe" "dist/$asset/"
-          Copy-Item README.md,LICENSE "dist/$asset/"
+          Copy-Item README.md,LICENSE,CHANGELOG.md "dist/$asset/"
           Compress-Archive -Path "dist/$asset/*" -DestinationPath "dist/$asset.zip"
 
       - name: Generate Unix checksum
@@ -79,20 +82,20 @@ jobs:
         shell: bash
         run: |
           cd dist
-          asset="$(ls mempalace-*-${{ matrix.target }}.tar.gz)"
+          asset="$(ls palace-*-${{ matrix.target }}.tar.gz)"
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$asset" > mempalace-${{ matrix.target }}.sha256
+            sha256sum "$asset" > palace-${{ matrix.target }}.sha256
           else
-            shasum -a 256 "$asset" > mempalace-${{ matrix.target }}.sha256
+            shasum -a 256 "$asset" > palace-${{ matrix.target }}.sha256
           fi
 
       - name: Generate Windows checksum
         if: matrix.archive_ext == 'zip'
         shell: pwsh
         run: |
-          $asset = Get-ChildItem -Path dist -Filter "mempalace-*-${{ matrix.target }}.zip" | Select-Object -First 1
+          $asset = Get-ChildItem -Path dist -Filter "palace-*-${{ matrix.target }}.zip" | Select-Object -First 1
           $hash = (Get-FileHash -Algorithm SHA256 $asset.FullName).Hash.ToLowerInvariant()
-          "$hash  $($asset.Name)" | Out-File -FilePath "dist/mempalace-${{ matrix.target }}.sha256" -Encoding ascii
+          "$hash  $($asset.Name)" | Out-File -FilePath "dist/palace-${{ matrix.target }}.sha256" -Encoding ascii
 
       - name: Extract release notes from changelog
         shell: bash
@@ -126,6 +129,6 @@ jobs:
         with:
           body_path: dist/release-notes.md
           files: |
-            dist/mempalace-*-${{ matrix.target }}.${{ matrix.archive_ext }}
-            dist/mempalace-${{ matrix.target }}.sha256
+            dist/palace-*-${{ matrix.target }}.${{ matrix.archive_ext }}
+            dist/palace-${{ matrix.target }}.sha256
 

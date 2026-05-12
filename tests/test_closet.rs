@@ -1,5 +1,5 @@
-use mempalace::closet::{add_closet, list_closets};
-use mempalace::db;
+use palace::closet::{add_closet, list_closets};
+use palace::db;
 
 #[test]
 fn closets_store_topic_pointers_for_a_room() {

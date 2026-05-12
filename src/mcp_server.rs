@@ -1,11 +1,6 @@
-//! MCP Server — 19-tool stdio JSON-RPC loop for Claude Code.
+//! MCP Server — stdio JSON-RPC tool loop for AI coding assistants.
 //!
-//! Tool names, input schemas, and response shapes are identical to the
-//! Python version so existing Claude MCP configs need zero changes.
-//!
-//! Install: claude mcp add mempalace -- mempalace mcp
-//!
-//! Port of mcp_server.py.
+//! Install: claude mcp add palace -- palace mcp
 
 use anyhow::Result;
 use chrono::Utc;
@@ -13,35 +8,35 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
+use tracing::{error, info, warn};
 
-use crate::config::MempalaceConfig;
+use crate::config::PalaceConfig;
 use crate::dialect::{AAAK_SPEC, PALACE_PROTOCOL};
 use crate::knowledge_graph as kg;
 use crate::palace_graph;
 use crate::searcher::search_memories;
 use crate::store::{
     add_drawer_with_id, check_duplicate, count_drawers, delete_drawer, diary_id, get_drawer,
-    list_drawers, room_counts, taxonomy, update_drawer_content, wing_counts, DrawerFilter,
+    list_drawers, preference_search_filtered, room_counts, taxonomy, update_drawer_content,
+    wing_counts, DrawerFilter,
 };
 
 /// Run the MCP stdio server. Blocks until stdin closes.
 pub fn run() -> Result<()> {
-    let config = MempalaceConfig::new();
+    let config = PalaceConfig::new();
+    config.migrate_legacy_dir();
     let db_path = config.palace_db_path();
 
     // Open palace DB (or create if first run)
     let conn = match crate::db::open(&db_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("MemPalace MCP: failed to open database: {e}");
+            error!(error = %e, "Palace MCP: failed to open database");
             return Err(e);
         }
     };
 
-    eprintln!(
-        "MemPalace MCP Server starting... palace={}",
-        db_path.display()
-    );
+    info!(palace = %db_path.display(), "Palace MCP server starting");
     let session = crate::usage::UsageSession::new();
 
     let stdin = io::stdin();
@@ -84,7 +79,7 @@ pub fn run() -> Result<()> {
 
 fn handle_request(
     conn: &Connection,
-    config: &MempalaceConfig,
+    config: &PalaceConfig,
     session: &crate::usage::UsageSession,
     req: &Value,
 ) -> Option<String> {
@@ -101,7 +96,7 @@ fn handle_request(
             Some(json!({
                 "protocolVersion": protocol_version,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "mempalace", "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": "palace", "version": env!("CARGO_PKG_VERSION")},
             }))
         }
         "notifications/initialized" => return None,
@@ -138,7 +133,7 @@ fn handle_request(
 
 pub fn dispatch_tool_with_usage(
     conn: &Connection,
-    config: &MempalaceConfig,
+    config: &PalaceConfig,
     session: &crate::usage::UsageSession,
     name: &str,
     args: &Value,
@@ -148,50 +143,50 @@ pub fn dispatch_tool_with_usage(
     if let Err(err) =
         crate::usage::record_event(conn, session, name, args, &result, start.elapsed())
     {
-        eprintln!("MemPalace MCP: failed to record usage event: {err}");
+        warn!(error = %err, "Palace MCP: failed to record usage event");
     }
     result
 }
 
-pub fn dispatch_tool(
-    conn: &Connection,
-    config: &MempalaceConfig,
-    name: &str,
-    args: &Value,
-) -> Value {
+pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args: &Value) -> Value {
     match name {
-        "mempalace_status" => tool_status(conn, config),
-        "mempalace_list_wings" => tool_list_wings(conn),
-        "mempalace_list_rooms" => tool_list_rooms(conn, args),
-        "mempalace_get_taxonomy" => tool_get_taxonomy(conn),
-        "mempalace_get_aaak_spec" => json!({"aaak_spec": AAAK_SPEC}),
-        "mempalace_search" => tool_search(conn, args),
-        "mempalace_check_duplicate" => tool_check_duplicate(conn, args),
-        "mempalace_add_drawer" => tool_add_drawer(conn, args),
-        "mempalace_delete_drawer" => tool_delete_drawer_tool(conn, args),
-        "mempalace_kg_query" => tool_kg_query(conn, args),
-        "mempalace_kg_add" => tool_kg_add(conn, args),
-        "mempalace_kg_invalidate" => tool_kg_invalidate(conn, args),
-        "mempalace_kg_timeline" => tool_kg_timeline(conn, args),
-        "mempalace_kg_stats" => tool_kg_stats(conn),
-        "mempalace_traverse" => tool_traverse(conn, args),
-        "mempalace_find_tunnels" => tool_find_tunnels(conn, args),
-        "mempalace_graph_stats" => tool_graph_stats(conn),
-        "mempalace_create_tunnel" => tool_create_tunnel(conn, args),
-        "mempalace_list_tunnels" => tool_list_tunnels(conn, args),
-        "mempalace_delete_tunnel" => tool_delete_tunnel(conn, args),
-        "mempalace_follow_tunnels" => tool_follow_tunnels(conn, args),
-        "mempalace_get_drawer" => tool_get_drawer(conn, args),
-        "mempalace_list_drawers" => tool_list_drawers(conn, args),
-        "mempalace_update_drawer" => tool_update_drawer(conn, args),
-        "mempalace_hook_settings" => json!({"save_enabled": true, "precompact_enabled": true}),
-        "mempalace_memories_filed_away" => json!({"success": true}),
-        "mempalace_list_agents" => tool_list_agents(conn),
-        "mempalace_diary_write" => tool_diary_write(conn, args),
-        "mempalace_diary_read" => tool_diary_read(conn, args),
-        "mempalace_diary_search" => tool_diary_search(conn, args),
-        "mempalace_session_context" => tool_session_context(conn, args),
-        "mempalace_gain" => tool_gain(conn, args),
+        "palace_status" => tool_status(conn, config),
+        "palace_list_wings" => tool_list_wings(conn),
+        "palace_list_rooms" => tool_list_rooms(conn, args),
+        "palace_get_taxonomy" => tool_get_taxonomy(conn),
+        "palace_get_aaak_spec" => json!({"aaak_spec": AAAK_SPEC}),
+        "palace_search" => tool_search(conn, args),
+        "palace_check_duplicate" => tool_check_duplicate(conn, args),
+        "palace_add_drawer" => tool_add_drawer(conn, args),
+        "palace_delete_drawer" => tool_delete_drawer_tool(conn, args),
+        "palace_kg_query" => tool_kg_query(conn, args),
+        "palace_kg_add" => tool_kg_add(conn, args),
+        "palace_kg_invalidate" => tool_kg_invalidate(conn, args),
+        "palace_kg_timeline" => tool_kg_timeline(conn, args),
+        "palace_kg_stats" => tool_kg_stats(conn),
+        "palace_traverse" => tool_traverse(conn, args),
+        "palace_find_tunnels" => tool_find_tunnels(conn, args),
+        "palace_graph_stats" => tool_graph_stats(conn),
+        "palace_create_tunnel" => tool_create_tunnel(conn, args),
+        "palace_list_tunnels" => tool_list_tunnels(conn, args),
+        "palace_delete_tunnel" => tool_delete_tunnel(conn, args),
+        "palace_follow_tunnels" => tool_follow_tunnels(conn, args),
+        "palace_get_drawer" => tool_get_drawer(conn, args),
+        "palace_list_drawers" => tool_list_drawers(conn, args),
+        "palace_update_drawer" => tool_update_drawer(conn, args),
+        "palace_hook_settings" => json!({"save_enabled": true, "precompact_enabled": true}),
+        "palace_memories_filed_away" => json!({"success": true}),
+        "palace_list_agents" => tool_list_agents(conn),
+        "palace_diary_write" => tool_diary_write(conn, args),
+        "palace_diary_read" => tool_diary_read(conn, args),
+        "palace_diary_search" => tool_diary_search(conn, args),
+        "palace_session_context" => tool_session_context(conn, args),
+        "palace_gain" => tool_gain(conn, args),
+        "palace_remember" => tool_remember(conn, args),
+        "palace_forget" => tool_forget(conn, args),
+        "palace_explain" => tool_explain(conn, args),
+        "palace_preference_search" => tool_preference_search(conn, args),
+        "palace_export" => tool_export(conn),
         _ => json!({"error": format!("Unknown tool: {name}")}),
     }
 }
@@ -202,11 +197,11 @@ pub fn dispatch_tool(
 fn no_palace() -> Value {
     json!({
         "error": "No palace found",
-        "hint": "Run: mempalace init <dir> && mempalace mine <dir>",
+        "hint": "Run: palace init <dir> && palace mine <dir>",
     })
 }
 
-fn tool_status(conn: &Connection, config: &MempalaceConfig) -> Value {
+fn tool_status(conn: &Connection, config: &PalaceConfig) -> Value {
     let count = count_drawers(conn).unwrap_or(0);
     let wings = wing_counts(conn).unwrap_or_default();
     let rooms = room_counts(conn, None)
@@ -926,17 +921,157 @@ fn tool_session_context(conn: &Connection, args: &Value) -> Value {
     }
 }
 
+// ── Phase-4 tools ─────────────────────────────────────────────────────────
+
+/// Store a fact with high importance — a high-level "palace remember X" shortcut.
+fn tool_remember(conn: &Connection, args: &Value) -> Value {
+    let text = match args.get("text").and_then(|v| v.as_str()) {
+        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+        _ => return json!({"error": "text is required"}),
+    };
+    let wing = args
+        .get("wing")
+        .and_then(|v| v.as_str())
+        .unwrap_or("general")
+        .to_string();
+    let room = args
+        .get("room")
+        .and_then(|v| v.as_str())
+        .unwrap_or("general")
+        .to_string();
+
+    let embedding = crate::embedder::embed_one(&text).ok();
+    let emb_ref = embedding.as_deref();
+
+    match crate::store::add_drawer(
+        conn,
+        &wing,
+        &room,
+        &text,
+        emb_ref,
+        "palace_remember",
+        0,
+        "mcp",
+        5.0,
+    ) {
+        Ok((inserted, id)) => json!({
+            "success": true,
+            "inserted": inserted,
+            "id": id,
+            "wing": wing,
+            "room": room,
+        }),
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+/// Delete a drawer by ID — the counterpart to `palace_remember`.
+fn tool_forget(conn: &Connection, args: &Value) -> Value {
+    let id = match args.get("id").and_then(|v| v.as_str()) {
+        Some(id) if !id.trim().is_empty() => id.trim().to_string(),
+        _ => return json!({"error": "id is required"}),
+    };
+    match delete_drawer(conn, &id) {
+        Ok(true) => json!({"success": true, "deleted_id": id}),
+        Ok(false) => json!({"success": false, "error": "drawer not found", "id": id}),
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+/// Return full metadata about a stored drawer — useful for explaining why a
+/// memory exists, who filed it, when, and from which source.
+fn tool_explain(conn: &Connection, args: &Value) -> Value {
+    let id = match args.get("id").and_then(|v| v.as_str()) {
+        Some(id) if !id.trim().is_empty() => id.trim().to_string(),
+        _ => return json!({"error": "id is required"}),
+    };
+    match get_drawer(conn, &id) {
+        Ok(Some(d)) => json!({
+            "id": d.id,
+            "wing": d.wing,
+            "room": d.room,
+            "content": d.content,
+            "source_file": d.source_file,
+            "chunk_index": d.chunk_index,
+            "added_by": d.added_by,
+            "filed_at": d.filed_at,
+            "created_at": d.created_at,
+            "importance": d.importance,
+            "hall": d.hall,
+            "metadata": d.metadata,
+            "entity_metadata": d.entity_metadata,
+        }),
+        Ok(None) => json!({"error": "drawer not found", "id": id}),
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+/// Dedicated preference query — surfaces convention/preference drawers even
+/// when BM25 has no keyword overlap with the query.
+fn tool_preference_search(conn: &Connection, args: &Value) -> Value {
+    let query = match args.get("query").and_then(|v| v.as_str()) {
+        Some(q) if !q.trim().is_empty() => q.trim().to_string(),
+        _ => return json!({"error": "query is required"}),
+    };
+    let limit = int_arg(args, "limit").unwrap_or(10) as usize;
+    let filter = DrawerFilter {
+        wing: args.get("wing").and_then(|v| v.as_str()).map(String::from),
+        room: args.get("room").and_then(|v| v.as_str()).map(String::from),
+    };
+
+    let embedding = match crate::embedder::embed_one(&query) {
+        Ok(e) => e,
+        Err(e) => return json!({"error": format!("embedding error: {e}")}),
+    };
+
+    match preference_search_filtered(conn, &embedding, &filter, limit) {
+        Ok(results) => {
+            let hits: Vec<_> = results
+                .iter()
+                .map(|r| {
+                    json!({
+                        "id": r.id,
+                        "text": r.text,
+                        "wing": r.wing,
+                        "room": r.room,
+                        "source_file": r.source_file,
+                        "filed_at": r.filed_at,
+                        "similarity": r.similarity,
+                    })
+                })
+                .collect();
+            json!({
+                "query": query,
+                "filters": {"wing": filter.wing, "room": filter.room},
+                "results": hits,
+            })
+        }
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+/// Export all drawers as a portable JSON snapshot (embeddings excluded).
+fn tool_export(conn: &Connection) -> Value {
+    match crate::export::export_drawers(conn) {
+        Ok(doc) => match serde_json::to_value(&doc) {
+            Ok(v) => v,
+            Err(e) => json!({"error": e.to_string()}),
+        },
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
 // ── Tool schema list ──────────────────────────────────────────────────────
 
 fn tool_list() -> Value {
     json!([
         {
-            "name": "mempalace_status",
+            "name": "palace_status",
             "description": "Palace overview — total drawers, wing and room counts",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
-            "name": "mempalace_gain",
+            "name": "palace_gain",
             "description": "Show local MCP usage gains: hits, estimated tokens saved, skipped duplicates, recall, latency, and per-project value.",
             "inputSchema": {
                 "type": "object",
@@ -950,12 +1085,12 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_list_wings",
+            "name": "palace_list_wings",
             "description": "List all wings with drawer counts",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
-            "name": "mempalace_list_rooms",
+            "name": "palace_list_rooms",
             "description": "List rooms within a wing (or all rooms if no wing given)",
             "inputSchema": {
                 "type": "object",
@@ -965,17 +1100,17 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_get_taxonomy",
+            "name": "palace_get_taxonomy",
             "description": "Full taxonomy: wing → room → drawer count",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
-            "name": "mempalace_get_aaak_spec",
-            "description": "Get the AAAK dialect specification — the compressed memory format MemPalace uses.",
+            "name": "palace_get_aaak_spec",
+            "description": "Get the AAAK dialect specification — the compressed memory format Palace uses.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
-            "name": "mempalace_search",
+            "name": "palace_search",
             "description": "Semantic search. Returns verbatim drawer content with similarity scores.",
             "inputSchema": {
                 "type": "object",
@@ -989,7 +1124,7 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_check_duplicate",
+            "name": "palace_check_duplicate",
             "description": "Check if content already exists in the palace before filing",
             "inputSchema": {
                 "type": "object",
@@ -1001,7 +1136,7 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_add_drawer",
+            "name": "palace_add_drawer",
             "description": "File verbatim content into the palace. Checks for duplicates first.",
             "inputSchema": {
                 "type": "object",
@@ -1016,7 +1151,7 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_delete_drawer",
+            "name": "palace_delete_drawer",
             "description": "Delete a drawer by ID. Irreversible.",
             "inputSchema": {
                 "type": "object",
@@ -1027,7 +1162,7 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_kg_query",
+            "name": "palace_kg_query",
             "description": "Query the knowledge graph for an entity's relationships.",
             "inputSchema": {
                 "type": "object",
@@ -1040,7 +1175,7 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_kg_add",
+            "name": "palace_kg_add",
             "description": "Add a fact to the knowledge graph. Subject → predicate → object.",
             "inputSchema": {
                 "type": "object",
@@ -1055,7 +1190,7 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_kg_invalidate",
+            "name": "palace_kg_invalidate",
             "description": "Mark a fact as no longer true.",
             "inputSchema": {
                 "type": "object",
@@ -1069,7 +1204,7 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_kg_timeline",
+            "name": "palace_kg_timeline",
             "description": "Chronological timeline of facts, optionally for one entity.",
             "inputSchema": {
                 "type": "object",
@@ -1079,12 +1214,12 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_kg_stats",
+            "name": "palace_kg_stats",
             "description": "Knowledge graph overview: entities, triples, relationship types.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
-            "name": "mempalace_traverse",
+            "name": "palace_traverse",
             "description": "Walk the palace graph from a room. Find connected ideas across wings.",
             "inputSchema": {
                 "type": "object",
@@ -1096,7 +1231,7 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_find_tunnels",
+            "name": "palace_find_tunnels",
             "description": "Find rooms that bridge two wings.",
             "inputSchema": {
                 "type": "object",
@@ -1107,12 +1242,12 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_graph_stats",
+            "name": "palace_graph_stats",
             "description": "Palace graph overview: total rooms, tunnel connections, edges between wings.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
-            "name": "mempalace_create_tunnel",
+            "name": "palace_create_tunnel",
             "description": "Create a persisted tunnel between two wing/room pairs.",
             "inputSchema": {
                 "type": "object",
@@ -1127,7 +1262,7 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_list_tunnels",
+            "name": "palace_list_tunnels",
             "description": "List persisted tunnels.",
             "inputSchema": {"type": "object", "properties": {
                 "wing": {"type": "string"},
@@ -1135,14 +1270,14 @@ fn tool_list() -> Value {
             }}
         },
         {
-            "name": "mempalace_delete_tunnel",
+            "name": "palace_delete_tunnel",
             "description": "Delete a persisted tunnel.",
             "inputSchema": {"type": "object", "properties": {
                 "tunnel_id": {"type": "string"}
             }, "required": ["tunnel_id"]}
         },
         {
-            "name": "mempalace_follow_tunnels",
+            "name": "palace_follow_tunnels",
             "description": "Follow persisted tunnels from a wing/room pair.",
             "inputSchema": {"type": "object", "properties": {
                 "wing": {"type": "string"},
@@ -1150,14 +1285,14 @@ fn tool_list() -> Value {
             }, "required": ["wing", "room"]}
         },
         {
-            "name": "mempalace_get_drawer",
+            "name": "palace_get_drawer",
             "description": "Get a drawer by ID.",
             "inputSchema": {"type": "object", "properties": {
                 "drawer_id": {"type": "string"}
             }, "required": ["drawer_id"]}
         },
         {
-            "name": "mempalace_list_drawers",
+            "name": "palace_list_drawers",
             "description": "List drawers with optional wing/room filters.",
             "inputSchema": {"type": "object", "properties": {
                 "wing": {"type": "string"},
@@ -1166,7 +1301,7 @@ fn tool_list() -> Value {
             }}
         },
         {
-            "name": "mempalace_update_drawer",
+            "name": "palace_update_drawer",
             "description": "Update drawer content and refresh metadata.",
             "inputSchema": {"type": "object", "properties": {
                 "drawer_id": {"type": "string"},
@@ -1174,22 +1309,22 @@ fn tool_list() -> Value {
             }, "required": ["drawer_id", "content"]}
         },
         {
-            "name": "mempalace_hook_settings",
+            "name": "palace_hook_settings",
             "description": "Return hook settings.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
-            "name": "mempalace_memories_filed_away",
+            "name": "palace_memories_filed_away",
             "description": "Acknowledge that memories have been filed.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
-            "name": "mempalace_list_agents",
+            "name": "palace_list_agents",
             "description": "List agent diary wings.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
-            "name": "mempalace_diary_write",
+            "name": "palace_diary_write",
             "description": "Write to your personal agent diary. Supports session metadata for warm-start context.",
             "inputSchema": {
                 "type": "object",
@@ -1205,7 +1340,7 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_diary_read",
+            "name": "palace_diary_read",
             "description": "Read your recent diary entries.",
             "inputSchema": {
                 "type": "object",
@@ -1217,7 +1352,7 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_diary_search",
+            "name": "palace_diary_search",
             "description": "Semantic search within an agent's diary entries.",
             "inputSchema": {
                 "type": "object",
@@ -1231,7 +1366,7 @@ fn tool_list() -> Value {
             }
         },
         {
-            "name": "mempalace_session_context",
+            "name": "palace_session_context",
             "description": "Get warm-start context from the last 24h of diary entries for an agent.",
             "inputSchema": {
                 "type": "object",
@@ -1240,6 +1375,60 @@ fn tool_list() -> Value {
                 },
                 "required": ["agent_name"]
             }
+        },
+        {
+            "name": "palace_remember",
+            "description": "File a key fact with high importance (5.0). Shortcut for palace_add_drawer with importance=5.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The fact to remember"},
+                    "wing": {"type": "string", "description": "Wing (default: general)"},
+                    "room": {"type": "string", "description": "Room (default: general)"}
+                },
+                "required": ["text"]
+            }
+        },
+        {
+            "name": "palace_forget",
+            "description": "Delete a drawer by ID. Use when a memory is outdated or incorrect.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Drawer ID to delete"}
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "palace_explain",
+            "description": "Return full provenance for a drawer — who filed it, when, from which source file, and its importance.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Drawer ID to explain"}
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "palace_preference_search",
+            "description": "Search drawers tagged as preferences or conventions. Use when asking what the user prefers, their coding style, or standing rules.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to search for"},
+                    "limit": {"type": "integer", "description": "Max results (default 10)"},
+                    "wing": {"type": "string", "description": "Filter by wing (optional)"},
+                    "room": {"type": "string", "description": "Filter by room (optional)"}
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "palace_export",
+            "description": "Export all palace drawers as a portable JSON snapshot (embeddings excluded). Use for backup or migration.",
+            "inputSchema": {"type": "object", "properties": {}}
         }
     ])
 }

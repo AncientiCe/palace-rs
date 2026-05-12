@@ -1,8 +1,46 @@
 # Changelog
 
-All notable changes to `mempalace-rs` are documented here.
+All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here.
 
 This Rust implementation uses its own `0.x` version track.
+
+## [0.2.0] - 2026-05-12
+
+### Changed
+
+- **Renamed the project from `mempalace` to `palace`.** The crate is now
+  published as `palace-rs`, the primary binary is `palace`, the MCP tools are
+  `palace_*` (e.g. `palace_status`, `palace_search`, `palace_kg_query`,
+  `palace_diary_write`), the config/data directory moved from `~/.mempalace`
+  to `~/.palace`, and environment variables moved from `MEMPALACE_*` to
+  `PALACE_*`.
+- Release assets are now named `palace-<version>-<target>.{tar.gz,zip}` and
+  ship the `palace` binary as the headline artifact.
+
+### Added
+
+- `mempalace` backwards-compatibility shim binary that re-execs `palace` with a
+  deprecation notice on stderr. Ships in the 0.2.x line only and will be
+  **removed in 0.3.0**.
+- `palace install` automatically migrates existing MCP client configs
+  (Cursor, Codex, Claude Code) and rule files from the legacy `mempalace`
+  entries to the new `palace` entries.
+- Automatic migration of `~/.mempalace` to `~/.palace` on first run when the
+  legacy directory exists and the new one does not.
+- `MEMPALACE_*` environment variables are still honored with a printed
+  deprecation warning that points at the new `PALACE_*` names.
+
+### Deprecated
+
+- The `mempalace` binary, `MEMPALACE_*` environment variables, and the legacy
+  `~/.mempalace` data directory. All keep working in 0.2.x and will be removed
+  in 0.3.0.
+
+### Migration
+
+- Run `palace install` once to rewrite MCP client configs and rules.
+- Update scripts, hooks, and CI to call `palace` instead of `mempalace`.
+- Rename any `MEMPALACE_*` environment variables to their `PALACE_*` equivalents.
 
 ## [0.1.9] - 2026-05-08
 
