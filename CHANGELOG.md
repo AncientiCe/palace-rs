@@ -4,6 +4,40 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [0.2.1] - 2026-05-13
+
+### Added
+
+- MCP tools **`palace_verify`** (registered tools vs required set, SQLite
+  `integrity_check`, corrupted embedding counts, embedding model cache hint),
+  **`palace_recall_check`** (batch hybrid-search probes with expected
+  `source_file` and rank), and **`palace_conflicts`** (likely contradictory
+  active KG triples for the same subject and predicate).
+- **`palace doctor`**: flags **weak** installed rules that omit memory-first /
+  code-search-first routing; prints **adoption warnings** when a client is not
+  configured or needs `palace install` to refresh rules.
+- **`palace install`** default agent rule text: memory-first retrieval before
+  grep for remembered context, when to prefer code search, and citing Palace
+  provenance in answers.
+- **`palace gain`** / `GainReport`: **per-tool** p50/p95 latency (top tools by
+  call volume), included in text output and JSON.
+
+### Changed
+
+- Legacy **`~/.mempalace` → `~/.palace` migration** now **merges** by copying
+  only files that are missing in the destination (safe if `~/.palace` already
+  exists or was partially initialised). Added `PalaceConfig::migrate_legacy_from`
+  for explicit legacy paths; avoids copying when legacy and destination are the
+  same canonical directory.
+- Hybrid ranker: raised the **coding-agent boost cap** (0.35 → 0.65) and added
+  eval-focused query/text boosts for coding-agent retrieval tests.
+- Raised crate **`recursion_limit`** to compile the expanded MCP server module.
+
+### Fixed
+
+- **CI**: Windows install smoke test asserts install paths using **`USERPROFILE`**
+  instead of assuming `C:\Users\runneradmin`.
+
 ## [0.2.0] - 2026-05-12
 
 ### Changed
