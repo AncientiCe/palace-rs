@@ -4,6 +4,22 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [0.3.2] - 2026-05-15
+
+### Changed
+
+- **Agent rule restructured into 3 hard trigger blocks** — `RULE_BODY` (installed
+  into `.cursor/rules/palace.mdc`, `.codex/AGENTS.md`, `.claude/CLAUDE.md`) and
+  `PALACE_PROTOCOL` (embedded in `palace_status` MCP response) are now structured
+  as three imperative blocks: **SESSION START**, **BEFORE ANSWERING**, and
+  **AFTER WORK**. The previous 11-step and 9-step numbered lists caused agents to
+  front-load steps 1–2 and deprioritise the rest; the new block layout makes each
+  trigger an unconditional gate, improving `palace_diary_search` and
+  `palace_kg_query` call rates in practice.
+- **`rule_is_weak` detection** updated to check for the new block keywords
+  (`SESSION START`, `BEFORE ANSWERING`, `AFTER WORK`) rather than the old numbered
+  step phrases. Run `palace install` to refresh installed rules.
+
 ## [0.3.1] - 2026-05-15
 
 ### Added

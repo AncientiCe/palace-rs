@@ -4,20 +4,26 @@
 //! Also provides token counting and basic compression stats. Port of dialect.py.
 
 /// Protocol instructions embedded in the MCP status response.
-pub const PALACE_PROTOCOL: &str = "MANDATORY — Palace Memory Protocol (no exceptions, every session):
-1. SESSION START: Call palace_status, then palace_session_context(agent_name) BEFORE doing anything else.
-2. BEFORE RESPONDING about any person, project, past decision, or preference: call palace_search and palace_kg_query for durable facts FIRST. Never guess — verify.
-3. CONTINUING PRIOR WORK: call palace_diary_search before resuming a previous task, release, plan, fix, or decision thread.
-4. REPEAT QUESTIONS: before re-answering planning/history questions, search diary and project memory for similar prior answers.
-5. FOR PREFERENCES / CONVENTIONS: call palace_preference_search — it surfaces preference drawers BM25 misses.
-6. IF UNSURE about a fact (name, gender, age, relationship): say \"let me check\" and query the palace. Wrong is worse than slow.
-7. AFTER SUBSTANTIVE WORK: call palace_diary_write to record what happened, what you learned, what matters.
-8. WHEN FACTS CHANGE: call palace_kg_invalidate on the old fact, palace_kg_add for the new one.
-9. TO FILE A KEY FACT: use palace_remember (sets importance=5). To delete outdated info: use palace_forget.
+pub const PALACE_PROTOCOL: &str = "MANDATORY — Palace Memory Protocol (three hard triggers, every session, no exceptions):
 
-MEMORY ROUTING: use Palace for prior decisions, user preferences, previous fixes, commands that worked, project history, and \"what happened last time?\". Use code search first only for current source symbols, exact definitions, and implementation details that may have changed.
+SESSION START — always, before anything else:
+→ palace_status → palace_session_context(agent_name) → palace_diary_search (recent work in this project)
 
-Skipping any step is a protocol violation. Storage is not memory — but storage + this protocol = memory.";
+BEFORE ANSWERING — any question about past decisions, preferences, people, projects, or \"what happened last time?\":
+→ palace_search + palace_kg_query — never answer from training data alone.
+  MEMORY-FIRST: call palace_search before grep/file-search for remembered decisions, fixes, conventions, session history.
+  CODE-SEARCH-FIRST: use grep only for current symbols, exact definitions, or implementation details that may have changed.
+  For preferences/conventions: also call palace_preference_search.
+  When Palace answers, cite provenance (wing, room, source file, drawer id).
+
+AFTER WORK — after any substantive task, fix, decision, or discovery:
+→ palace_diary_write (what happened, what you learned, what matters)
+→ palace_kg_add for stable facts; palace_kg_invalidate + palace_kg_add when facts change.
+  To file a key fact: palace_remember (importance=5). To delete outdated info: palace_forget.
+
+MEMORY ROUTING: use Palace for prior decisions, user preferences, previous fixes, commands that worked, project history, and \"what happened last time?\". Use KG for stable facts. Use diary for session continuity. Use code search first only for current source symbols, exact definitions, and implementation details that may have changed.
+
+Skipping any trigger is a protocol violation. Storage is not memory — but storage + this protocol = memory.";
 
 /// The AAAK compressed memory dialect specification.
 pub const AAAK_SPEC: &str = "AAAK is a compressed memory dialect that MemPalace uses for efficient storage.
