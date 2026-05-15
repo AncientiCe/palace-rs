@@ -5,13 +5,17 @@
 
 /// Protocol instructions embedded in the MCP status response.
 pub const PALACE_PROTOCOL: &str = "MANDATORY — Palace Memory Protocol (no exceptions, every session):
-1. SESSION START: Call palace_status BEFORE doing anything else — you are reading this because you did. Do the same next session.
-2. BEFORE RESPONDING about any person, project, or past event: call palace_kg_query or palace_search FIRST. Never guess — verify.
-3. FOR PREFERENCES / CONVENTIONS: call palace_preference_search — it surfaces preference drawers BM25 misses.
-4. IF UNSURE about a fact (name, gender, age, relationship): say \"let me check\" and query the palace. Wrong is worse than slow.
-5. AFTER EACH SESSION: call palace_diary_write to record what happened, what you learned, what matters.
-6. WHEN FACTS CHANGE: call palace_kg_invalidate on the old fact, palace_kg_add for the new one.
-7. TO FILE A KEY FACT: use palace_remember (sets importance=5). To delete outdated info: use palace_forget.
+1. SESSION START: Call palace_status, then palace_session_context(agent_name) BEFORE doing anything else.
+2. BEFORE RESPONDING about any person, project, past decision, or preference: call palace_search and palace_kg_query for durable facts FIRST. Never guess — verify.
+3. CONTINUING PRIOR WORK: call palace_diary_search before resuming a previous task, release, plan, fix, or decision thread.
+4. REPEAT QUESTIONS: before re-answering planning/history questions, search diary and project memory for similar prior answers.
+5. FOR PREFERENCES / CONVENTIONS: call palace_preference_search — it surfaces preference drawers BM25 misses.
+6. IF UNSURE about a fact (name, gender, age, relationship): say \"let me check\" and query the palace. Wrong is worse than slow.
+7. AFTER SUBSTANTIVE WORK: call palace_diary_write to record what happened, what you learned, what matters.
+8. WHEN FACTS CHANGE: call palace_kg_invalidate on the old fact, palace_kg_add for the new one.
+9. TO FILE A KEY FACT: use palace_remember (sets importance=5). To delete outdated info: use palace_forget.
+
+MEMORY ROUTING: use Palace for prior decisions, user preferences, previous fixes, commands that worked, project history, and \"what happened last time?\". Use code search first only for current source symbols, exact definitions, and implementation details that may have changed.
 
 Skipping any step is a protocol violation. Storage is not memory — but storage + this protocol = memory.";
 

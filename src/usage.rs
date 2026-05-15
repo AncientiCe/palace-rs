@@ -142,7 +142,9 @@ fn classify_event(
         "palace_check_duplicate" => classify_check_duplicate(conn, &mut event, result)?,
         "palace_add_drawer" => classify_add_drawer(conn, &mut event, result)?,
         "palace_kg_query" => classify_kg_query(&mut event, result),
-        "palace_diary_read" => classify_diary_read(&mut event, result),
+        "palace_diary_read" | "palace_diary_search" | "palace_session_context" => {
+            classify_diary_recall(&mut event, result)
+        }
         _ => {}
     }
 
@@ -225,6 +227,18 @@ fn classify_kg_query(event: &mut UsageEvent, result: &Value) {
                 .and_then(Value::as_array)
                 .map(|facts| facts.len() as i64)
         })
+        .or_else(|| {
+            result
+                .get("relationships")
+                .and_then(Value::as_array)
+                .map(|facts| facts.len() as i64)
+        })
+        .or_else(|| {
+            result
+                .get("triples")
+                .and_then(Value::as_array)
+                .map(|facts| facts.len() as i64)
+        })
         .unwrap_or_default();
     event.result_count = count;
     if count > 0 {
@@ -236,11 +250,23 @@ fn classify_kg_query(event: &mut UsageEvent, result: &Value) {
     }
 }
 
-fn classify_diary_read(event: &mut UsageEvent, result: &Value) {
+fn classify_diary_recall(event: &mut UsageEvent, result: &Value) {
     let count = result
         .get("entries")
         .and_then(Value::as_array)
         .map(|entries| entries.len() as i64)
+        .or_else(|| {
+            result
+                .get("results")
+                .and_then(Value::as_array)
+                .map(|entries| entries.len() as i64)
+        })
+        .or_else(|| {
+            result
+                .get("last_session")
+                .and_then(Value::as_array)
+                .map(|entries| entries.len() as i64)
+        })
         .unwrap_or_default();
     event.result_count = count;
     if count > 0 {

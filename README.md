@@ -161,6 +161,7 @@ The first time you run `mine`, the embedding model is downloaded automatically f
 cargo install --path .       # development install; release installers do this for you
 palace install               # configures Cursor + Codex + Claude Code
 palace doctor                # verifies MCP config, rules, binary, and drawer count
+palace seed-adoption-facts   # seed KG facts that make agent recall measurable
 palace init ~/my-project     # detect rooms and write palace.yaml
 palace mine ~/my-project     # populate the palace
 ```
@@ -187,6 +188,7 @@ call the MCP tools when its installed rule tells it to consult memory.
 | `palace install` | Register the MCP server with Cursor, Codex, and Claude Code |
 | `palace uninstall` | Remove palace from MCP client configs |
 | `palace doctor` | Inspect binary path, palace DB, and MCP config status |
+| `palace seed-adoption-facts` | Seed durable KG facts for Palace adoption and quality gates |
 | `palace mcp` | Start the MCP stdio server |
 
 ### `mine` flags
@@ -316,6 +318,19 @@ fixes, conventions, preferences, prior commands, session history, and "what
 happened last time?" should use Palace before grep or code search. Grep remains
 the right first tool for current symbols, exact definitions, exact files, and
 implementation details that may have changed since the project was mined.
+It also tells agents to warm-start with `palace_session_context`, search diaries
+with `palace_diary_search` before continuing old work, use KG tools for durable
+facts, and write `palace_diary_write` after substantive work.
+
+Seed durable KG facts for adoption tracking:
+
+```bash
+palace seed-adoption-facts --project my_project
+```
+
+The seed is idempotent and records the four supported clients, the memory-first
+protocol, routing rules, user preference for memory-aware agents, and standard
+quality gates. Agents can then recall those facts with `palace_kg_query`.
 
 Remove palace config:
 
@@ -401,6 +416,7 @@ graph operations, graph tunnels, hook acknowledgements, and agent diaries:
 | `palace_kg_invalidate` | Mark a fact as no longer true |
 | `palace_kg_timeline` | Chronological fact history |
 | `palace_kg_stats` | Knowledge graph overview |
+| `palace_seed_adoption_facts` | Seed durable KG facts for four-client adoption |
 | `palace_traverse` | BFS graph walk from a room |
 | `palace_find_tunnels` | Rooms bridging two wings |
 | `palace_graph_stats` | Palace graph summary |

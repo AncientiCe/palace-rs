@@ -202,6 +202,103 @@ fn recorder_classifies_search_hits_and_repeats() {
 }
 
 #[test]
+fn recorder_classifies_diary_warm_start_and_search_as_recall() {
+    let conn = palace::db::open_in_memory().expect("open test db");
+    let session = UsageSession {
+        session_id: "session_diary".to_string(),
+        project: "alpha".to_string(),
+    };
+    let result = json!({
+        "agent": "codex",
+        "entries": [
+            {"text": "Prior decision", "topic": "planning"}
+        ]
+    });
+
+    palace::usage::record_event(
+        &conn,
+        &session,
+        "palace_session_context",
+        &json!({"agent_name": "codex"}),
+        &result,
+        StdDuration::from_millis(3),
+    )
+    .expect("record session context");
+    palace::usage::record_event(
+        &conn,
+        &session,
+        "palace_diary_search",
+        &json!({"agent_name": "codex", "query": "prior decision"}),
+        &result,
+        StdDuration::from_millis(4),
+    )
+    .expect("record diary search");
+
+    let report = summarize(&conn, &options(Some("alpha"), SinceWindow::All)).expect("summarize");
+
+    assert_eq!(report.diary_recalls, 2);
+    assert!(report.tokens_saved_est > 0);
+}
+
+#[test]
+fn recorder_classifies_kg_query_shapes_as_facts() {
+    let conn = palace::db::open_in_memory().expect("open test db");
+    let session = UsageSession {
+        session_id: "session_kg".to_string(),
+        project: "alpha".to_string(),
+    };
+
+    palace::usage::record_event(
+        &conn,
+        &session,
+        "palace_kg_query",
+        &json!({"entity": "palace"}),
+        &json!({"relationships": [{"predicate": "supports", "object": "codex"}]}),
+        StdDuration::from_millis(3),
+    )
+    .expect("record kg");
+
+    let report = summarize(&conn, &options(Some("alpha"), SinceWindow::All)).expect("summarize");
+
+    assert_eq!(report.kg_facts_recalled, 1);
+}
+
+#[test]
+fn recorder_marks_repeated_diary_search_as_repeat_question() {
+    let conn = palace::db::open_in_memory().expect("open test db");
+    let session = UsageSession {
+        session_id: "session_repeat_diary".to_string(),
+        project: "alpha".to_string(),
+    };
+    let args = json!({"agent_name": "codex", "query": "what was the adoption plan"});
+    let result = json!({"entries": [{"text": "Use all four agents."}]});
+
+    palace::usage::record_event(
+        &conn,
+        &session,
+        "palace_diary_search",
+        &args,
+        &result,
+        StdDuration::from_millis(4),
+    )
+    .expect("record first");
+    palace::usage::record_event(
+        &conn,
+        &session,
+        "palace_diary_search",
+        &args,
+        &result,
+        StdDuration::from_millis(5),
+    )
+    .expect("record repeat");
+
+    let report = summarize(&conn, &options(Some("alpha"), SinceWindow::All)).expect("summarize");
+
+    assert_eq!(report.diary_recalls, 2);
+    assert_eq!(report.repeat_questions_avoided, 1);
+}
+
+#[test]
 fn mcp_dispatch_records_usage_event() {
     let conn = palace::db::open_in_memory().expect("open test db");
     let config = palace::config::PalaceConfig::new();

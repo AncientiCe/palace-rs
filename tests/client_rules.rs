@@ -68,10 +68,14 @@ fn install_writes_cursor_rule_mdc() {
     let rule = fs::read_to_string(temp.path().join(".cursor/rules/palace.mdc")).unwrap();
     assert!(rule.contains("alwaysApply: true"));
     assert!(rule.contains("palace_status"));
+    assert!(rule.contains("palace_session_context"));
+    assert!(rule.contains("palace_diary_search"));
     assert!(rule.contains("palace_search"));
     assert!(rule.contains("MEMORY-FIRST"));
     assert!(rule.contains("before grep"));
     assert!(rule.contains("CODE-SEARCH-FIRST"));
+    assert!(rule.contains("DURABLE FACTS"));
+    assert!(rule.contains("palace_kg_add"));
     assert!(rule.contains("cite the memory provenance"));
 }
 
@@ -421,13 +425,76 @@ fn installed_rules_include_memory_routing_for_codex_managed_block() {
     let codex_rule = fs::read_to_string(temp.path().join(".codex/AGENTS.md")).unwrap();
 
     assert!(codex_rule.contains("MEMORY-FIRST"));
+    assert!(codex_rule.contains("palace_status`, then `palace_session_context"));
+    assert!(codex_rule.contains("palace_diary_search"));
     assert!(codex_rule.contains("before grep"));
     assert!(codex_rule.contains("CODE-SEARCH-FIRST"));
+    assert!(codex_rule.contains("REPEAT QUESTIONS"));
     assert!(codex_rule.contains("cite the memory provenance"));
 }
 
 #[test]
-fn doctor_marks_rule_weak_without_memory_routing() {
+fn installed_rules_include_full_memory_lifecycle_for_all_clients() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+
+    install_clients(&options(
+        temp.path(),
+        &binary_path,
+        vec![Client::Cursor, Client::Codex, Client::Claude],
+    ))
+    .unwrap();
+
+    let rule_paths = [
+        temp.path().join(".cursor/rules/palace.mdc"),
+        temp.path().join(".codex/AGENTS.md"),
+        temp.path().join(".claude/CLAUDE.md"),
+    ];
+
+    for path in rule_paths {
+        let rule = fs::read_to_string(&path).unwrap();
+        assert!(rule.contains("palace_status"));
+        assert!(rule.contains("palace_session_context"));
+        assert!(rule.contains("palace_diary_search"));
+        assert!(rule.contains("palace_kg_query"));
+        assert!(rule.contains("palace_kg_add"));
+        assert!(rule.contains("palace_kg_invalidate"));
+        assert!(rule.contains("REPEAT QUESTIONS"));
+        assert!(rule.contains("MEMORY ROUTING"));
+    }
+}
+
+#[test]
+fn project_scoped_install_writes_strengthened_rules() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let binary_path = fake_binary(temp.path());
+    let mut install_options = options(
+        temp.path(),
+        &binary_path,
+        vec![Client::Cursor, Client::Codex, Client::Claude],
+    );
+    install_options.scope = Scope::Project;
+    install_options.project_dir = Some(project.clone());
+
+    install_clients(&install_options).unwrap();
+
+    for path in [
+        project.join(".cursor/rules/palace.mdc"),
+        project.join("AGENTS.md"),
+        project.join("CLAUDE.md"),
+    ] {
+        let rule = fs::read_to_string(&path).unwrap();
+        assert!(rule.contains("palace_session_context"));
+        assert!(rule.contains("palace_diary_search"));
+        assert!(rule.contains("palace_kg_add"));
+        assert!(rule.contains("MEMORY ROUTING"));
+    }
+}
+
+#[test]
+fn doctor_marks_rule_weak_without_full_memory_lifecycle() {
     let temp = TempDir::new().unwrap();
     let codex_dir = temp.path().join(".codex");
     fs::create_dir_all(&codex_dir).unwrap();
@@ -448,7 +515,19 @@ fn doctor_marks_rule_weak_without_memory_routing() {
     assert!(report
         .adoption_warnings
         .iter()
-        .any(|warning| { warning.contains("Codex") && warning.contains("memory before grep") }));
+        .any(|warning| { warning.contains("Codex") && warning.contains("session warm-start") }));
+}
+
+#[test]
+fn doctor_reports_no_adoption_warnings_after_full_install() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let install_options = options(temp.path(), &binary_path, vec![Client::Cursor]);
+
+    install_clients(&install_options).unwrap();
+    let report = doctor(&install_options).unwrap();
+
+    assert!(report.adoption_warnings.is_empty());
 }
 
 #[test]

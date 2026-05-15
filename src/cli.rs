@@ -227,6 +227,13 @@ enum Commands {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    /// Seed durable KG facts that help installed agents use Palace consistently
+    #[command(name = "seed-adoption-facts")]
+    SeedAdoptionFacts {
+        /// Project/entity name to seed facts for
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// Export all palace drawers to a portable JSON file (embeddings excluded)
     Export {
         /// Output file path (default: palace-export.json)
@@ -549,6 +556,25 @@ pub fn run() -> Result<()> {
             let options = install_options(&client, all, &scope, path, false, false)?;
             let report = crate::install::doctor(&options)?;
             crate::install::print_doctor_report(&report);
+        }
+
+        Commands::SeedAdoptionFacts { project } => {
+            let db_path = config.palace_db_path();
+            let conn = crate::db::open(&db_path)?;
+            let project = project.unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|path| {
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                    })
+                    .unwrap_or_else(|| "current project".to_string())
+            });
+            let report = crate::knowledge_graph::seed_agent_adoption_facts(&conn, &project)?;
+            println!(
+                "  Seeded adoption facts for {project}: {} inserted, {} unchanged.",
+                report.inserted, report.unchanged
+            );
         }
 
         Commands::Export { output } => {

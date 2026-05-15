@@ -10,7 +10,7 @@ use toml_edit::{value, Array, DocumentMut, Item, Table};
 // ── Current marker names (0.2.0+) ────────────────────────────────────────────
 const RULE_BEGIN: &str = "<!-- BEGIN PALACE -->";
 const RULE_END: &str = "<!-- END PALACE -->";
-pub const RULE_BODY: &str = "**MANDATORY — follow every step, every session, no exceptions.**\n\n1. **SESSION START**: Call `palace_status` BEFORE doing anything else.\n2. **MEMORY-FIRST**: before grep, file search, or code search, call `palace_search` for questions about remembered decisions, prior fixes, conventions, user preferences, commands that worked before, session history, or \"what happened last time?\".\n3. **CODE-SEARCH-FIRST**: Use grep/code search first only for current symbols, exact definitions, exact files, or implementation details that may have changed since mining.\n4. **BEFORE ANSWERING** about any person, project, past decision, or preference: call `palace_search` or `palace_kg_query` first. Never answer from training data alone.\n5. **FOR PREFERENCES / CONVENTIONS**: call `palace_preference_search` — it surfaces style/convention drawers that plain search misses.\n6. **WHEN PALACE ANSWERS**: cite the memory provenance: wing, room, source file or drawer id, and any score/provenance fields returned.\n7. **AFTER SUBSTANTIVE WORK**: call `palace_diary_write` to record what happened.\n8. **WHEN FACTS CHANGE**: call `palace_kg_invalidate` on the old fact, then `palace_kg_add` for the new one.\n9. **TO FILE A KEY FACT**: use `palace_remember` (importance=5). To delete outdated info: `palace_forget`.\n\nSkipping any step is a protocol violation. Storage is not memory; this protocol is.";
+pub const RULE_BODY: &str = "**MANDATORY — follow every step, every session, no exceptions.**\n\n1. **SESSION START**: Call `palace_status`, then `palace_session_context(agent_name)` BEFORE doing anything else.\n2. **MEMORY-FIRST**: before grep, file search, or code search, call `palace_search` for questions about remembered decisions, prior fixes, conventions, user preferences, commands that worked before, session history, or \"what happened last time?\".\n3. **CODE-SEARCH-FIRST**: Use grep/code search first only for current symbols, exact definitions, exact files, or implementation details that may have changed since mining.\n4. **BEFORE ANSWERING** about any person, project, past decision, or preference: call `palace_search` and `palace_kg_query` for durable facts first. Never answer from training data alone.\n5. **CONTINUING PRIOR WORK**: call `palace_diary_search` before resuming a previous task, release, plan, fix, or decision thread.\n6. **REPEAT QUESTIONS**: before re-answering planning/history questions, search diary and project memory for similar prior answers so repeated questions are avoided.\n7. **FOR PREFERENCES / CONVENTIONS**: call `palace_preference_search` — it surfaces style/convention drawers that plain search misses.\n8. **DURABLE FACTS**: when stable facts are learned, call `palace_kg_add`; when facts change, call `palace_kg_invalidate` on the old fact, then `palace_kg_add` for the new fact.\n9. **WHEN PALACE ANSWERS**: cite the memory provenance: wing, room, source file or drawer id, and any score/provenance fields returned.\n10. **AFTER SUBSTANTIVE WORK**: call `palace_diary_write` to record what happened.\n11. **TO FILE A KEY FACT**: use `palace_remember` (importance=5). To delete outdated info: `palace_forget`.\n\n**MEMORY ROUTING**: use Palace for prior decisions, user preferences, previous fixes, commands that worked, project history, and \"what happened last time?\". Use KG for stable facts. Use diary for session continuity. Use drawers/search for source-grounded recall. Use code search first only for current source symbols, exact definitions, and implementation details that may have changed.\n\nSkipping any step is a protocol violation. Storage is not memory; this protocol is.";
 
 // ── Legacy marker names (0.1.x) — recognized for migration, never written ────
 const LEGACY_RULE_BEGIN: &str = "<!-- BEGIN MEMPALACE -->";
@@ -818,10 +818,21 @@ fn rule_is_weak(target: &RuleTarget) -> Result<bool> {
         return Ok(false);
     }
     let lower = text.to_lowercase();
-    let has_memory_first = lower.contains("memory-first");
-    let has_before_grep = lower.contains("before grep");
-    let has_code_first = lower.contains("code-search-first");
-    Ok(!(has_memory_first && has_before_grep && has_code_first))
+    let required = [
+        "memory-first",
+        "before grep",
+        "code-search-first",
+        "palace_status",
+        "palace_session_context",
+        "palace_diary_search",
+        "palace_diary_write",
+        "palace_kg_query",
+        "palace_kg_add",
+        "palace_kg_invalidate",
+        "repeat questions",
+        "memory routing",
+    ];
+    Ok(required.iter().any(|needle| !lower.contains(needle)))
 }
 
 fn adoption_warnings(clients: &[ClientStatus]) -> Vec<String> {
@@ -833,13 +844,18 @@ fn adoption_warnings(clients: &[ClientStatus]) -> Vec<String> {
                 "{client} is missing MCP config, so it cannot call Palace before grep."
             ));
         }
+        if status.configured && !status.rule_installed {
+            warnings.push(format!(
+                "{client} has MCP config but no Palace rule file, so agents may skip memory."
+            ));
+        }
         if status.rule_stale {
             warnings.push(format!(
                 "{client} has a stale Palace rule; reinstall so it uses current memory tools."
             ));
         } else if status.rule_weak {
             warnings.push(format!(
-                "{client} rule lacks memory before grep routing; reinstall so remembered context is searched first."
+                "{client} rule lacks session warm-start, KG/diary recall, or memory-vs-code routing; reinstall so remembered context is searched first."
             ));
         }
     }

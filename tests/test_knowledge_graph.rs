@@ -113,3 +113,53 @@ fn deduplication_prevents_duplicate_active_triples() {
     let id2 = add_triple(&conn, "A", "knows", "B", None, None, 1.0, None, None).unwrap();
     assert_eq!(id1, id2, "duplicate active triple should return same id");
 }
+
+#[test]
+fn seed_agent_adoption_facts_is_idempotent() {
+    let conn = test_db();
+
+    let first = seed_agent_adoption_facts(&conn, "mempalace-rs").unwrap();
+    let second = seed_agent_adoption_facts(&conn, "mempalace-rs").unwrap();
+
+    assert!(first.inserted >= 10);
+    assert_eq!(second.inserted, 0);
+    assert!(second.unchanged >= first.inserted);
+
+    let palace = query_entity(&conn, "Palace", None, "outgoing").unwrap();
+    assert!(palace
+        .iter()
+        .any(|fact| fact.predicate == "supports_client" && fact.object == "Codex"));
+    assert!(palace.iter().any(
+        |fact| fact.predicate == "requires_protocol_step" && fact.object == "diary warm-start"
+    ));
+}
+
+#[test]
+fn seed_agent_adoption_fact_update_invalidates_old_fact() {
+    let conn = test_db();
+
+    seed_agent_adoption_facts(&conn, "mempalace-rs").unwrap();
+    let report = seed_or_update_fact(
+        &conn,
+        "mempalace-rs",
+        "has_role",
+        "Rust memory engine for coding agents",
+        "local-first memory engine",
+    )
+    .unwrap();
+
+    assert_eq!(report.inserted, 1);
+    assert_eq!(report.invalidated, 1);
+
+    let facts = query_entity(&conn, "mempalace-rs", None, "outgoing").unwrap();
+    let old = facts
+        .iter()
+        .find(|fact| fact.object == "Rust memory engine for coding agents")
+        .expect("old fact");
+    let new = facts
+        .iter()
+        .find(|fact| fact.object == "local-first memory engine")
+        .expect("new fact");
+    assert!(!old.current);
+    assert!(new.current);
+}

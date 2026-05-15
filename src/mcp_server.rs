@@ -164,6 +164,7 @@ pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args:
         "palace_kg_invalidate" => tool_kg_invalidate(conn, args),
         "palace_kg_timeline" => tool_kg_timeline(conn, args),
         "palace_kg_stats" => tool_kg_stats(conn),
+        "palace_seed_adoption_facts" => tool_seed_adoption_facts(conn, args),
         "palace_traverse" => tool_traverse(conn, args),
         "palace_find_tunnels" => tool_find_tunnels(conn, args),
         "palace_graph_stats" => tool_graph_stats(conn),
@@ -644,6 +645,20 @@ fn tool_kg_stats(conn: &Connection) -> Value {
             serde_json::to_value(s).unwrap_or_else(|_| json!({"error": "serialization failed"}))
         }
         Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+fn tool_seed_adoption_facts(conn: &Connection, args: &Value) -> Value {
+    let project = str_arg(args, "project").unwrap_or_else(|| "current project".to_string());
+    match kg::seed_agent_adoption_facts(conn, &project) {
+        Ok(report) => json!({
+            "success": true,
+            "project": project,
+            "inserted": report.inserted,
+            "unchanged": report.unchanged,
+            "invalidated": report.invalidated,
+        }),
+        Err(err) => json!({"success": false, "error": err.to_string()}),
     }
 }
 
@@ -1510,6 +1525,16 @@ fn tool_list() -> Value {
             "name": "palace_kg_stats",
             "description": "Knowledge graph overview: entities, triples, relationship types.",
             "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "palace_seed_adoption_facts",
+            "description": "Seed durable KG facts for the current project and four supported Palace clients.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Project/entity name to seed facts for"}
+                }
+            }
         },
         {
             "name": "palace_traverse",

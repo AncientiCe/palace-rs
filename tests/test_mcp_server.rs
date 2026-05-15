@@ -157,6 +157,31 @@ fn kg_stats_summary() {
     assert!(s.triples >= 1);
 }
 
+#[test]
+fn seed_adoption_facts_tool_is_idempotent() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    let first = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_seed_adoption_facts",
+        &serde_json::json!({"project": "mempalace-rs"}),
+    );
+    let second = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_seed_adoption_facts",
+        &serde_json::json!({"project": "mempalace-rs"}),
+    );
+
+    assert_eq!(first["success"], true);
+    assert!(first["inserted"].as_u64().unwrap_or_default() >= 10);
+    assert_eq!(second["success"], true);
+    assert_eq!(second["inserted"], 0);
+    assert!(second["unchanged"].as_u64().unwrap_or_default() >= 10);
+}
+
 // ── Check duplicate ───────────────────────────────────────────────────────
 
 #[test]
