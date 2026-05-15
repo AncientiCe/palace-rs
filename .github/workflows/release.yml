@@ -59,9 +59,7 @@ jobs:
           asset="palace-${version}-${{ matrix.target }}"
           mkdir -p "dist/${asset}"
           cp "target/${{ matrix.target }}/release/palace" "dist/${asset}/"
-          cp "target/${{ matrix.target }}/release/mempalace" "dist/${asset}/"
           strip "dist/${asset}/palace" || true
-          strip "dist/${asset}/mempalace" || true
           cp README.md LICENSE CHANGELOG.md "dist/${asset}/"
           tar -C dist -czf "dist/${asset}.tar.gz" "${asset}"
 
@@ -73,7 +71,6 @@ jobs:
           $asset = "palace-$version-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$asset" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/palace.exe" "dist/$asset/"
-          Copy-Item "target/${{ matrix.target }}/release/mempalace.exe" "dist/$asset/"
           Copy-Item README.md,LICENSE,CHANGELOG.md "dist/$asset/"
           Compress-Archive -Path "dist/$asset/*" -DestinationPath "dist/$asset.zip"
 

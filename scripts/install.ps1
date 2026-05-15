@@ -54,10 +54,6 @@ try {
     }
     Copy-Item $Binary.FullName (Join-Path $InstallDir "palace.exe") -Force
 
-    $Shim = Get-ChildItem -Path $TempDir -Recurse -Filter "mempalace.exe" | Select-Object -First 1
-    if ($Shim) {
-        Copy-Item $Shim.FullName (Join-Path $InstallDir "mempalace.exe") -Force
-    }
 
     $PathParts = ($env:PATH -split ";") | Where-Object { $_ }
     if ($PathParts -notcontains $InstallDir) {

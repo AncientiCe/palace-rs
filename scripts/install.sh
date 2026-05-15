@@ -80,11 +80,6 @@ fi
 cp "$binary" "$install_dir/palace"
 chmod +x "$install_dir/palace"
 
-shim="$(find "$tmp_dir" -type f -name mempalace | head -n 1)"
-if [ -n "$shim" ]; then
-  cp "$shim" "$install_dir/mempalace"
-  chmod +x "$install_dir/mempalace"
-fi
 
 case ":$PATH:" in
   *":$install_dir:"*) ;;

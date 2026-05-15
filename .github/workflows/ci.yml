@@ -115,7 +115,6 @@ jobs:
         run: |
           mkdir -p "dist/palace-local-${{ matrix.target }}"
           cp target/release/palace "dist/palace-local-${{ matrix.target }}/"
-          cp target/release/mempalace "dist/palace-local-${{ matrix.target }}/"
           tar -C dist -czf "dist/palace-local-${{ matrix.target }}.tar.gz" "palace-local-${{ matrix.target }}"
       - name: Package Windows artifact
         if: matrix.archive == 'zip'
@@ -123,7 +122,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "dist/palace-local-${{ matrix.target }}" | Out-Null
           Copy-Item "target/release/palace.exe" "dist/palace-local-${{ matrix.target }}/"
-          Copy-Item "target/release/mempalace.exe" "dist/palace-local-${{ matrix.target }}/"
           Compress-Archive -Path "dist/palace-local-${{ matrix.target }}/*" -DestinationPath "dist/palace-local-${{ matrix.target }}.zip"
       - name: Run Unix install script
         if: matrix.archive == 'tar.gz'
@@ -137,7 +135,6 @@ jobs:
           mkdir -p "$HOME"
           sh scripts/install.sh
           "$PALACE_INSTALL_DIR/palace" --version
-          "$PALACE_INSTALL_DIR/mempalace" --version
           test -f "$HOME/.cursor/mcp.json"
       - name: Run Windows install script
         if: matrix.archive == 'zip'
@@ -153,6 +150,5 @@ jobs:
           # $env:USERPROFILE rather than a redirected HOME.
           ./scripts/install.ps1
           & (Join-Path $env:PALACE_INSTALL_DIR "palace.exe") --version
-          & (Join-Path $env:PALACE_INSTALL_DIR "mempalace.exe") --version
           $cursorConfig = Join-Path $env:USERPROFILE ".cursor\mcp.json"
           if (-not (Test-Path $cursorConfig)) { throw "Cursor config was not written at $cursorConfig" }
