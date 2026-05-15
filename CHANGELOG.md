@@ -4,6 +4,23 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [0.3.1] - 2026-05-15
+
+### Added
+
+- **`palace_import`** MCP tool — import drawers from a JSON snapshot produced
+  by `palace_export`. Skips drawers that already exist (idempotent). Returns
+  `inserted`, `skipped`, and `total` counts.
+- **`palace_upgrade_embeddings`** MCP tool — re-embeds all drawers using the
+  current embedding model. Run after upgrading the model to keep search quality
+  consistent.
+- **`palace_prune`** MCP tool — deletes drawers filed more than `older_than_days`
+  days ago. Irreversible; export first if unsure.
+- **`palace prune --older-than-days N [--dry-run]`** CLI command.
+- **`palace upgrade-embeddings`** CLI command.
+- **`palace timeline [--entity <name>]`** CLI command — human-readable
+  chronological view of knowledge-graph facts, optionally filtered to one entity.
+
 ## [0.3.0] - 2026-05-15
 
 ### Removed
