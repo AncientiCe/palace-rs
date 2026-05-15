@@ -67,16 +67,19 @@ fn install_writes_cursor_rule_mdc() {
 
     let rule = fs::read_to_string(temp.path().join(".cursor/rules/palace.mdc")).unwrap();
     assert!(rule.contains("alwaysApply: true"));
+    // Block 1 — SESSION START
+    assert!(rule.contains("SESSION START"));
     assert!(rule.contains("palace_status"));
     assert!(rule.contains("palace_session_context"));
     assert!(rule.contains("palace_diary_search"));
+    // Block 2 — BEFORE ANSWERING
+    assert!(rule.contains("BEFORE ANSWERING"));
     assert!(rule.contains("palace_search"));
-    assert!(rule.contains("MEMORY-FIRST"));
-    assert!(rule.contains("before grep"));
-    assert!(rule.contains("CODE-SEARCH-FIRST"));
-    assert!(rule.contains("DURABLE FACTS"));
+    assert!(rule.contains("palace_kg_query"));
+    // Block 3 — AFTER WORK
+    assert!(rule.contains("AFTER WORK"));
+    assert!(rule.contains("palace_diary_write"));
     assert!(rule.contains("palace_kg_add"));
-    assert!(rule.contains("cite the memory provenance"));
 }
 
 #[test]
@@ -424,13 +427,18 @@ fn installed_rules_include_memory_routing_for_codex_managed_block() {
 
     let codex_rule = fs::read_to_string(temp.path().join(".codex/AGENTS.md")).unwrap();
 
-    assert!(codex_rule.contains("MEMORY-FIRST"));
-    assert!(codex_rule.contains("palace_status`, then `palace_session_context"));
+    // Block 1
+    assert!(codex_rule.contains("SESSION START"));
+    assert!(codex_rule.contains("palace_status"));
+    assert!(codex_rule.contains("palace_session_context"));
     assert!(codex_rule.contains("palace_diary_search"));
-    assert!(codex_rule.contains("before grep"));
-    assert!(codex_rule.contains("CODE-SEARCH-FIRST"));
-    assert!(codex_rule.contains("REPEAT QUESTIONS"));
-    assert!(codex_rule.contains("cite the memory provenance"));
+    // Block 2
+    assert!(codex_rule.contains("BEFORE ANSWERING"));
+    assert!(codex_rule.contains("palace_search"));
+    assert!(codex_rule.contains("palace_kg_query"));
+    // Block 3
+    assert!(codex_rule.contains("AFTER WORK"));
+    assert!(codex_rule.contains("palace_diary_write"));
 }
 
 #[test]
@@ -453,13 +461,17 @@ fn installed_rules_include_full_memory_lifecycle_for_all_clients() {
 
     for path in rule_paths {
         let rule = fs::read_to_string(&path).unwrap();
+        assert!(rule.contains("SESSION START"));
         assert!(rule.contains("palace_status"));
         assert!(rule.contains("palace_session_context"));
         assert!(rule.contains("palace_diary_search"));
+        assert!(rule.contains("BEFORE ANSWERING"));
+        assert!(rule.contains("palace_search"));
         assert!(rule.contains("palace_kg_query"));
+        assert!(rule.contains("AFTER WORK"));
+        assert!(rule.contains("palace_diary_write"));
         assert!(rule.contains("palace_kg_add"));
         assert!(rule.contains("palace_kg_invalidate"));
-        assert!(rule.contains("REPEAT QUESTIONS"));
         assert!(rule.contains("MEMORY ROUTING"));
     }
 }
@@ -501,6 +513,7 @@ fn doctor_marks_rule_weak_without_full_memory_lifecycle() {
     fs::write(
         codex_dir.join("AGENTS.md"),
         "<!-- BEGIN PALACE -->\n# Palace Memory Protocol\n\nCall palace_status and palace_search.\n<!-- END PALACE -->\n",
+        // Missing SESSION START block, BEFORE ANSWERING, AFTER WORK, diary_search, kg_query
     )
     .unwrap();
 
