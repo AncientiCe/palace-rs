@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod backend;
 pub mod backends;
 #[cfg(feature = "benchmarks")]
@@ -9,9 +11,12 @@ pub mod db;
 pub mod dialect;
 pub mod embedder;
 pub mod entity_detector;
+pub mod export;
+pub mod gain;
 pub mod general_extractor;
 pub mod hall_router;
 pub mod i18n;
+pub mod install;
 pub mod knowledge_graph;
 pub mod layers;
 pub mod llm;
@@ -24,12 +29,19 @@ pub mod onboarding;
 pub mod origin;
 pub mod palace;
 pub mod palace_graph;
+pub mod preference;
+pub mod query_intent;
+pub mod query_rewriter;
+pub mod query_sanitizer;
 pub mod ranker;
+pub mod reranker;
 pub mod room_detector;
 pub mod searcher;
 pub mod split;
 pub mod store;
 pub mod sweep;
+pub mod usage;
+pub mod watcher;
 
 #[cfg(feature = "cli")]
 pub mod cli;

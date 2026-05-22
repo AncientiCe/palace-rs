@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Local;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -33,6 +33,13 @@ pub struct KgStats {
     pub current_facts: i64,
     pub expired_facts: i64,
     pub relationship_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, Eq, PartialEq)]
+pub struct SeedReport {
+    pub inserted: usize,
+    pub unchanged: usize,
+    pub invalidated: usize,
 }
 
 fn entity_id(name: &str) -> String {
@@ -116,6 +123,152 @@ pub fn add_triple(
     )
     .context("inserting triple")?;
     Ok(tid)
+}
+
+pub fn seed_agent_adoption_facts(conn: &Connection, project: &str) -> Result<SeedReport> {
+    let mut report = SeedReport::default();
+    let project = project.trim();
+    let project = if project.is_empty() {
+        "current project"
+    } else {
+        project
+    };
+
+    let facts = [
+        ("Palace", "supports_client", "Cursor"),
+        ("Palace", "supports_client", "Codex"),
+        ("Palace", "supports_client", "Claude Code"),
+        ("Palace", "supports_client", "Claude Desktop"),
+        ("Palace", "requires_protocol_step", "session status"),
+        ("Palace", "requires_protocol_step", "diary warm-start"),
+        (
+            "Palace",
+            "requires_protocol_step",
+            "memory search before project answers",
+        ),
+        (
+            "Palace",
+            "requires_protocol_step",
+            "KG query before durable facts",
+        ),
+        (
+            "Palace",
+            "requires_protocol_step",
+            "diary write after substantive work",
+        ),
+        (
+            "Palace",
+            "requires_protocol_step",
+            "invalidate old fact before replacement",
+        ),
+        (
+            "Palace",
+            "uses_memory_routing",
+            "Palace for prior decisions and preferences",
+        ),
+        (
+            "Palace",
+            "uses_memory_routing",
+            "code search for current symbols",
+        ),
+        (
+            "User",
+            "prefers_agent_behavior",
+            "memory-first Palace usage",
+        ),
+        (project, "has_role", "Rust memory engine for coding agents"),
+        (project, "requires_quality_gate", "cargo fmt --all --check"),
+        (
+            project,
+            "requires_quality_gate",
+            "cargo clippy --all-targets --all-features -- -D warnings",
+        ),
+        (project, "requires_quality_gate", "cargo audit"),
+        (
+            project,
+            "requires_quality_gate",
+            "cargo test --all-features",
+        ),
+    ];
+
+    for (subject, predicate, object) in facts {
+        if active_fact_exists(conn, subject, predicate, object)? {
+            report.unchanged += 1;
+        } else {
+            add_triple(
+                conn,
+                subject,
+                predicate,
+                object,
+                Some(&Local::now().format("%Y-%m-%d").to_string()),
+                None,
+                1.0,
+                None,
+                Some("palace adoption seed"),
+            )?;
+            report.inserted += 1;
+        }
+    }
+
+    Ok(report)
+}
+
+pub fn seed_or_update_fact(
+    conn: &Connection,
+    subject: &str,
+    predicate: &str,
+    old_object: &str,
+    new_object: &str,
+) -> Result<SeedReport> {
+    let mut report = SeedReport::default();
+    if old_object == new_object {
+        if active_fact_exists(conn, subject, predicate, new_object)? {
+            report.unchanged = 1;
+            return Ok(report);
+        }
+    } else if active_fact_exists(conn, subject, predicate, old_object)? {
+        invalidate(conn, subject, predicate, old_object, None)?;
+        report.invalidated = 1;
+    }
+
+    if active_fact_exists(conn, subject, predicate, new_object)? {
+        report.unchanged += 1;
+    } else {
+        add_triple(
+            conn,
+            subject,
+            predicate,
+            new_object,
+            Some(&Local::now().format("%Y-%m-%d").to_string()),
+            None,
+            1.0,
+            None,
+            Some("palace adoption seed"),
+        )?;
+        report.inserted += 1;
+    }
+
+    Ok(report)
+}
+
+fn active_fact_exists(
+    conn: &Connection,
+    subject: &str,
+    predicate: &str,
+    object: &str,
+) -> Result<bool> {
+    let sub_id = entity_id(subject);
+    let obj_id = entity_id(object);
+    let pred = normalize_predicate(predicate);
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM triples WHERE subject=?1 AND predicate=?2 AND object=?3 AND valid_to IS NULL",
+            params![sub_id, pred, obj_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("checking active fact")?;
+    Ok(existing.is_some())
 }
 
 /// Mark an active relationship as no longer valid by setting valid_to.

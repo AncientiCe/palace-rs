@@ -1,5 +1,5 @@
-use mempalace::db;
-use mempalace::store::*;
+use palace::db;
+use palace::store::*;
 use rusqlite::Connection;
 
 fn open_test_db() -> rusqlite::Connection {
@@ -27,6 +27,7 @@ fn schema_has_phase_one_drawer_columns_and_tables() {
         "hall",
         "normalize_version",
         "metadata",
+        "pref_embedding",
     ] {
         assert!(
             drawer_columns.iter().any(|c| c == column),
@@ -143,7 +144,7 @@ fn add_drawer_with_id_stores_metadata_separately_from_source_file() {
     let meta = serde_json::json!({
         "hall": "technical",
         "topic": "schema",
-        "agent": "mempalace"
+        "agent": "palace"
     });
 
     let added = add_drawer_with_id(
@@ -166,6 +167,74 @@ fn add_drawer_with_id_stores_metadata_separately_from_source_file() {
     assert_eq!(drawer.source_file, "source.rs");
     assert_eq!(drawer.metadata["topic"], "schema");
     assert_eq!(drawer.hall.as_deref(), Some("technical"));
+}
+
+#[test]
+fn add_drawer_with_id_tags_preferences_without_dropping_metadata() {
+    let conn = open_test_db();
+    let meta = serde_json::json!({
+        "topic": "api",
+        "agent": "codex"
+    });
+
+    let added = add_drawer_with_id(
+        &conn,
+        "drawer_preference_meta",
+        "wing_code",
+        "preferences",
+        "I prefer small public APIs routed through the Palace facade.",
+        None,
+        "session.md",
+        "test",
+        Some(&meta),
+    )
+    .unwrap();
+    assert!(added);
+
+    let drawer = get_drawer(&conn, "drawer_preference_meta")
+        .unwrap()
+        .expect("drawer should exist");
+    assert_eq!(drawer.metadata["topic"], "api");
+    assert_eq!(drawer.metadata["agent"], "codex");
+    assert_eq!(drawer.metadata["preference"], true);
+    assert_eq!(
+        drawer.metadata["preference_span"],
+        "I prefer small public APIs routed through the Palace facade."
+    );
+}
+
+#[test]
+fn update_drawer_content_refreshes_preference_tag() {
+    let conn = open_test_db();
+    let (_, id) = add_drawer(
+        &conn,
+        "wing_code",
+        "backend",
+        "Neutral implementation detail.",
+        None,
+        "session.md",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    update_drawer_content(
+        &conn,
+        &id,
+        "My convention is to keep search results source-grounded.",
+    )
+    .unwrap();
+    let drawer = get_drawer(&conn, &id)
+        .unwrap()
+        .expect("drawer should exist after preference update");
+    assert_eq!(drawer.metadata["preference"], true);
+
+    update_drawer_content(&conn, &id, "Neutral implementation detail again.").unwrap();
+    let drawer = get_drawer(&conn, &id)
+        .unwrap()
+        .expect("drawer should exist after neutral update");
+    assert!(drawer.metadata.get("preference").is_none());
 }
 
 #[test]

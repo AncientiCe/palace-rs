@@ -1,7 +1,7 @@
 //! Text embedding using ONNX Runtime with all-MiniLM-L6-v2 (384-dim).
 //!
 //! Uses OnceLock for lazy initialization — commands that don't need embeddings
-//! (e.g. `mempalace status`) start instantly without loading the model.
+//! (e.g. `palace status`) start instantly without loading the model.
 //! The model is downloaded on first use and cached in ~/.cache/huggingface.
 
 use anyhow::{Context, Result};

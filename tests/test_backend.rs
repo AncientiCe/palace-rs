@@ -1,5 +1,5 @@
-use mempalace::backend::Backend;
-use mempalace::backends::sqlite::SqliteBackend;
+use palace::backend::Backend;
+use palace::backends::sqlite::SqliteBackend;
 
 #[test]
 fn sqlite_backend_exposes_palace_identity_and_count() {

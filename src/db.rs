@@ -46,7 +46,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         );
 
         -- ── Drawers ──────────────────────────────────────────────────────────
-        -- Replaces ChromaDB mempalace_drawers collection.
+        -- Replaces ChromaDB palace_drawers collection.
         -- embedding is a little-endian f32 byte array (384 floats = 1536 bytes).
         CREATE TABLE IF NOT EXISTS drawers (
             id          TEXT PRIMARY KEY,
@@ -56,14 +56,15 @@ fn migrate(conn: &Connection) -> Result<()> {
             embedding   BLOB,
             source_file TEXT NOT NULL DEFAULT '',
             chunk_index INTEGER NOT NULL DEFAULT 0,
-            added_by    TEXT NOT NULL DEFAULT 'mempalace',
+            added_by    TEXT NOT NULL DEFAULT 'palace',
             filed_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             importance  REAL NOT NULL DEFAULT 3.0,
             created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             entity_metadata TEXT NOT NULL DEFAULT '{}',
             hall        TEXT,
             normalize_version INTEGER NOT NULL DEFAULT 0,
-            metadata    TEXT NOT NULL DEFAULT '{}'
+            metadata    TEXT NOT NULL DEFAULT '{}',
+            pref_embedding BLOB
         );
         CREATE INDEX IF NOT EXISTS idx_drawers_wing ON drawers(wing);
         CREATE INDEX IF NOT EXISTS idx_drawers_room ON drawers(room);
@@ -137,6 +138,41 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_triples_object    ON triples(object);
         CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate);
         CREATE INDEX IF NOT EXISTS idx_triples_valid     ON triples(valid_from, valid_to);
+
+        -- ── Usage telemetry ──────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS usage_events (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts               TEXT NOT NULL,
+            session_id       TEXT NOT NULL,
+            project          TEXT NOT NULL,
+            tool             TEXT NOT NULL,
+            wing             TEXT,
+            room             TEXT,
+            query_hash       TEXT,
+            result_count     INTEGER NOT NULL DEFAULT 0,
+            top_similarity   REAL,
+            bytes_returned   INTEGER NOT NULL DEFAULT 0,
+            est_tokens_saved INTEGER NOT NULL DEFAULT 0,
+            duration_ms      INTEGER NOT NULL DEFAULT 0,
+            outcome          TEXT NOT NULL,
+            meta             TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(ts);
+        CREATE INDEX IF NOT EXISTS idx_usage_events_project_ts ON usage_events(project, ts);
+        CREATE INDEX IF NOT EXISTS idx_usage_events_tool ON usage_events(tool);
+        CREATE INDEX IF NOT EXISTS idx_usage_events_query_hash ON usage_events(query_hash);
+
+        CREATE TABLE IF NOT EXISTS gain_feedback (
+            query_id   TEXT NOT NULL,
+            drawer_id  TEXT NOT NULL,
+            verdict    TEXT NOT NULL,
+            source     TEXT NOT NULL,
+            note       TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(query_id, drawer_id, source)
+        );
+        CREATE INDEX IF NOT EXISTS idx_gain_feedback_query ON gain_feedback(query_id);
+        CREATE INDEX IF NOT EXISTS idx_gain_feedback_drawer ON gain_feedback(drawer_id);
         "#,
     )
     .context("running schema migrations")?;
@@ -156,6 +192,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     add_column_if_missing(conn, "drawers", "metadata", "TEXT NOT NULL DEFAULT '{}'")?;
+    add_column_if_missing(conn, "drawers", "pref_embedding", "BLOB")?;
 
     conn.execute_batch(
         r#"

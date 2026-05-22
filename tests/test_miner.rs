@@ -1,5 +1,5 @@
-use mempalace::miner::{chunk_text, detect_room, CHUNK_SIZE};
-use mempalace::room_detector::Room;
+use palace::miner::{chunk_text, detect_room, CHUNK_SIZE};
+use palace::room_detector::Room;
 use std::path::Path;
 
 #[test]
@@ -27,6 +27,33 @@ fn chunk_text_respects_paragraph_breaks() {
     let chunks = chunk_text(&text);
     // Should split at paragraph boundary
     assert!(chunks.len() >= 2, "should respect paragraph breaks");
+}
+
+#[test]
+fn chunk_text_handles_multibyte_at_chunk_boundary() {
+    // Place a 3-byte UTF-8 char ('─' = E2 94 80) so that byte index CHUNK_SIZE
+    // lands strictly inside it. Without char-boundary handling, slicing panics.
+    let prefix = "a".repeat(CHUNK_SIZE - 2);
+    let text = format!("{prefix}─{}", "b".repeat(CHUNK_SIZE * 2));
+    let chunks = chunk_text(&text);
+    assert!(
+        chunks.len() >= 2,
+        "long multibyte content should still chunk without panicking"
+    );
+}
+
+#[test]
+fn chunk_text_handles_multibyte_at_overlap_rewind() {
+    // After a chunk ends cleanly, the next start = cut - CHUNK_OVERLAP.
+    // If that lands inside a multibyte char, the next iteration's slice panics.
+    // Put '─' so its bytes straddle (CHUNK_SIZE - CHUNK_OVERLAP).
+    let head = "a".repeat(CHUNK_SIZE - 100 - 1);
+    let text = format!("{head}─{}", "b".repeat(CHUNK_SIZE * 2));
+    let chunks = chunk_text(&text);
+    assert!(
+        !chunks.is_empty(),
+        "overlap rewind into multibyte char must not panic"
+    );
 }
 
 #[test]

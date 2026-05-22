@@ -1,27 +1,60 @@
-# mempalace-rs
+# palace-rs
 
-[![CI](https://github.com/AncientiCe/mempalace-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/AncientiCe/mempalace-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/AncientiCe/palace-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/AncientiCe/palace-rs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.82+](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org)
 
-A local memory palace for AI assistants, implemented in Rust.
+A local-first memory retrieval engine for coding agents, implemented in Rust.
 
-This project stores verbatim text, embeds it locally, and retrieves relevant
-drawers with semantic search. It can be used as a CLI, an MCP stdio server, or
-as a Rust library through the `Palace` facade.
+This project stores verbatim project and conversation memory, embeds it locally,
+and retrieves source-grounded context through MCP. It is built for coding agents
+that need to remember decisions, prior fixes, commands, project conventions, and
+user preferences across sessions without running a separate vector database.
 
 ## What It Does
 
 - Stores project files and conversation turns in a local SQLite database.
 - Generates local embeddings with ONNX Runtime and `all-MiniLM-L6-v2`.
-- Retrieves memories by semantic similarity with optional wing/room filters.
+- Retrieves memories with hybrid semantic/BM25 search plus coding-agent intent boosts.
+- Tags preference-shaped drawers and runs a dedicated preference recall pass for
+  fuzzy "what do I prefer?" and convention questions.
+- Stores preference spans with optional secondary embeddings and exposes a
+  `preference_match` score for preference-shaped queries.
+- Classifies search intent (`preference`, `decision`, `how_to`, `definition`,
+  `temporal`, `unknown`) and can optionally rerank top results with a local
+  interaction reranker.
+- Sanitizes agent-generated query dumps before retrieval.
+- Returns source-grounded results with score provenance and nearby source context.
+- Warms up agents from recent diary entries with project, topic, timestamp, tags,
+  and compact session text.
 - Provides a knowledge graph for temporal entity relationships.
+- Measures real-world usefulness through `palace gain` precision metrics and
+  optional folded feedback on the existing `palace_gain` MCP tool.
 - Exposes MCP tools for assistants that support Model Context Protocol.
 - Offers a small Rust library API for embedding memory into other services.
 
+## Agent Memory Reliability
+
+Version `0.4.0` focuses on the retrieval cases that matter most during coding
+work: preferences, project conventions, recent session continuity,
+source-grounded answers, and measurable usefulness in real agent sessions.
+Drawers that look like user preferences or conventions are tagged in metadata
+during writes and updates, record the matched preference span, and can store a
+secondary preference embedding. Preference-shaped queries receive a dedicated
+`preference_match` score alongside hybrid semantic/BM25 search.
+
+MCP search responses expose score provenance (`combined`, `cosine`, `bm25`, and
+`coding_boost`, `preference_match`, optional `rerank_score`, and `intent`) plus
+adjacent source context so agents can cite why a memory was returned. Diary tools
+provide warm-start context for recent sessions, including project path, topic,
+timestamp, session ID, tags, and compact text.
+
+Library consumers can use `Palace::search_with_provenance` when they need the
+same structured score details that MCP tools return.
+
 ## Storage
 
-Collapses Python's dual-store (ChromaDB + SQLite) into **one file** at `~/.mempalace/palace.db`:
+Collapses Python's dual-store (ChromaDB + SQLite) into **one file** at `~/.palace/palace.db`:
 
 | Table | Purpose |
 |---|---|
@@ -35,6 +68,31 @@ Embeddings are stored as `f32` vectors from `all-MiniLM-L6-v2`. Search uses loca
 
 ## Benchmarks
 
+### Coding-Agent Memory Eval
+
+The repository includes a focused eval fixture for practical coding-agent memory
+questions. It stores realistic memories about project decisions, prior failures,
+commands, conventions, user preferences, and current direction, then asks 40
+questions such as:
+
+- why did we choose bundled sqlite?
+- how did we fix the migration test failure last time?
+- what clippy command should I run?
+- what is the project convention for search results?
+- what changed in the current product direction?
+
+Run it with:
+
+```bash
+cargo test --test coding_agent_eval -- --nocapture
+```
+
+The test reports `recall@1` and `recall@5` and fails if retrieval drops below the
+stable threshold. This is the product-shaped proof: not broad memory theater,
+but whether a coding agent can recover the right project context when it matters.
+
+### LongMemEval
+
 Retrieval recall on the LongMemEval `s_cleaned` split — 500 questions over conversational haystacks of ~50 sessions / ~115k tokens each (30 abstention questions are filtered out per the standard convention, leaving 470 evaluated).
 
 The recipe behind the numbers below:
@@ -42,7 +100,7 @@ The recipe behind the numbers below:
 - **Granularity**: one drawer per session.
 - **Indexed content**: the **full session** — both user and assistant turns are stored and embedded together. No user-turn filtering, no summarization, no LLM extraction.
 - **Embedder**: `all-MiniLM-L6-v2` (384-dim, ONNX), 512-token cap, run locally — no API calls.
-- **Retrieval**: **hybrid** — BM25 (k1=1.5, b=0.75, weight 0.35) fused with cosine similarity (weight 0.65), top-K = 10. Pure score fusion, no hand-tuned keyword/temporal/preference boosters.
+- **Retrieval**: **hybrid baseline** — BM25 (k1=1.5, b=0.75, weight 0.35) fused with cosine similarity (weight 0.65), top-K = 10. These reported LongMemEval numbers used pure score fusion, before the coding-agent intent boosts used by current project-memory search.
 - **No LLM at any stage**: no extraction, no rerank, no answer generation. The recall numbers measure the retriever in isolation.
 - **Metric**: `recall_any@K` at session granularity — does any gold session appear in the top-K results?
 - **Hardware**: Apple M1 Pro, 10 cores (8P + 2E), 32 GB RAM.
@@ -72,40 +130,55 @@ Per-question-type on `s_cleaned`:
   - `single-session-assistant`, `single-session-user`, `knowledge-update`: ≥0.94 at R@1, ≈1.0 at R@5. The retriever handles direct questions where the answer is stated verbatim in one session.
   - `multi-session` and `temporal-reasoning`: strong at R@5 (~0.98) but lower at R@1 (~0.83–0.91). Multiple sessions are relevant and the "best" one is a judgement call — top-1 ranking among near-equivalents is genuinely ambiguous.
   - `single-session-preference`: the visible weak spot at 0.633 / 0.867 / 0.933. Preference questions ("what's my favorite X") are answered by sentences like *"I like…"* / *"I prefer…"* that don't share keywords with the question. Pure BM25 + frozen MiniLM has no signal for preference-shaped sentences specifically; closing this gap would require either an LLM-extracted preference index or a hand-rolled pattern booster.
-- **What's deliberately *not* in these numbers.** No LLM at any stage — no extraction during ingest, no query rewriting, no rerank, no answer generation. No per-dataset hyperparameter tuning. No keyword/temporal/preference boosters. No GPU. The result is the retrieval engine in isolation, on a single CPU, with fixed defaults.
+- **What's deliberately *not* in these LongMemEval numbers.** No LLM at any stage — no extraction during ingest, no query rewriting, no rerank, no answer generation. No per-dataset hyperparameter tuning. No GPU. The result is the baseline retriever in isolation, on a single CPU, with fixed defaults.
 
 ---
 
 ## Installation
 
+### macOS / Linux
+
 ```bash
-git clone https://github.com/AncientiCe/mempalace-rs
-cd mempalace-rs
+curl -fsSL https://raw.githubusercontent.com/AncientiCe/palace-rs/main/scripts/install.sh | sh
+```
+
+### Windows
+
+```powershell
+irm https://raw.githubusercontent.com/AncientiCe/palace-rs/main/scripts/install.ps1 | iex
+```
+
+The installer downloads the matching GitHub Release binary, verifies its SHA-256
+checksum, installs it locally, and registers the MCP server with Cursor, Codex,
+and Claude Code.
+
+Development install:
+
+```bash
 cargo install --path .
+palace install
 ```
 
 The first time you run `mine`, the embedding model is downloaded automatically from HuggingFace and cached.
+
+> **Upgrading from `mempalace` (≤ 0.1.9)?** See [Migrating from `mempalace` to `palace`](#migrating-from-mempalace-to-palace). The 0.2.x line ships a `mempalace` shim binary that forwards to `palace` for one release; it is removed in 0.3.0.
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Detect rooms from your project folder structure
-mempalace init ~/my-project
-
-# 2. Index the project into the palace
-mempalace mine ~/my-project
-
-# 3. Index conversations
-mempalace mine-convos ~/Desktop/transcripts
-
-# 4. Search
-mempalace search "how did we decide on the database schema"
-
-# 5. Wake-up (L0 + L1 context for the AI)
-mempalace wake-up
+cargo install --path .       # development install; release installers do this for you
+palace install               # configures Cursor + Codex + Claude Code
+palace doctor                # verifies MCP config, rules, binary, and drawer count
+palace seed-adoption-facts   # seed KG facts that make agent recall measurable
+palace init ~/my-project     # detect rooms and write palace.yaml
+palace mine ~/my-project     # populate the palace
 ```
+
+Then restart your agent app so it reloads MCP configuration. Search manually with
+`palace search "how did we decide on the database schema"` or let your agent
+call the MCP tools when its installed rule tells it to consult memory.
 
 ---
 
@@ -113,20 +186,26 @@ mempalace wake-up
 
 | Command | Description |
 |---|---|
-| `mempalace init <dir>` | Detect rooms from folder structure, write `mempalace.yaml` |
-| `mempalace mine <dir>` | Chunk, embed, and store project files |
-| `mempalace mine-convos <dir>` | Ingest conversation exports |
-| `mempalace search <query>` | Semantic search with similarity scores |
-| `mempalace wake-up` | Print L0 (identity) + L1 (essential story) context |
-| `mempalace status` | Palace overview: drawer counts by wing/room |
-| `mempalace split` | Split Claude Code mega-transcripts by session |
-| `mempalace repair` | Re-embed any drawers missing vectors |
-| `mempalace mcp` | Start the MCP stdio server |
+| `palace init <dir>` | Detect rooms from folder structure, write `palace.yaml` |
+| `palace mine <dir>` | Chunk, embed, and store project files |
+| `palace mine-convos <dir>` | Ingest conversation exports |
+| `palace search <query>` | Semantic search with similarity scores |
+| `palace wake-up` | Print L0 (identity) + L1 (essential story) context |
+| `palace status` | Palace overview: drawer counts by wing/room |
+| `palace gain` | Show MCP usage gains, estimated savings, and per-project value |
+| `palace split` | Split Claude Code mega-transcripts by session |
+| `palace repair` | Re-embed any drawers missing vectors |
+| `palace install` | Register the MCP server with Cursor, Codex, and Claude Code |
+| `palace uninstall` | Remove palace from MCP client configs |
+| `palace doctor` | Inspect binary path, palace DB, and MCP config status |
+| `palace seed-adoption-facts` | Seed durable KG facts for Palace adoption and quality gates |
+| `palace upgrade-embeddings` | Re-embed drawers; add `--refresh-preferences` to refresh preference-span vectors |
+| `palace mcp` | Start the MCP stdio server |
 
 ### `mine` flags
 
 ```bash
-mempalace mine ~/my-project \
+palace mine ~/my-project \
   --wing my_project          # Override wing name
   --limit 100                # Cap at 100 files
   --dry-run                  # Preview without storing
@@ -137,7 +216,7 @@ mempalace mine ~/my-project \
 ### `mine-convos` flags
 
 ```bash
-mempalace mine-convos ~/Desktop/transcripts \
+palace mine-convos ~/Desktop/transcripts \
   --wing claude_sessions \
   --mode exchange   # or: general (decisions/milestones/emotions)
   --limit 50
@@ -147,36 +226,191 @@ mempalace mine-convos ~/Desktop/transcripts \
 ### `split` flags
 
 ```bash
-mempalace split \
+palace split \
   --source ~/Desktop/transcripts \
   --min-sessions 2 \
   --dry-run
 ```
 
----
+### `gain`
 
-## MCP Setup for Claude Code
-
-Replace the Python server with the native Rust binary — zero config changes needed:
+`palace gain` summarizes automatic MCP usage by Cursor, Codex, Claude Code,
+or any other MCP client. It records local tool-call metadata in `palace.db` and
+estimates value from retrieval hits, duplicate skips, KG facts, diary recalls,
+repeat questions, and latency.
 
 ```bash
-# Remove old Python MCP server
-claude mcp remove mempalace
-
-# Add Rust version (same tool names/schemas)
-claude mcp add mempalace -- mempalace mcp
+palace gain
+palace gain --project my_project --since 7d
+palace gain --history
+palace gain --json
+palace gain --record <query_id> <drawer_id> useful
 ```
 
-Or add manually to `~/.claude/mcp_servers.json`:
+Example output:
+
+```text
+palace gain - last 30d (palace_rs)
+  Tool calls         : 412   (sessions: 27)
+  Hit rate           : 88%   (search hits 142/162)
+  Precision@1        : 92%
+  Precision@5        : 95%
+  Tokens saved (est) : ~78,400
+  Re-index skipped   : 31    (duplicate drawers avoided)
+  KG facts recalled  : 56
+  Diary recalls      : 8
+  Repeat Qs avoided  : 19
+  p95 latency        : 41 ms
+  Tool latency       : palace_search(p50 18 ms, p95 41 ms)
+  Top wings          : palace_rs(120), checkout(40)
+```
+
+Set `PALACE_GAIN_DISABLED=1` to disable usage recording. The legacy
+`MEMPALACE_GAIN_DISABLED` is still honored in 0.2.x with a deprecation warning.
+
+`palace_gain` also accepts an optional `record` payload for MCP callers that want
+to file explicit usefulness feedback without learning a new tool:
+
+```json
+{"record": {"query_id": "query_abc", "drawer_id": "drawer_xyz", "verdict": "useful"}}
+```
+
+---
+
+## MCP Setup
+
+`palace install` is the normal setup command for the four supported local agent
+clients: Cursor, Codex, Claude Code, and Claude Desktop. It writes both:
+
+- an MCP server entry that starts `palace mcp`
+- a small rule that tells the agent when to call `palace_status`,
+  `palace_search`, `palace_preference_search`, `palace_kg_query`, and
+  `palace_diary_write`
+
+```bash
+palace install
+```
+
+What gets written by default:
+
+| Client | MCP config | Rule file |
+|---|---|---|
+| Cursor | `~/.cursor/mcp.json` | `~/.cursor/rules/palace.mdc` |
+| Codex | `~/.codex/config.toml` | `~/.codex/AGENTS.md` |
+| Claude Code | `~/.claude/mcp_servers.json` | `~/.claude/CLAUDE.md` |
+| Claude Desktop | Claude Desktop config | `~/.claude/CLAUDE.md` |
+
+Existing 0.1.x installs that registered the server as `mempalace` are migrated
+to `palace` automatically the next time you run `palace install`.
+
+Install for one client:
+
+```bash
+palace install --client cursor
+palace install --client codex
+palace install --client claude
+```
+
+Install project-scoped rules instead of global rules:
+
+```bash
+palace install --scope project --path /path/to/project
+```
+
+For project scope, Cursor also gets a project-local MCP config at
+`<project>/.cursor/mcp.json`. Codex and Claude Code keep MCP config in their
+user-level config files, while their rules go into `<project>/AGENTS.md` and
+`<project>/CLAUDE.md`.
+
+Skip rule files if you only want MCP wiring:
+
+```bash
+palace install --no-rule
+```
+
+Inspect the current setup:
+
+```bash
+palace doctor
+```
+
+The installed rule is memory-first for remembered context: decisions, prior
+fixes, conventions, preferences, prior commands, session history, and "what
+happened last time?" should use Palace before grep or code search. Grep remains
+the right first tool for current symbols, exact definitions, exact files, and
+implementation details that may have changed since the project was mined.
+It also tells agents to warm-start with `palace_session_context`, search diaries
+with `palace_diary_search` before continuing old work, use KG tools for durable
+facts, and write `palace_diary_write` after substantive work.
+
+Seed durable KG facts for adoption tracking:
+
+```bash
+palace seed-adoption-facts --project my_project
+```
+
+The seed is idempotent and records the four supported clients, the memory-first
+protocol, routing rules, user preference for memory-aware agents, and standard
+quality gates. Agents can then recall those facts with `palace_kg_query`.
+
+Remove palace config:
+
+```bash
+palace uninstall
+palace uninstall --client cursor
+```
+
+### Cursor
+
+After `palace install --client cursor`, restart Cursor or reload the window.
+Settings -> MCP should show `palace` as an enabled stdio server.
+
+Manual Cursor config shape:
 
 ```json
 {
-  "mempalace": {
-    "command": "mempalace",
-    "args": ["mcp"]
+  "mcpServers": {
+    "palace": {
+      "command": "palace",
+      "args": ["mcp"]
+    }
   }
 }
 ```
+
+The rule is installed as `.cursor/rules/palace.mdc` with `alwaysApply: true`.
+
+### Codex
+
+After `palace install --client codex`, restart Codex so it reloads
+`~/.codex/config.toml`.
+
+Manual Codex config shape:
+
+```toml
+[mcp_servers.palace]
+command = "palace"
+args = ["mcp"]
+```
+
+The rule is installed as a managed palace block in `~/.codex/AGENTS.md` (or
+`<project>/AGENTS.md` with `--scope project`). Existing content is preserved.
+
+### Claude Code
+
+After `palace install --client claude`, restart Claude Code so it reloads
+`~/.claude/mcp_servers.json`.
+
+Manual Claude JSON shape is the same as Cursor's `mcpServers` object above.
+You can also use Claude Code's own MCP command:
+
+```bash
+claude mcp remove palace
+claude mcp add palace -- palace mcp
+```
+
+The rule is installed as a managed palace block in `~/.claude/CLAUDE.md` (or
+`<project>/CLAUDE.md` with `--scope project`). Existing content is preserved.
 
 ### MCP Tools
 
@@ -185,27 +419,63 @@ graph operations, graph tunnels, hook acknowledgements, and agent diaries:
 
 | Tool | Description |
 |---|---|
-| `mempalace_status` | Palace overview + protocol |
-| `mempalace_list_wings` | List wings with drawer counts |
-| `mempalace_list_rooms` | List rooms within a wing |
-| `mempalace_get_taxonomy` | Full wing → room → count tree |
-| `mempalace_get_aaak_spec` | AAAK compressed memory dialect spec |
-| `mempalace_search` | Semantic search over drawers |
-| `mempalace_check_duplicate` | Check if content already exists |
-| `mempalace_add_drawer` | File content into the palace |
-| `mempalace_delete_drawer` | Remove a drawer by ID |
-| `mempalace_kg_query` | Query entity relationships |
-| `mempalace_kg_add` | Add a fact (subject → predicate → object) |
-| `mempalace_kg_invalidate` | Mark a fact as no longer true |
-| `mempalace_kg_timeline` | Chronological fact history |
-| `mempalace_kg_stats` | Knowledge graph overview |
-| `mempalace_traverse` | BFS graph walk from a room |
-| `mempalace_find_tunnels` | Rooms bridging two wings |
-| `mempalace_graph_stats` | Palace graph summary |
-| `mempalace_diary_write` | Write a diary entry in AAAK format |
-| `mempalace_diary_read` | Read recent diary entries |
+| `palace_status` | Palace overview + protocol |
+| `palace_gain` | MCP usage gains, estimated savings, and per-project value |
+| `palace_verify` | Verify MCP tools, database health, embeddings, and model cache |
+| `palace_recall_check` | Run project-memory probes and report expected-memory hits |
+| `palace_conflicts` | Surface likely stale or contradictory KG facts |
+| `palace_list_wings` | List wings with drawer counts |
+| `palace_list_rooms` | List rooms within a wing |
+| `palace_get_taxonomy` | Full wing → room → count tree |
+| `palace_get_aaak_spec` | AAAK compressed memory dialect spec |
+| `palace_search` | Semantic search over drawers |
+| `palace_check_duplicate` | Check if content already exists |
+| `palace_add_drawer` | File content into the palace |
+| `palace_delete_drawer` | Remove a drawer by ID |
+| `palace_kg_query` | Query entity relationships |
+| `palace_kg_add` | Add a fact (subject → predicate → object) |
+| `palace_kg_invalidate` | Mark a fact as no longer true |
+| `palace_kg_timeline` | Chronological fact history |
+| `palace_kg_stats` | Knowledge graph overview |
+| `palace_seed_adoption_facts` | Seed durable KG facts for four-client adoption |
+| `palace_traverse` | BFS graph walk from a room |
+| `palace_find_tunnels` | Rooms bridging two wings |
+| `palace_graph_stats` | Palace graph summary |
+| `palace_diary_write` | Write a diary entry in AAAK format |
+| `palace_diary_read` | Read recent diary entries |
+| `palace_diary_search` | Search within an agent's diary entries |
+| `palace_session_context` | Get recent diary context for agent warm-start |
 
 ---
+
+## Migrating from `mempalace` to `palace`
+
+The 0.2.0 release renames the project from `mempalace` to `palace`. The 0.2.x line
+keeps the old names working with deprecation warnings; they will be removed in 0.3.0.
+
+| Surface | Before (0.1.x) | After (0.2.x) |
+|---|---|---|
+| Crate | `mempalace-rs` | `palace-rs` |
+| Primary binary | `mempalace` | `palace` (the `mempalace` binary is now a deprecation shim) |
+| MCP server name | `mempalace` | `palace` (migrated automatically by `palace install`) |
+| MCP tools | `mempalace_*` | `palace_*` |
+| Config / data dir | `~/.mempalace` | `~/.palace` (auto-migrated on first run) |
+| Project config | `mempalace.yaml` | `palace.yaml` (legacy filename still read) |
+| Env vars | `MEMPALACE_*` | `PALACE_*` (legacy names accepted with a warning) |
+| Cursor rule | `.cursor/rules/mempalace.mdc` | `.cursor/rules/palace.mdc` |
+| Release assets | `mempalace-<ver>-<target>` | `palace-<ver>-<target>` |
+
+One-step migration:
+
+```bash
+cargo install --path .
+palace install
+```
+
+`palace install` rewrites existing MCP client configs (Cursor, Codex, Claude Code)
+and rule files, replacing legacy `mempalace` entries with `palace` entries.
+`~/.mempalace` is moved to `~/.palace` on first run when the legacy directory
+exists and the new one does not.
 
 ## Migration from Python
 
@@ -215,30 +485,48 @@ The Rust version uses a new single-file database (`palace.db`). Your existing Ch
 
 ```bash
 # 1. Re-mine your projects
-mempalace init ~/my-project && mempalace mine ~/my-project
+palace init ~/my-project && palace mine ~/my-project
 
 # 2. Re-index conversations
-mempalace mine-convos ~/Desktop/transcripts
+palace mine-convos ~/Desktop/transcripts
 
 # 3. Verify
-mempalace status
+palace status
 ```
 
-Your `identity.txt`, `people_map.json`, and `known_names.json` in `~/.mempalace/` are compatible and will be read automatically.
+Your `identity.txt`, `people_map.json`, and `known_names.json` in `~/.palace/` (migrated from `~/.mempalace/` if present) are compatible and will be read automatically.
+
+---
+
+## Test on a Project
+
+```bash
+palace init /path/to/project
+palace mine /path/to/project
+palace status
+```
+
+Restart Cursor, Codex, or Claude Code, then ask the agent a project question that
+should use memory, for example: "Search the palace for how this project handles
+database migrations." The agent should call `palace_search` through MCP
+instead of re-indexing the repository from scratch.
 
 ---
 
 ## Configuration
 
-`~/.mempalace/config.json` is read on startup. Environment variables take highest priority:
+`~/.palace/config.json` is read on startup. Environment variables take highest priority:
 
 | Env Var | Default | Description |
 |---|---|---|
-| `MEMPALACE_PALACE_PATH` | `~/.mempalace/palace` | Palace data directory |
+| `PALACE_PALACE_PATH` | `~/.palace/palace` | Palace data directory |
 
-### `mempalace.yaml` (per-project)
+The legacy `MEMPALACE_PALACE_PATH` is still honored in 0.2.x with a deprecation warning.
 
-Created by `mempalace init`. Example:
+### `palace.yaml` (per-project)
+
+Created by `palace init`. The legacy filename `mempalace.yaml` is still read.
+Example:
 
 ```yaml
 wing: my_project
@@ -260,12 +548,12 @@ rooms:
 
 | Layer | Name | Description |
 |---|---|---|
-| L0 | Identity | `~/.mempalace/identity.txt` — always loaded (~100 tokens) |
+| L0 | Identity | `~/.palace/identity.txt` — always loaded (~100 tokens) |
 | L1 | Essential Story | Top drawers by importance, grouped by room (~600–900 tokens) |
 | L2 | On-Demand | Wing/room filtered retrieval |
 | L3 | Deep Search | Full semantic search |
 
-`mempalace wake-up` prints L0 + L1. The AI uses MCP tools for L2/L3.
+`palace wake-up` prints L0 + L1. The AI uses MCP tools for L2/L3.
 
 ---
 
@@ -283,12 +571,16 @@ Tests use in-memory SQLite — no palace.db needed. The embedding model is not l
 
 ## Hooks Compatibility
 
-Shell hooks that previously called `python -m mempalace.mcp_server` can now call `mempalace mcp`. Update the binary path in your hooks:
+Shell hooks that previously called `python -m mempalace.mcp_server` or
+`mempalace mcp` can now call `palace mcp`. Update the binary path in your hooks:
 
 ```bash
 # Before (Python)
 exec python -m mempalace.mcp_server
 
-# After (Rust)
+# Before (Rust 0.1.x)
 exec mempalace mcp
+
+# After (Rust 0.2.x+)
+exec palace mcp
 ```

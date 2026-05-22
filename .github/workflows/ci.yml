@@ -86,3 +86,90 @@ jobs:
             ${{ runner.os }}-cargo-
       - name: Run tests
         run: cargo test --all-features
+
+  evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-evals-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Run coding-agent memory eval
+        run: cargo test --all-features --test coding_agent_eval -- --nocapture
+      - name: Check LongMemEval sampled baseline guard
+        run: cargo test --all-features --test longmemeval_sample -- --nocapture
+
+  install-script:
+    name: Install script smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build release binary
+        run: cargo build --release --features cli
+      - name: Package Unix artifact
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          mkdir -p "dist/palace-local-${{ matrix.target }}"
+          cp target/release/palace "dist/palace-local-${{ matrix.target }}/"
+          tar -C dist -czf "dist/palace-local-${{ matrix.target }}.tar.gz" "palace-local-${{ matrix.target }}"
+      - name: Package Windows artifact
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist/palace-local-${{ matrix.target }}" | Out-Null
+          Copy-Item "target/release/palace.exe" "dist/palace-local-${{ matrix.target }}/"
+          Compress-Archive -Path "dist/palace-local-${{ matrix.target }}/*" -DestinationPath "dist/palace-local-${{ matrix.target }}.zip"
+      - name: Run Unix install script
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        env:
+          PALACE_VERSION: local
+          PALACE_LOCAL_ARCHIVE: ${{ github.workspace }}/dist/palace-local-${{ matrix.target }}.tar.gz
+          PALACE_INSTALL_DIR: ${{ runner.temp }}/palace-bin
+          HOME: ${{ runner.temp }}/palace-home
+        run: |
+          mkdir -p "$HOME"
+          sh scripts/install.sh
+          "$PALACE_INSTALL_DIR/palace" --version
+          test -f "$HOME/.cursor/mcp.json"
+      - name: Run Windows install script
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          PALACE_VERSION: local
+          PALACE_LOCAL_ARCHIVE: ${{ github.workspace }}/dist/palace-local-${{ matrix.target }}.zip
+          PALACE_INSTALL_DIR: ${{ runner.temp }}\palace-bin
+        run: |
+          # On Windows, `palace install` resolves the home directory via
+          # SHGetKnownFolderPath (FOLDERID_Profile) and ignores $env:HOME, so
+          # configs always land in the real user profile. Assert against
+          # $env:USERPROFILE rather than a redirected HOME.
+          ./scripts/install.ps1
+          & (Join-Path $env:PALACE_INSTALL_DIR "palace.exe") --version
+          $cursorConfig = Join-Path $env:USERPROFILE ".cursor\mcp.json"
+          if (-not (Test-Path $cursorConfig)) { throw "Cursor config was not written at $cursorConfig" }

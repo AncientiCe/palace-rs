@@ -1,16 +1,16 @@
-//! Basic MemPalace usage example.
+//! Basic Palace usage example.
 //!
 //! Run: cargo run --example basic_usage
 
-use mempalace::db;
-use mempalace::knowledge_graph;
-use mempalace::store;
+use palace::db;
+use palace::knowledge_graph;
+use palace::store;
 
 fn main() -> anyhow::Result<()> {
     // 1. Open an in-memory palace (use db::open(&config.palace_db_path()) for production)
     let conn = db::open_in_memory()?;
 
-    println!("=== MemPalace Basic Usage ===\n");
+    println!("=== Palace Basic Usage ===\n");
 
     // 2. Add some drawers
     let (added, id) = store::add_drawer(
@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
     // 3. Add a knowledge graph fact
     let triple_id = knowledge_graph::add_triple(
         &conn,
-        "MemPalace",
+        "Palace",
         "stores_data_in",
         "SQLite",
         Some("2026-04-01"),
@@ -41,8 +41,8 @@ fn main() -> anyhow::Result<()> {
     println!("Added triple: {}", &triple_id[..20]);
 
     // 4. Query the KG
-    let facts = knowledge_graph::query_entity(&conn, "MemPalace", None, "outgoing")?;
-    println!("\nFacts about MemPalace:");
+    let facts = knowledge_graph::query_entity(&conn, "Palace", None, "outgoing")?;
+    println!("\nFacts about Palace:");
     for fact in &facts {
         println!("  {} → {} → {}", fact.subject, fact.predicate, fact.object);
     }
@@ -58,6 +58,6 @@ fn main() -> anyhow::Result<()> {
     println!("  KG entities: {}", kg_stats.entities);
     println!("  KG triples: {}", kg_stats.triples);
 
-    println!("\nDone! For real usage, run: mempalace init <dir> && mempalace mine <dir>");
+    println!("\nDone! For real usage, run: palace init <dir> && palace mine <dir>");
     Ok(())
 }

@@ -1,5 +1,8 @@
-use mempalace::config::MempalaceConfig;
-use mempalace::i18n::{canonical_language, load_locale, supported_languages};
+use palace::config::PalaceConfig;
+use palace::i18n::{canonical_language, load_locale, supported_languages};
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn language_codes_are_canonicalized_case_insensitively() {
@@ -17,8 +20,11 @@ fn locale_loader_contains_non_latin_candidate_patterns() {
 
 #[test]
 fn config_reads_entity_language_env_override() {
-    std::env::set_var("MEMPALACE_ENTITY_LANGUAGES", "PT-BR,zh_CN");
-    let config = MempalaceConfig::new();
-    assert_eq!(config.entity_languages(), vec!["pt-br", "zh-cn"]);
-    std::env::remove_var("MEMPALACE_ENTITY_LANGUAGES");
+    let _lock = ENV_LOCK.lock().unwrap();
+    std::env::remove_var("PALACE_ENTITY_LANGUAGES");
+    std::env::set_var("PALACE_ENTITY_LANGUAGES", "PT-BR,zh_CN");
+    let config = PalaceConfig::new();
+    let result = config.entity_languages();
+    std::env::remove_var("PALACE_ENTITY_LANGUAGES");
+    assert_eq!(result, vec!["pt-br", "zh-cn"]);
 }

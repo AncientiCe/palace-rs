@@ -1,5 +1,5 @@
 //! Room detection from folder structure and filename patterns.
-//! Writes mempalace.yaml for a project.
+//! Writes and reads palace.yaml for a project.
 //! Port of room_detector_local.py.
 
 use anyhow::Result;
@@ -251,35 +251,28 @@ pub fn detect_rooms_from_files(project_dir: &Path) -> Vec<Room> {
         .collect()
 }
 
-/// Write a mempalace.yaml file for a project.
+/// Write a palace.yaml file for a project.
 pub fn save_config(project_dir: &Path, project_name: &str, rooms: &[Room]) -> Result<PathBuf> {
     let config = ProjectConfig {
         wing: project_name.to_string(),
         rooms: rooms.to_vec(),
     };
     let yaml = serde_yaml::to_string(&config)?;
-    let config_path = project_dir.join("mempalace.yaml");
+    let config_path = project_dir.join("palace.yaml");
     std::fs::write(&config_path, yaml)?;
     Ok(config_path)
 }
 
-/// Load an existing mempalace.yaml (or mempal.yaml fallback).
+/// Load an existing palace.yaml for the project.
 pub fn load_config(project_dir: &Path) -> Result<ProjectConfig> {
-    let path = project_dir.join("mempalace.yaml");
-    let path = if path.exists() {
-        path
-    } else {
-        let legacy = project_dir.join("mempal.yaml");
-        if legacy.exists() {
-            legacy
-        } else {
-            anyhow::bail!(
-                "No mempalace.yaml found in {}. Run: mempalace init {}",
-                project_dir.display(),
-                project_dir.display()
-            );
-        }
-    };
+    let path = project_dir.join("palace.yaml");
+    if !path.exists() {
+        anyhow::bail!(
+            "No palace.yaml found in {}. Run: palace init {}",
+            project_dir.display(),
+            project_dir.display()
+        );
+    }
     let content = std::fs::read_to_string(&path)?;
     let config: ProjectConfig = serde_yaml::from_str(&content)?;
     Ok(config)
@@ -330,7 +323,7 @@ pub fn detect_rooms_interactive(project_dir: &Path, yes: bool) -> Result<Vec<Roo
     stdin.lock().read_line(&mut line)?;
     let answer = line.trim().to_lowercase();
     if answer == "n" || answer == "no" {
-        println!("  Edit mempalace.yaml manually after it's written.");
+        println!("  Edit palace.yaml manually after it's written.");
     }
 
     Ok(rooms)

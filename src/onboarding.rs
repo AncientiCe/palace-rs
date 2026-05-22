@@ -169,7 +169,7 @@ pub fn run_onboarding(project_dir: &Path, config_dir: &Path) -> Result<()> {
     }
 
     println!("\n  Setup complete! Next:");
-    println!("    mempalace mine {}", project_dir.display());
+    println!("    palace mine {}", project_dir.display());
     println!("{}\n", "=".repeat(55));
 
     Ok(())

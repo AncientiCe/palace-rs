@@ -37,6 +37,8 @@ pub struct SearchResult {
     pub room: String,
     pub source_file: String,
     pub created_at: String,
+    /// When this drawer was filed into the palace (used for recency scoring).
+    pub filed_at: String,
     pub similarity: f64,
 }
 
@@ -73,18 +75,21 @@ pub fn add_drawer(
 ) -> Result<(bool, String)> {
     let id = drawer_id(wing, room, source_file, chunk_index);
     let blob = embedding.map(vec_to_blob);
+    let pref_blob = preference_embedding_blob(content, embedding);
     let filed_at = Utc::now().to_rfc3339();
     let entity_metadata = crate::entity_detector::entity_metadata(content);
     let entity_metadata_text =
         serde_json::to_string(&entity_metadata).unwrap_or_else(|_| "{}".to_string());
     let hall = crate::hall_router::detect_hall(content);
+    let metadata_text = serde_json::to_string(&metadata_for_content(None, content))
+        .unwrap_or_else(|_| "{}".to_string());
 
     let rows = conn
         .execute(
             "INSERT OR IGNORE INTO drawers
              (id, wing, room, content, embedding, source_file, chunk_index, added_by, filed_at,
-              importance, created_at, entity_metadata, hall)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?9, ?11, ?12)",
+              importance, created_at, entity_metadata, hall, metadata, pref_embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?9, ?11, ?12, ?13, ?14)",
             params![
                 id,
                 wing,
@@ -97,7 +102,9 @@ pub fn add_drawer(
                 filed_at,
                 importance,
                 entity_metadata_text,
-                hall
+                hall,
+                metadata_text,
+                pref_blob
             ],
         )
         .context("inserting drawer")?;
@@ -122,8 +129,9 @@ pub fn add_drawer_with_id(
     extra_meta: Option<&serde_json::Value>,
 ) -> Result<bool> {
     let blob = embedding.map(vec_to_blob);
+    let pref_blob = preference_embedding_blob(content, embedding);
     let filed_at = Utc::now().to_rfc3339();
-    let metadata = extra_meta.cloned().unwrap_or_else(|| serde_json::json!({}));
+    let metadata = metadata_for_content(extra_meta, content);
     let metadata_text = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
     let hall = metadata
         .get("hall")
@@ -138,8 +146,8 @@ pub fn add_drawer_with_id(
         .execute(
             "INSERT OR IGNORE INTO drawers
              (id, wing, room, content, embedding, source_file, chunk_index, added_by, filed_at,
-              created_at, entity_metadata, hall, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?8, ?9, ?10, ?11)",
+              created_at, entity_metadata, hall, metadata, pref_embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?8, ?9, ?10, ?11, ?12)",
             params![
                 id,
                 wing,
@@ -151,7 +159,8 @@ pub fn add_drawer_with_id(
                 filed_at,
                 entity_metadata_text,
                 hall,
-                metadata_text
+                metadata_text,
+                pref_blob
             ],
         )
         .context("inserting drawer with id")?;
@@ -174,12 +183,32 @@ pub fn update_drawer_content(conn: &Connection, id: &str, content: &str) -> Resu
     let entity_metadata_text =
         serde_json::to_string(&entity_metadata).unwrap_or_else(|_| "{}".to_string());
     let hall = crate::hall_router::detect_hall(content);
+    let embedding = crate::embedder::embed_one(content).ok();
+    let blob = embedding.as_deref().map(vec_to_blob);
+    let pref_blob = preference_embedding_blob(content, embedding.as_deref());
+    let current_metadata = get_drawer(conn, id)
+        .ok()
+        .flatten()
+        .map(|drawer| drawer.metadata)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let metadata_text =
+        serde_json::to_string(&metadata_for_content(Some(&current_metadata), content))
+            .unwrap_or_else(|_| "{}".to_string());
     let rows = conn
         .execute(
             "UPDATE drawers
-             SET content = ?1, entity_metadata = ?2, hall = ?3
-             WHERE id = ?4",
-            params![content, entity_metadata_text, hall, id],
+             SET content = ?1, entity_metadata = ?2, hall = ?3, embedding = ?4, metadata = ?5
+                 , pref_embedding = ?6
+             WHERE id = ?7",
+            params![
+                content,
+                entity_metadata_text,
+                hall,
+                blob,
+                metadata_text,
+                pref_blob,
+                id
+            ],
         )
         .context("updating drawer content")?;
     if rows > 0 {
@@ -286,7 +315,7 @@ pub fn vector_search(
 ) -> Result<Vec<SearchResult>> {
     let (where_clause, where_params) = build_where(filter);
     let sql = format!(
-        "SELECT id, wing, room, content, source_file, created_at, embedding
+        "SELECT id, wing, room, content, source_file, created_at, filed_at, embedding
          FROM drawers WHERE embedding IS NOT NULL {extra} ORDER BY filed_at DESC",
         extra = if where_clause.is_empty() {
             String::new()
@@ -307,14 +336,15 @@ pub fn vector_search(
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
-                r.get::<_, Vec<u8>>(6)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, Vec<u8>>(7)?,
             ))
         },
     )?;
 
     let mut scored: Vec<SearchResult> = rows
         .filter_map(|r| {
-            let (id, wing, room, content, source_file, created_at, blob) = r.ok()?;
+            let (id, wing, room, content, source_file, created_at, filed_at, blob) = r.ok()?;
             let emb = blob_to_vec(&blob);
             let sim = cosine_similarity(query_vec, &emb) as f64;
             Some(SearchResult {
@@ -322,11 +352,85 @@ pub fn vector_search(
                 text: content,
                 wing,
                 room,
-                source_file: std::path::Path::new(&source_file)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| source_file.clone()),
+                source_file,
                 created_at,
+                filed_at,
+                similarity: (sim * 1000.0).round() / 1000.0,
+            })
+        })
+        .collect();
+
+    scored.sort_by(|a, b| {
+        b.similarity
+            .partial_cmp(&a.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored.truncate(n_results);
+    Ok(scored)
+}
+
+/// Search drawers tagged as preferences, ranked by cosine similarity.
+///
+/// Used as a second recall pass to surface preference drawers even when BM25 has
+/// no keyword overlap with the query (the R@1 weakness for preference sentences).
+pub fn preference_search(
+    conn: &Connection,
+    query_vec: &[f32],
+    n_results: usize,
+) -> Result<Vec<SearchResult>> {
+    preference_search_filtered(conn, query_vec, &DrawerFilter::default(), n_results)
+}
+
+/// Search preference-tagged drawers with optional wing/room filters.
+pub fn preference_search_filtered(
+    conn: &Connection,
+    query_vec: &[f32],
+    filter: &DrawerFilter,
+    n_results: usize,
+) -> Result<Vec<SearchResult>> {
+    let (where_clause, where_params) = build_where(filter);
+    let extra_filter = if where_clause.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {}", &where_clause[6..])
+    };
+    let sql = format!(
+        "SELECT id, wing, room, content, source_file, created_at, filed_at,
+                COALESCE(pref_embedding, embedding) AS preference_embedding
+         FROM drawers
+         WHERE json_extract(metadata, '$.preference') = 1
+           AND COALESCE(pref_embedding, embedding) IS NOT NULL{extra_filter}",
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(where_params.iter().map(|p| p.as_ref())),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, Vec<u8>>(7)?,
+            ))
+        },
+    )?;
+
+    let mut scored: Vec<SearchResult> = rows
+        .filter_map(|r| {
+            let (id, wing, room, content, source_file, created_at, filed_at, blob) = r.ok()?;
+            let emb = blob_to_vec(&blob);
+            let sim = cosine_similarity(query_vec, &emb) as f64;
+            Some(SearchResult {
+                id,
+                text: content,
+                wing,
+                room,
+                source_file,
+                created_at,
+                filed_at,
                 similarity: (sim * 1000.0).round() / 1000.0,
             })
         })
@@ -484,6 +588,30 @@ fn drawer_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Drawer> {
 
 fn parse_json_object(text: &str) -> serde_json::Value {
     serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn metadata_for_content(existing: Option<&serde_json::Value>, content: &str) -> serde_json::Value {
+    let mut metadata = existing.cloned().unwrap_or_else(|| serde_json::json!({}));
+    if !metadata.is_object() {
+        metadata = serde_json::json!({});
+    }
+    if let Some(span) = crate::preference::preference_span(content) {
+        metadata["preference"] = serde_json::json!(true);
+        metadata["preference_span"] = serde_json::json!(span);
+    } else if let Some(object) = metadata.as_object_mut() {
+        object.remove("preference");
+        object.remove("preference_span");
+    }
+    metadata
+}
+
+fn preference_embedding_blob(content: &str, fallback_embedding: Option<&[f32]>) -> Option<Vec<u8>> {
+    let span = crate::preference::preference_span(content)?;
+    let fallback = fallback_embedding?;
+    let embedding = crate::embedder::embed_one(&span)
+        .ok()
+        .unwrap_or_else(|| fallback.to_vec());
+    Some(vec_to_blob(&embedding))
 }
 
 fn index_bm25_terms(conn: &Connection, drawer_id: &str, content: &str) -> Result<()> {

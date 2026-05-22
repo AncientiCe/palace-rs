@@ -1,4 +1,4 @@
-use mempalace::normalize::normalize_content;
+use palace::normalize::normalize_content;
 
 #[test]
 fn passthrough_when_already_has_markers() {

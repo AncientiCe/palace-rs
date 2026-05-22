@@ -2,6 +2,13 @@ target/
 /.fastembed_cache/
 /.idea/
 
+# Belongs to a different branch
+/data/
+/tools/
+
+# Local mempalace project config
+/mempalace.yaml
+
 # SQLite runtime/test artifacts
 *.db
 *.db-shm

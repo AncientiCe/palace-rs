@@ -1,6 +1,6 @@
-//! Configuration system for MemPalace.
+//! Configuration system for Palace.
 //!
-//! Load order: env vars > ~/.mempalace/config.json > defaults.
+//! Load order: env vars > ~/.palace/config.json > defaults.
 
 use anyhow::Result;
 use directories::UserDirs;
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_COLLECTION_NAME: &str = "mempalace_drawers";
+pub const DEFAULT_COLLECTION_NAME: &str = "palace_drawers";
 
 pub const DEFAULT_TOPIC_WINGS: &[&str] = &[
     "emotions",
@@ -118,16 +118,16 @@ struct FileConfig {
     entity_languages: Option<Vec<String>>,
 }
 
-/// Runtime configuration for MemPalace.
+/// Runtime configuration for Palace.
 ///
-/// Load priority: environment variables > ~/.mempalace/config.json > defaults.
+/// Load priority: environment variables > ~/.palace/config.json > defaults.
 #[derive(Debug, Clone)]
-pub struct MempalaceConfig {
+pub struct PalaceConfig {
     pub config_dir: PathBuf,
     file_config: FileConfig,
 }
 
-impl MempalaceConfig {
+impl PalaceConfig {
     pub fn new() -> Self {
         Self::with_config_dir(None)
     }
@@ -155,8 +155,8 @@ impl MempalaceConfig {
 
     fn default_config_dir() -> PathBuf {
         UserDirs::new()
-            .map(|u| u.home_dir().join(".mempalace"))
-            .unwrap_or_else(|| PathBuf::from(".mempalace"))
+            .map(|u| u.home_dir().join(".palace"))
+            .unwrap_or_else(|| PathBuf::from(".palace"))
     }
 
     /// Path to the SQLite palace database file.
@@ -164,12 +164,9 @@ impl MempalaceConfig {
         self.palace_path().join("palace.db")
     }
 
-    /// Palace data directory (mirrors Python's palace_path).
+    /// Palace data directory.
     pub fn palace_path(&self) -> PathBuf {
-        if let Ok(v) = std::env::var("MEMPALACE_PALACE_PATH") {
-            return PathBuf::from(v);
-        }
-        if let Ok(v) = std::env::var("MEMPAL_PALACE_PATH") {
+        if let Ok(v) = std::env::var("PALACE_PALACE_PATH") {
             return PathBuf::from(v);
         }
         self.file_config
@@ -213,7 +210,7 @@ impl MempalaceConfig {
     }
 
     pub fn entity_languages(&self) -> Vec<String> {
-        if let Ok(value) = std::env::var("MEMPALACE_ENTITY_LANGUAGES") {
+        if let Ok(value) = std::env::var("PALACE_ENTITY_LANGUAGES") {
             let langs: Vec<String> = value
                 .split(',')
                 .filter_map(crate::i18n::canonical_language)
@@ -261,7 +258,7 @@ impl MempalaceConfig {
     }
 }
 
-impl Default for MempalaceConfig {
+impl Default for PalaceConfig {
     fn default() -> Self {
         Self::new()
     }

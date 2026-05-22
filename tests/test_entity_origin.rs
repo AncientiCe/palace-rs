@@ -1,7 +1,7 @@
-use mempalace::entity_detector::{detect_entities, EntityKind};
-use mempalace::hall_router::detect_hall;
-use mempalace::manifest_entities::detect_manifest_projects;
-use mempalace::origin::{detect_origin, OriginPlatform};
+use palace::entity_detector::{detect_entities, EntityKind};
+use palace::hall_router::detect_hall;
+use palace::manifest_entities::detect_manifest_projects;
+use palace::origin::{detect_origin, OriginPlatform};
 
 #[test]
 fn entity_detector_handles_camelcase_and_dialogue_names() {

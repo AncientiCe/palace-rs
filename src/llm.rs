@@ -10,7 +10,7 @@ pub enum LlmProvider {
 }
 
 pub fn detect_provider() -> Option<LlmProvider> {
-    if std::env::var("MEMPALACE_OPENAI_COMPAT_BASE_URL").is_ok() {
+    if std::env::var("PALACE_OPENAI_COMPAT_BASE_URL").is_ok() {
         return Some(LlmProvider::OpenAiCompat);
     }
     if std::env::var("ANTHROPIC_API_KEY").is_ok() {

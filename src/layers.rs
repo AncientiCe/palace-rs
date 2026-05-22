@@ -1,6 +1,6 @@
 //! 4-Layer Memory Stack.
 //!
-//! Layer 0: Identity (~100 tokens) — Always loaded. ~/.mempalace/identity.txt
+//! Layer 0: Identity (~100 tokens) — Always loaded. ~/.palace/identity.txt
 //! Layer 1: Essential Story (~500-800) — Top moments from the palace, by importance.
 //! Layer 2: On-Demand (~200-500 each) — Wing/room filtered retrieval.
 //! Layer 3: Deep Search (unlimited) — Full semantic search.
@@ -52,7 +52,7 @@ impl Layer0 {
 }
 
 fn default_identity() -> String {
-    "## L0 — IDENTITY\nNo identity configured. Create ~/.mempalace/identity.txt".to_string()
+    "## L0 — IDENTITY\nNo identity configured. Create ~/.palace/identity.txt".to_string()
 }
 
 // ── Layer 1 ───────────────────────────────────────────────────────────────
@@ -74,7 +74,7 @@ impl Layer1 {
     pub fn generate(&self, conn: &Connection) -> String {
         let drawers = match list_by_importance(conn, 200) {
             Ok(d) => d,
-            Err(_) => return "## L1 — No palace found. Run: mempalace mine <dir>".to_string(),
+            Err(_) => return "## L1 — No palace found. Run: palace mine <dir>".to_string(),
         };
 
         if drawers.is_empty() {

@@ -24,7 +24,7 @@ const SKIP_DIRS: &[&str] = &[
     "dist",
     "build",
     ".next",
-    ".mempalace",
+    ".palace",
     "tool-results",
     "memory",
 ];
@@ -350,14 +350,19 @@ pub fn mine_convos(
         }
 
         let mut drawers_added = 0usize;
-        for (chunk_text, chunk_room, chunk_index) in &chunks_with_rooms {
-            let embedding = crate::embedder::embed_one(chunk_text).ok();
+        let chunk_texts: Vec<&str> = chunks_with_rooms
+            .iter()
+            .map(|(t, _, _)| t.as_str())
+            .collect();
+        let embeddings = crate::embedder::embed_batch(&chunk_texts).unwrap_or_default();
+        for (idx, (chunk_text, chunk_room, chunk_index)) in chunks_with_rooms.iter().enumerate() {
+            let embedding = embeddings.get(idx).map(|e| e.as_slice());
             let (added, _) = add_drawer(
                 conn,
                 &wing,
                 chunk_room,
                 chunk_text,
-                embedding.as_deref(),
+                embedding,
                 &source_file,
                 *chunk_index,
                 agent,

@@ -3,7 +3,7 @@ use anyhow::Result;
 #[cfg(feature = "benchmarks")]
 use clap::{Parser, Subcommand};
 #[cfg(feature = "benchmarks")]
-use mempalace::benchmarks::{prepare_beam_jsonl, run_benchmark, RunOptions};
+use palace::benchmarks::{prepare_beam_jsonl, run_benchmark, RunOptions};
 #[cfg(feature = "benchmarks")]
 use std::path::PathBuf;
 
