@@ -18,26 +18,36 @@ user preferences across sessions without running a separate vector database.
 - Retrieves memories with hybrid semantic/BM25 search plus coding-agent intent boosts.
 - Tags preference-shaped drawers and runs a dedicated preference recall pass for
   fuzzy "what do I prefer?" and convention questions.
+- Stores preference spans with optional secondary embeddings and exposes a
+  `preference_match` score for preference-shaped queries.
+- Classifies search intent (`preference`, `decision`, `how_to`, `definition`,
+  `temporal`, `unknown`) and can optionally rerank top results with a local
+  interaction reranker.
 - Sanitizes agent-generated query dumps before retrieval.
 - Returns source-grounded results with score provenance and nearby source context.
 - Warms up agents from recent diary entries with project, topic, timestamp, tags,
   and compact session text.
 - Provides a knowledge graph for temporal entity relationships.
+- Measures real-world usefulness through `palace gain` precision metrics and
+  optional folded feedback on the existing `palace_gain` MCP tool.
 - Exposes MCP tools for assistants that support Model Context Protocol.
 - Offers a small Rust library API for embedding memory into other services.
 
 ## Agent Memory Reliability
 
-Version `0.1.9` focuses on the retrieval cases that matter most during coding
-work: preferences, project conventions, recent session continuity, and
-source-grounded answers. Drawers that look like user preferences or conventions
-are tagged in metadata during writes and updates, then considered by a
-filter-aware preference recall pass alongside hybrid semantic/BM25 search.
+Version `0.4.0` focuses on the retrieval cases that matter most during coding
+work: preferences, project conventions, recent session continuity,
+source-grounded answers, and measurable usefulness in real agent sessions.
+Drawers that look like user preferences or conventions are tagged in metadata
+during writes and updates, record the matched preference span, and can store a
+secondary preference embedding. Preference-shaped queries receive a dedicated
+`preference_match` score alongside hybrid semantic/BM25 search.
 
 MCP search responses expose score provenance (`combined`, `cosine`, `bm25`, and
-`coding_boost`) plus adjacent source context so agents can cite why a memory was
-returned. Diary tools provide warm-start context for recent sessions, including
-project path, topic, timestamp, session ID, tags, and compact text.
+`coding_boost`, `preference_match`, optional `rerank_score`, and `intent`) plus
+adjacent source context so agents can cite why a memory was returned. Diary tools
+provide warm-start context for recent sessions, including project path, topic,
+timestamp, session ID, tags, and compact text.
 
 Library consumers can use `Palace::search_with_provenance` when they need the
 same structured score details that MCP tools return.
@@ -189,6 +199,7 @@ call the MCP tools when its installed rule tells it to consult memory.
 | `palace uninstall` | Remove palace from MCP client configs |
 | `palace doctor` | Inspect binary path, palace DB, and MCP config status |
 | `palace seed-adoption-facts` | Seed durable KG facts for Palace adoption and quality gates |
+| `palace upgrade-embeddings` | Re-embed drawers; add `--refresh-preferences` to refresh preference-span vectors |
 | `palace mcp` | Start the MCP stdio server |
 
 ### `mine` flags
@@ -233,6 +244,7 @@ palace gain
 palace gain --project my_project --since 7d
 palace gain --history
 palace gain --json
+palace gain --record <query_id> <drawer_id> useful
 ```
 
 Example output:
@@ -241,6 +253,8 @@ Example output:
 palace gain - last 30d (palace_rs)
   Tool calls         : 412   (sessions: 27)
   Hit rate           : 88%   (search hits 142/162)
+  Precision@1        : 92%
+  Precision@5        : 95%
   Tokens saved (est) : ~78,400
   Re-index skipped   : 31    (duplicate drawers avoided)
   KG facts recalled  : 56
@@ -253,6 +267,13 @@ palace gain - last 30d (palace_rs)
 
 Set `PALACE_GAIN_DISABLED=1` to disable usage recording. The legacy
 `MEMPALACE_GAIN_DISABLED` is still honored in 0.2.x with a deprecation warning.
+
+`palace_gain` also accepts an optional `record` payload for MCP callers that want
+to file explicit usefulness feedback without learning a new tool:
+
+```json
+{"record": {"query_id": "query_abc", "drawer_id": "drawer_xyz", "verdict": "useful"}}
+```
 
 ---
 

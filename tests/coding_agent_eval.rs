@@ -366,7 +366,7 @@ fn coding_agent_memory_eval_has_stable_recall() {
     );
 
     assert!(
-        recall_at_1 >= 0.85,
+        recall_at_1 >= 0.86,
         "recall@1 too low: {recall_at_1:.3}; first_top1_misses={:?}",
         top1_misses
             .iter()
@@ -380,5 +380,5 @@ fn coding_agent_memory_eval_has_stable_recall() {
             })
             .collect::<Vec<_>>()
     );
-    assert!(recall_at_5 >= 0.95, "recall@5 too low: {recall_at_5:.3}");
+    assert!(recall_at_5 >= 0.98, "recall@5 too low: {recall_at_5:.3}");
 }

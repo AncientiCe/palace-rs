@@ -14,7 +14,7 @@ use crate::config::PalaceConfig;
 use crate::dialect::{AAAK_SPEC, PALACE_PROTOCOL};
 use crate::knowledge_graph as kg;
 use crate::palace_graph;
-use crate::searcher::search_memories;
+use crate::searcher::search_memories_with_options;
 use crate::store::{
     add_drawer_with_id, check_duplicate, count_drawers, delete_drawer, diary_id, get_drawer,
     list_drawers, preference_search_filtered, room_counts, taxonomy, update_drawer_content,
@@ -191,7 +191,7 @@ pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args:
         "palace_preference_search" => tool_preference_search(conn, args),
         "palace_export" => tool_export(conn),
         "palace_import" => tool_import(conn, args),
-        "palace_upgrade_embeddings" => tool_upgrade_embeddings(conn),
+        "palace_upgrade_embeddings" => tool_upgrade_embeddings(conn, args),
         "palace_prune" => tool_prune(conn, args),
         _ => json!({"error": format!("Unknown tool: {name}")}),
     }
@@ -265,6 +265,28 @@ fn tool_status(conn: &Connection, config: &PalaceConfig) -> Value {
 }
 
 fn tool_gain(conn: &Connection, args: &Value) -> Value {
+    if let Some(record) = args.get("record") {
+        let feedback = crate::gain::FeedbackRecord {
+            query_id: match str_arg(record, "query_id") {
+                Some(value) => value,
+                None => return json!({"success": false, "error": "record.query_id is required"}),
+            },
+            drawer_id: match str_arg(record, "drawer_id") {
+                Some(value) => value,
+                None => return json!({"success": false, "error": "record.drawer_id is required"}),
+            },
+            verdict: match str_arg(record, "verdict") {
+                Some(value) => value,
+                None => return json!({"success": false, "error": "record.verdict is required"}),
+            },
+            note: str_arg(record, "note"),
+        };
+        return match crate::gain::record_feedback(conn, &feedback) {
+            Ok(()) => json!({"success": true, "recorded": feedback}),
+            Err(err) => json!({"success": false, "error": err.to_string()}),
+        };
+    }
+
     let project = str_arg(args, "project");
     let since_text = str_arg(args, "since").unwrap_or_else(|| "30d".to_string());
     let since = match crate::gain::SinceWindow::parse(&since_text) {
@@ -340,6 +362,11 @@ fn tool_verify(conn: &Connection, config: &PalaceConfig) -> Value {
             } else {
                 "first embedding search may download and warm the model"
             },
+        },
+        "reranker": {
+            "enabled": crate::reranker::should_rerank(false),
+            "model": crate::reranker::model_name(),
+            "cold_start_note": "local interaction reranker has no remote dependency",
         },
     })
 }
@@ -456,7 +483,15 @@ fn tool_search(conn: &Connection, args: &Value) -> Value {
     let limit = int_arg(args, "limit").unwrap_or(5) as usize;
     let wing = str_arg(args, "wing");
     let room = str_arg(args, "room");
-    search_memories(conn, &query, wing.as_deref(), room.as_deref(), limit)
+    let rerank = bool_arg(args, "rerank");
+    search_memories_with_options(
+        conn,
+        &query,
+        wing.as_deref(),
+        room.as_deref(),
+        limit,
+        rerank,
+    )
 }
 
 fn tool_check_duplicate(conn: &Connection, args: &Value) -> Value {
@@ -1247,7 +1282,8 @@ fn tool_import(conn: &Connection, args: &Value) -> Value {
 ///
 /// Useful after upgrading the embedding model. Each drawer's text is
 /// re-embedded and the stored embedding is overwritten in-place.
-fn tool_upgrade_embeddings(conn: &Connection) -> Value {
+fn tool_upgrade_embeddings(conn: &Connection, args: &Value) -> Value {
+    let refresh_preferences = bool_arg(args, "refresh_preferences");
     let ids_and_content: Vec<(String, String)> =
         match conn.prepare("SELECT id, content FROM drawers ORDER BY rowid") {
             Ok(mut stmt) => match stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))) {
@@ -1265,11 +1301,26 @@ fn tool_upgrade_embeddings(conn: &Connection) -> Value {
     for (id, content) in &ids_and_content {
         match crate::embedder::embed_one(content) {
             Ok(emb) => {
-                let bytes: Vec<u8> = emb.iter().flat_map(|f| f.to_le_bytes()).collect();
-                match conn.execute(
-                    "UPDATE drawers SET embedding = ?1 WHERE id = ?2",
-                    rusqlite::params![bytes, id],
-                ) {
+                let bytes = crate::embedder::vec_to_blob(&emb);
+                let pref_bytes = if refresh_preferences {
+                    crate::preference::preference_span(content)
+                        .and_then(|span| crate::embedder::embed_one(&span).ok())
+                        .map(|embedding| crate::embedder::vec_to_blob(&embedding))
+                } else {
+                    None
+                };
+                let update = if refresh_preferences {
+                    conn.execute(
+                        "UPDATE drawers SET embedding = ?1, pref_embedding = ?2 WHERE id = ?3",
+                        rusqlite::params![bytes, pref_bytes, id],
+                    )
+                } else {
+                    conn.execute(
+                        "UPDATE drawers SET embedding = ?1 WHERE id = ?2",
+                        rusqlite::params![bytes, id],
+                    )
+                };
+                match update {
                     Ok(_) => reembedded += 1,
                     Err(_) => errors += 1,
                 }
@@ -1281,6 +1332,7 @@ fn tool_upgrade_embeddings(conn: &Connection) -> Value {
         "reembedded": reembedded,
         "errors": errors,
         "total": ids_and_content.len(),
+        "refresh_preferences": refresh_preferences,
     })
 }
 
@@ -1430,7 +1482,18 @@ fn tool_list() -> Value {
                     "since": {"type": "string", "description": "Window like 7d, 24h, 30d, or all (default: 30d)"},
                     "history": {"type": "boolean", "description": "Return recent usage events instead of summary"},
                     "limit": {"type": "integer", "description": "History limit (default: 20)"},
-                    "reset": {"type": "boolean", "description": "Delete usage events for the project, or all projects if omitted"}
+                    "reset": {"type": "boolean", "description": "Delete usage events for the project, or all projects if omitted"},
+                    "record": {
+                        "type": "object",
+                        "description": "Optional explicit feedback record. When omitted, palace_gain returns the normal read-only summary.",
+                        "properties": {
+                            "query_id": {"type": "string"},
+                            "drawer_id": {"type": "string"},
+                            "verdict": {"type": "string", "enum": ["useful", "not_useful", "wrong_answer"]},
+                            "note": {"type": "string"}
+                        },
+                        "required": ["query_id", "drawer_id", "verdict"]
+                    }
                 }
             }
         },
@@ -1507,7 +1570,8 @@ fn tool_list() -> Value {
                     "query": {"type": "string", "description": "What to search for"},
                     "limit": {"type": "integer", "description": "Max results (default 5)"},
                     "wing": {"type": "string", "description": "Filter by wing (optional)"},
-                    "room": {"type": "string", "description": "Filter by room (optional)"}
+                    "room": {"type": "string", "description": "Filter by room (optional)"},
+                    "rerank": {"type": "boolean", "description": "Rerank top hybrid candidates with the local interaction reranker"}
                 },
                 "required": ["query"]
             }
@@ -1843,7 +1907,12 @@ fn tool_list() -> Value {
         {
             "name": "palace_upgrade_embeddings",
             "description": "Re-embed all drawers using the current embedding model. Run after upgrading the model to keep search quality consistent.",
-            "inputSchema": {"type": "object", "properties": {}}
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "refresh_preferences": {"type": "boolean", "description": "Also refresh preference-span embeddings"}
+                }
+            }
         },
         {
             "name": "palace_prune",

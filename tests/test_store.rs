@@ -27,6 +27,7 @@ fn schema_has_phase_one_drawer_columns_and_tables() {
         "hall",
         "normalize_version",
         "metadata",
+        "pref_embedding",
     ] {
         assert!(
             drawer_columns.iter().any(|c| c == column),
@@ -196,6 +197,10 @@ fn add_drawer_with_id_tags_preferences_without_dropping_metadata() {
     assert_eq!(drawer.metadata["topic"], "api");
     assert_eq!(drawer.metadata["agent"], "codex");
     assert_eq!(drawer.metadata["preference"], true);
+    assert_eq!(
+        drawer.metadata["preference_span"],
+        "I prefer small public APIs routed through the Palace facade."
+    );
 }
 
 #[test]

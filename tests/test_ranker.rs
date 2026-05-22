@@ -84,6 +84,39 @@ fn hybrid_search_combines_cosine_and_bm25_scores() {
 }
 
 #[test]
+fn hybrid_search_exposes_preference_match_score() {
+    let conn = db::open_in_memory().expect("db should open");
+
+    add_drawer(
+        &conn,
+        "wing",
+        "preferences",
+        "I prefer source-grounded answers with drawer provenance.",
+        None,
+        "preference.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let results = hybrid_search(
+        &conn,
+        "what do I prefer for answers",
+        None,
+        &DrawerFilter::default(),
+        5,
+    )
+    .expect("hybrid search should work");
+
+    assert!(!results.is_empty());
+    assert!(
+        results[0].preference_match > 0.0,
+        "preference-shaped result should expose a separate preference score"
+    );
+}
+
+#[test]
 fn hybrid_search_result_has_filed_at() {
     // Verify the new filed_at field is populated on SearchResult.
     let conn = db::open_in_memory().expect("db should open");

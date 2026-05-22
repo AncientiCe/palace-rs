@@ -1,0 +1,14 @@
+{
+  "sample_seed": 4040,
+  "sample_size": 100,
+  "aggregate": {
+    "recall_at_1": 0.889,
+    "recall_at_5": 0.981,
+    "recall_at_10": 0.991
+  },
+  "single_session_preference": {
+    "recall_at_1_floor": 0.78,
+    "recall_at_5_floor": 0.95
+  },
+  "max_category_regression": 0.02
+}

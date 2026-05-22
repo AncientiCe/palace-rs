@@ -20,6 +20,7 @@ use crate::embedder::embed_one;
 use crate::general_extractor::{extract_memories, Memory};
 use crate::knowledge_graph::{self as kg, KgStats, Triple};
 use crate::layers::{Layer3, MemoryStack};
+use crate::query_intent::{classify, QueryIntent};
 use crate::ranker::HybridResult;
 use crate::store::{self, Drawer, DrawerFilter, SearchResult};
 use serde::{Deserialize, Serialize};
@@ -125,7 +126,10 @@ pub struct PalaceSearchResult {
     pub cosine: f64,
     pub bm25: f64,
     pub coding_boost: f64,
+    pub preference_match: f64,
     pub combined: f64,
+    pub intent: Option<QueryIntent>,
+    pub rerank_score: Option<f64>,
 }
 
 impl Palace {
@@ -231,6 +235,7 @@ impl Palace {
         } else {
             &sanitized_query
         };
+        let intent = classify(effective_query);
         let embedding = embed_one(effective_query)?;
         let filter = DrawerFilter {
             wing: wing.map(String::from),
@@ -243,7 +248,11 @@ impl Palace {
             &filter,
             n_results,
         )?;
-        let results = merge_preference_results(&self.conn, &embedding, &filter, results, n_results);
+        let mut results =
+            merge_preference_results(&self.conn, &embedding, &filter, results, n_results);
+        if crate::reranker::should_rerank(false) {
+            crate::reranker::rerank(effective_query, &mut results);
+        }
         Ok(results
             .into_iter()
             .map(|result| PalaceSearchResult {
@@ -251,7 +260,10 @@ impl Palace {
                 cosine: result.cosine,
                 bm25: result.bm25,
                 coding_boost: result.coding_boost,
+                preference_match: result.preference_match,
                 combined: result.combined,
+                intent: Some(intent),
+                rerank_score: result.rerank_score,
             })
             .collect())
     }
@@ -434,6 +446,8 @@ fn merge_preference_results(
             cosine: pref.similarity,
             bm25: 0.0,
             coding_boost: 0.0,
+            preference_match: pref.similarity,
+            rerank_score: None,
             combined,
             drawer: SearchResult {
                 similarity: (combined * 1000.0).round() / 1000.0,

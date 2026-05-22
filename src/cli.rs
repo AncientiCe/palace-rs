@@ -97,6 +97,9 @@ enum Commands {
         /// Maximum results
         #[arg(long, default_value = "5")]
         limit: usize,
+        /// Rerank the top hybrid candidates with the local interaction reranker
+        #[arg(long)]
+        rerank: bool,
     },
     /// Print L0 (identity) + L1 (essential story) wake-up text
     #[command(name = "wake-up")]
@@ -127,6 +130,12 @@ enum Commands {
         /// Delete gain usage events, optionally only for --project
         #[arg(long)]
         reset: bool,
+        /// Record explicit feedback: <query_id> <drawer_id> <useful|not_useful|wrong_answer>
+        #[arg(long, num_args = 3, value_names = ["QUERY_ID", "DRAWER_ID", "VERDICT"])]
+        record: Option<Vec<String>>,
+        /// Optional note used with --record
+        #[arg(long)]
+        note: Option<String>,
     },
     /// Compress drawers to AAAK format
     Compress,
@@ -258,7 +267,11 @@ enum Commands {
     ///
     /// Run this after upgrading the embedding model to keep search quality consistent.
     #[command(name = "upgrade-embeddings")]
-    UpgradeEmbeddings,
+    UpgradeEmbeddings {
+        /// Also refresh preference-span embeddings for preference-tagged drawers
+        #[arg(long)]
+        refresh_preferences: bool,
+    },
     /// Show a chronological timeline of knowledge-graph facts
     Timeline {
         /// Filter to facts about this entity (optional)
@@ -377,6 +390,7 @@ pub fn run() -> Result<()> {
             wing,
             room,
             limit,
+            rerank,
         } => {
             let query_str = query.join(" ");
             let db_path = config.palace_db_path();
@@ -391,6 +405,7 @@ pub fn run() -> Result<()> {
                 wing.as_deref(),
                 room.as_deref(),
                 limit,
+                rerank,
             )?;
         }
 
@@ -432,6 +447,8 @@ pub fn run() -> Result<()> {
             limit,
             json,
             reset,
+            record,
+            note,
         } => {
             let db_path = config.palace_db_path();
             if !db_path.exists() {
@@ -445,6 +462,22 @@ pub fn run() -> Result<()> {
                 project: project.clone(),
                 since,
             };
+
+            if let Some(values) = record {
+                let feedback = crate::gain::FeedbackRecord {
+                    query_id: values[0].clone(),
+                    drawer_id: values[1].clone(),
+                    verdict: values[2].clone(),
+                    note,
+                };
+                crate::gain::record_feedback(&conn, &feedback)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&feedback)?);
+                } else {
+                    println!("Recorded Palace gain feedback.");
+                }
+                return Ok(());
+            }
 
             if reset {
                 let deleted = crate::gain::reset(&conn, project.as_deref())?;
@@ -649,7 +682,9 @@ pub fn run() -> Result<()> {
             }
         }
 
-        Commands::UpgradeEmbeddings => {
+        Commands::UpgradeEmbeddings {
+            refresh_preferences,
+        } => {
             let db_path = config.palace_db_path();
             if !db_path.exists() {
                 warn!("No palace found. Run: palace init <dir> && palace mine <dir>");
@@ -670,14 +705,26 @@ pub fn run() -> Result<()> {
             for (id, content) in &ids_and_content {
                 match crate::embedder::embed_one(content) {
                     Ok(emb) => {
-                        let bytes: Vec<u8> = emb.iter().flat_map(|f| f.to_le_bytes()).collect();
-                        if conn
-                            .execute(
+                        let bytes = crate::embedder::vec_to_blob(&emb);
+                        let pref_bytes = if refresh_preferences {
+                            crate::preference::preference_span(content)
+                                .and_then(|span| crate::embedder::embed_one(&span).ok())
+                                .map(|embedding| crate::embedder::vec_to_blob(&embedding))
+                        } else {
+                            None
+                        };
+                        let update = if refresh_preferences {
+                            conn.execute(
+                                "UPDATE drawers SET embedding = ?1, pref_embedding = ?2 WHERE id = ?3",
+                                rusqlite::params![bytes, pref_bytes, id],
+                            )
+                        } else {
+                            conn.execute(
                                 "UPDATE drawers SET embedding = ?1 WHERE id = ?2",
                                 rusqlite::params![bytes, id],
                             )
-                            .is_ok()
-                        {
+                        };
+                        if update.is_ok() {
                             reembedded += 1;
                         } else {
                             errors += 1;

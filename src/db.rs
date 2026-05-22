@@ -63,7 +63,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             entity_metadata TEXT NOT NULL DEFAULT '{}',
             hall        TEXT,
             normalize_version INTEGER NOT NULL DEFAULT 0,
-            metadata    TEXT NOT NULL DEFAULT '{}'
+            metadata    TEXT NOT NULL DEFAULT '{}',
+            pref_embedding BLOB
         );
         CREATE INDEX IF NOT EXISTS idx_drawers_wing ON drawers(wing);
         CREATE INDEX IF NOT EXISTS idx_drawers_room ON drawers(room);
@@ -160,6 +161,18 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_usage_events_project_ts ON usage_events(project, ts);
         CREATE INDEX IF NOT EXISTS idx_usage_events_tool ON usage_events(tool);
         CREATE INDEX IF NOT EXISTS idx_usage_events_query_hash ON usage_events(query_hash);
+
+        CREATE TABLE IF NOT EXISTS gain_feedback (
+            query_id   TEXT NOT NULL,
+            drawer_id  TEXT NOT NULL,
+            verdict    TEXT NOT NULL,
+            source     TEXT NOT NULL,
+            note       TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(query_id, drawer_id, source)
+        );
+        CREATE INDEX IF NOT EXISTS idx_gain_feedback_query ON gain_feedback(query_id);
+        CREATE INDEX IF NOT EXISTS idx_gain_feedback_drawer ON gain_feedback(drawer_id);
         "#,
     )
     .context("running schema migrations")?;
@@ -179,6 +192,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     add_column_if_missing(conn, "drawers", "metadata", "TEXT NOT NULL DEFAULT '{}'")?;
+    add_column_if_missing(conn, "drawers", "pref_embedding", "BLOB")?;
 
     conn.execute_batch(
         r#"

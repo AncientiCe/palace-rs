@@ -4,6 +4,36 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [0.4.0] - 2026-05-22
+
+### Added
+
+- **Preference lane v2** — preference-shaped drawers now store a
+  `preference_span` metadata field and optional `pref_embedding` secondary
+  vector. Preference queries receive a separate `preference_match` score so the
+  known `single-session-preference` weakness can improve without adding an LLM
+  to the default path.
+- **Query intent provenance** — searches classify queries as `preference`,
+  `decision`, `how_to`, `definition`, `temporal`, or `unknown`, and return the
+  intent in MCP and `Palace::search_with_provenance` results.
+- **Optional local rerank path** — `PALACE_RERANK=1`, `palace search --rerank`,
+  or `palace_search({"rerank": true})` reranks top hybrid candidates and returns
+  `rerank_score` provenance. The default search path is unchanged.
+- **Gain v2 feedback** — `palace_gain` now accepts an optional `record` payload
+  for explicit usefulness feedback and reports `precision_at_1`,
+  `precision_at_5`, and per-intent precision. Diary entries that cite returned
+  drawer IDs also infer useful feedback automatically.
+- **Eval CI lane** — CI now runs the coding-agent memory eval separately and
+  checks the sampled LongMemEval baseline guard.
+
+### Changed
+
+- `palace upgrade-embeddings --refresh-preferences` and
+  `palace_upgrade_embeddings({"refresh_preferences": true})` can refresh
+  preference-span embeddings while re-embedding drawers.
+- `Palace::search_with_provenance` is additive: results include
+  `preference_match`, `intent`, and `rerank_score`.
+
 ## [0.3.2] - 2026-05-15
 
 ### Changed

@@ -75,6 +75,7 @@ pub fn add_drawer(
 ) -> Result<(bool, String)> {
     let id = drawer_id(wing, room, source_file, chunk_index);
     let blob = embedding.map(vec_to_blob);
+    let pref_blob = preference_embedding_blob(content, embedding);
     let filed_at = Utc::now().to_rfc3339();
     let entity_metadata = crate::entity_detector::entity_metadata(content);
     let entity_metadata_text =
@@ -87,8 +88,8 @@ pub fn add_drawer(
         .execute(
             "INSERT OR IGNORE INTO drawers
              (id, wing, room, content, embedding, source_file, chunk_index, added_by, filed_at,
-              importance, created_at, entity_metadata, hall, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?9, ?11, ?12, ?13)",
+              importance, created_at, entity_metadata, hall, metadata, pref_embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?9, ?11, ?12, ?13, ?14)",
             params![
                 id,
                 wing,
@@ -102,7 +103,8 @@ pub fn add_drawer(
                 importance,
                 entity_metadata_text,
                 hall,
-                metadata_text
+                metadata_text,
+                pref_blob
             ],
         )
         .context("inserting drawer")?;
@@ -127,6 +129,7 @@ pub fn add_drawer_with_id(
     extra_meta: Option<&serde_json::Value>,
 ) -> Result<bool> {
     let blob = embedding.map(vec_to_blob);
+    let pref_blob = preference_embedding_blob(content, embedding);
     let filed_at = Utc::now().to_rfc3339();
     let metadata = metadata_for_content(extra_meta, content);
     let metadata_text = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
@@ -143,8 +146,8 @@ pub fn add_drawer_with_id(
         .execute(
             "INSERT OR IGNORE INTO drawers
              (id, wing, room, content, embedding, source_file, chunk_index, added_by, filed_at,
-              created_at, entity_metadata, hall, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?8, ?9, ?10, ?11)",
+              created_at, entity_metadata, hall, metadata, pref_embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?8, ?9, ?10, ?11, ?12)",
             params![
                 id,
                 wing,
@@ -156,7 +159,8 @@ pub fn add_drawer_with_id(
                 filed_at,
                 entity_metadata_text,
                 hall,
-                metadata_text
+                metadata_text,
+                pref_blob
             ],
         )
         .context("inserting drawer with id")?;
@@ -181,6 +185,7 @@ pub fn update_drawer_content(conn: &Connection, id: &str, content: &str) -> Resu
     let hall = crate::hall_router::detect_hall(content);
     let embedding = crate::embedder::embed_one(content).ok();
     let blob = embedding.as_deref().map(vec_to_blob);
+    let pref_blob = preference_embedding_blob(content, embedding.as_deref());
     let current_metadata = get_drawer(conn, id)
         .ok()
         .flatten()
@@ -193,8 +198,17 @@ pub fn update_drawer_content(conn: &Connection, id: &str, content: &str) -> Resu
         .execute(
             "UPDATE drawers
              SET content = ?1, entity_metadata = ?2, hall = ?3, embedding = ?4, metadata = ?5
-             WHERE id = ?6",
-            params![content, entity_metadata_text, hall, blob, metadata_text, id],
+                 , pref_embedding = ?6
+             WHERE id = ?7",
+            params![
+                content,
+                entity_metadata_text,
+                hall,
+                blob,
+                metadata_text,
+                pref_blob,
+                id
+            ],
         )
         .context("updating drawer content")?;
     if rows > 0 {
@@ -381,10 +395,11 @@ pub fn preference_search_filtered(
         format!(" AND {}", &where_clause[6..])
     };
     let sql = format!(
-        "SELECT id, wing, room, content, source_file, created_at, filed_at, embedding
+        "SELECT id, wing, room, content, source_file, created_at, filed_at,
+                COALESCE(pref_embedding, embedding) AS preference_embedding
          FROM drawers
          WHERE json_extract(metadata, '$.preference') = 1
-           AND embedding IS NOT NULL{extra_filter}",
+           AND COALESCE(pref_embedding, embedding) IS NOT NULL{extra_filter}",
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
@@ -580,12 +595,23 @@ fn metadata_for_content(existing: Option<&serde_json::Value>, content: &str) -> 
     if !metadata.is_object() {
         metadata = serde_json::json!({});
     }
-    if crate::preference::is_preference(content) {
+    if let Some(span) = crate::preference::preference_span(content) {
         metadata["preference"] = serde_json::json!(true);
+        metadata["preference_span"] = serde_json::json!(span);
     } else if let Some(object) = metadata.as_object_mut() {
         object.remove("preference");
+        object.remove("preference_span");
     }
     metadata
+}
+
+fn preference_embedding_blob(content: &str, fallback_embedding: Option<&[f32]>) -> Option<Vec<u8>> {
+    let span = crate::preference::preference_span(content)?;
+    let fallback = fallback_embedding?;
+    let embedding = crate::embedder::embed_one(&span)
+        .ok()
+        .unwrap_or_else(|| fallback.to_vec());
+    Some(vec_to_blob(&embedding))
 }
 
 fn index_bm25_terms(conn: &Connection, drawer_id: &str, content: &str) -> Result<()> {

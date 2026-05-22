@@ -1,5 +1,8 @@
 use chrono::{Duration, Utc};
-use palace::gain::{history, render_history, render_text, summarize, GainOptions, SinceWindow};
+use palace::gain::{
+    history, record_feedback, render_history, render_text, summarize, FeedbackRecord, GainOptions,
+    SinceWindow,
+};
 use palace::usage::{insert_event, UsageEvent, UsageSession};
 use serde_json::json;
 use std::time::Duration as StdDuration;
@@ -230,6 +233,61 @@ fn recorder_classifies_search_hits_and_repeats() {
     assert_eq!(report.search_hits, 2);
     assert_eq!(report.repeat_questions_avoided, 1);
     assert!(report.tokens_saved_est > 0);
+}
+
+#[test]
+fn explicit_feedback_records_precision_at_1() {
+    let conn = palace::db::open_in_memory().expect("open test db");
+    let now = Utc::now().to_rfc3339();
+
+    let mut search = event(now, "alpha", "palace_search", "hit");
+    search.meta = json!({
+        "query_id": "query_1",
+        "intent": "preference",
+        "top_drawer_ids": ["drawer_good", "drawer_other"],
+        "top_drawer_id": "drawer_good"
+    });
+    insert_event(&conn, &search).expect("insert search");
+    record_feedback(
+        &conn,
+        &FeedbackRecord {
+            query_id: "query_1".to_string(),
+            drawer_id: "drawer_good".to_string(),
+            verdict: "useful".to_string(),
+            note: None,
+        },
+    )
+    .expect("record feedback");
+
+    let report = summarize(&conn, &options(Some("alpha"), SinceWindow::All)).expect("summarize");
+
+    assert_eq!(report.precision_at_1, Some(1.0));
+    assert_eq!(report.precision_at_5, Some(1.0));
+    assert_eq!(report.per_intent_precision[0].intent, "preference");
+    assert!(render_text(&report).contains("Precision@1"));
+}
+
+#[test]
+fn diary_citation_infers_useful_feedback() {
+    let conn = palace::db::open_in_memory().expect("open test db");
+    let now = Utc::now().to_rfc3339();
+
+    let mut search = event(now.clone(), "alpha", "palace_search", "hit");
+    search.meta = json!({
+        "query_id": "query_implicit",
+        "intent": "decision",
+        "top_drawer_ids": ["drawer_cited"],
+        "top_drawer_id": "drawer_cited"
+    });
+    insert_event(&conn, &search).expect("insert search");
+
+    let mut diary = event(now, "alpha", "palace_diary_write", "diary_write");
+    diary.meta = json!({"referenced_drawer_ids": ["drawer_cited"]});
+    insert_event(&conn, &diary).expect("insert diary");
+
+    let report = summarize(&conn, &options(Some("alpha"), SinceWindow::All)).expect("summarize");
+
+    assert_eq!(report.precision_at_1, Some(1.0));
 }
 
 #[test]

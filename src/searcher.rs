@@ -4,6 +4,7 @@
 //! returns verbatim text with similarity scores. Port of searcher.py.
 
 use crate::embedder::embed_one;
+use crate::query_intent::classify;
 use crate::ranker::{hybrid_search, HybridResult};
 use crate::store::{preference_search_filtered, source_context, DrawerFilter, SearchResult};
 use anyhow::Result;
@@ -16,6 +17,7 @@ pub fn search_and_print(
     wing: Option<&str>,
     room: Option<&str>,
     n_results: usize,
+    rerank: bool,
 ) -> Result<()> {
     let rewritten = crate::query_rewriter::rewrite(query);
     let sanitized_query = crate::query_sanitizer::sanitize_query(&rewritten);
@@ -24,15 +26,20 @@ pub fn search_and_print(
     } else {
         &sanitized_query
     };
+    let intent = classify(effective_query);
     let embedding = embed_one(effective_query)?;
     let filter = DrawerFilter {
         wing: wing.map(String::from),
         room: room.map(String::from),
     };
-    let results = hybrid_search(conn, effective_query, Some(&embedding), &filter, n_results)?;
+    let mut results = hybrid_search(conn, effective_query, Some(&embedding), &filter, n_results)?;
+    if crate::reranker::should_rerank(rerank) {
+        crate::reranker::rerank(effective_query, &mut results);
+    }
 
     println!("\n{}", "=".repeat(60));
     println!("  Results for: \"{query}\"");
+    println!("  Intent: {}", intent.as_str());
     if let Some(w) = wing {
         println!("  Wing: {w}");
     }
@@ -56,6 +63,9 @@ pub fn search_and_print(
         println!("      Source: {}", result.drawer.source_file);
         println!("      Match:  {:.3}", result.combined);
         println!("      cosine={:.3} bm25={:.3}", result.cosine, result.bm25);
+        if let Some(score) = result.rerank_score {
+            println!("      rerank={score:.3}");
+        }
         println!();
         for line in result.drawer.text.trim().lines() {
             println!("      {line}");
@@ -75,6 +85,18 @@ pub fn search_memories(
     room: Option<&str>,
     n_results: usize,
 ) -> serde_json::Value {
+    search_memories_with_options(conn, query, wing, room, n_results, false)
+}
+
+/// Programmatic search with optional local reranking.
+pub fn search_memories_with_options(
+    conn: &Connection,
+    query: &str,
+    wing: Option<&str>,
+    room: Option<&str>,
+    n_results: usize,
+    rerank: bool,
+) -> serde_json::Value {
     let rewritten = crate::query_rewriter::rewrite(query);
     let sanitized_query = crate::query_sanitizer::sanitize_query(&rewritten);
     let effective_query = if sanitized_query.is_empty() {
@@ -82,6 +104,7 @@ pub fn search_memories(
     } else {
         &sanitized_query
     };
+    let intent = classify(effective_query);
     let embedding = match embed_one(effective_query) {
         Ok(e) => e,
         Err(e) => {
@@ -110,6 +133,17 @@ pub fn search_memories(
     // Merge dedicated preference recall pass — surfaces preference drawers even
     // when BM25 has no keyword overlap (the known R@1 weakness).
     merge_preference_results(conn, &embedding, &filter, &mut results, n_results);
+    let rerank_enabled = crate::reranker::should_rerank(rerank);
+    if rerank_enabled {
+        crate::reranker::rerank(effective_query, &mut results);
+    }
+    let query_id = query_id(
+        effective_query,
+        &results
+            .iter()
+            .map(|result| result.drawer.id.as_str())
+            .collect::<Vec<_>>(),
+    );
 
     let hits: Vec<serde_json::Value> = results
         .iter()
@@ -153,6 +187,9 @@ pub fn search_memories(
                 "cosine": r.cosine,
                 "bm25": r.bm25,
                 "coding_boost": r.coding_boost,
+                "preference_match": r.preference_match,
+                "rerank_score": r.rerank_score,
+                "intent": intent.as_str(),
                 "source_context": source_context,
             })
         })
@@ -160,7 +197,10 @@ pub fn search_memories(
 
     serde_json::json!({
         "query": query,
+        "query_id": query_id,
         "sanitized_query": effective_query,
+        "intent": intent.as_str(),
+        "rerank_enabled": rerank_enabled,
         "filters": {
             "wing": wing,
             "room": room,
@@ -201,6 +241,8 @@ fn merge_preference_results(
             cosine: pref.similarity,
             bm25: 0.0,
             coding_boost: 0.0,
+            preference_match: pref.similarity,
+            rerank_score: None,
             combined,
             drawer: SearchResult {
                 similarity: (combined * 1000.0).round() / 1000.0,
@@ -215,4 +257,11 @@ fn merge_preference_results(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     results.truncate(n_results);
+}
+
+fn query_id(query: &str, top_drawer_ids: &[&str]) -> String {
+    let bucket = chrono::Utc::now().timestamp() / 300;
+    let joined_ids = top_drawer_ids.join(",");
+    let hash = blake3::hash(format!("{query}|{joined_ids}|{bucket}").as_bytes());
+    format!("query_{}", &hash.to_hex()[..16])
 }

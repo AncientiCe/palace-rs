@@ -145,6 +145,8 @@ fn classify_event(
         "palace_diary_read" | "palace_diary_search" | "palace_session_context" => {
             classify_diary_recall(&mut event, result)
         }
+        "palace_diary_write" => classify_diary_write(&mut event, args),
+        "palace_delete_drawer" => classify_delete_drawer(&mut event, args),
         _ => {}
     }
 
@@ -164,9 +166,44 @@ fn classify_search(event: &mut UsageEvent, result: &Value) {
         event.wing = event.wing.clone().or_else(|| str_arg(first, "wing"));
         event.room = event.room.clone().or_else(|| str_arg(first, "room"));
         event.est_tokens_saved = event.bytes_returned / 4;
+        let top_drawer_ids = results
+            .iter()
+            .filter_map(|value| value.get("id").and_then(Value::as_str))
+            .take(5)
+            .collect::<Vec<_>>();
+        event.meta = json!({
+            "query_id": result.get("query_id").and_then(Value::as_str),
+            "intent": result.get("intent").and_then(Value::as_str),
+            "rerank_enabled": result.get("rerank_enabled").and_then(Value::as_bool).unwrap_or(false),
+            "top_drawer_ids": top_drawer_ids,
+            "top_drawer_id": top_drawer_ids.first().copied(),
+        });
     } else {
         event.outcome = "miss".to_string();
     }
+}
+
+fn classify_diary_write(event: &mut UsageEvent, args: &Value) {
+    event.outcome = "diary_write".to_string();
+    let entry = str_arg(args, "entry").unwrap_or_default();
+    let drawer_ids = extract_drawer_ids(&entry);
+    if !drawer_ids.is_empty() {
+        event.meta = json!({ "referenced_drawer_ids": drawer_ids });
+    }
+}
+
+fn classify_delete_drawer(event: &mut UsageEvent, args: &Value) {
+    event.outcome = "delete_drawer".to_string();
+    if let Some(drawer_id) = str_arg(args, "id") {
+        event.meta = json!({ "drawer_id": drawer_id });
+    }
+}
+
+fn extract_drawer_ids(text: &str) -> Vec<String> {
+    text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|part| part.starts_with("drawer_") || part.starts_with("diary_"))
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn classify_check_duplicate(

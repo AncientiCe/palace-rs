@@ -11,6 +11,8 @@ static PREFERENCE_PATTERNS: &[&str] = &[
     "i want ",
     "i dislike ",
     "i avoid ",
+    "i don't ",
+    "i do not ",
     "i hate ",
     "i love ",
     "i tend to ",
@@ -23,7 +25,10 @@ static PREFERENCE_PATTERNS: &[&str] = &[
     "i am not comfortable",
     "in my experience",
     "my convention",
+    "my favorite",
+    "my go-to",
     "my preference",
+    "my preferred",
     "my style",
     "my approach is",
     "always use ",
@@ -47,6 +52,27 @@ pub fn is_preference(text: &str) -> bool {
     PREFERENCE_PATTERNS.iter().any(|p| lower.contains(p))
 }
 
+/// Return the first sentence-like span that contains a preference signal.
+///
+/// The stored drawer can contain a long conversation or file chunk; indexing the
+/// local preference sentence separately gives preference-shaped queries a
+/// tighter embedding target while preserving verbatim storage.
+pub fn preference_span(text: &str) -> Option<String> {
+    for sentence in text.split_inclusive(['.', '!', '?', '\n']) {
+        let trimmed = sentence.trim();
+        if !trimmed.is_empty() && is_preference(trimmed) {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    let trimmed = text.trim();
+    if !trimmed.is_empty() && is_preference(trimmed) {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +85,26 @@ mod tests {
         assert!(is_preference(
             "My convention is to use Result for error handling"
         ));
+    }
+
+    #[test]
+    fn extracts_preference_span_from_mixed_text() {
+        let span = preference_span(
+            "We discussed the CLI. I prefer small public APIs through Palace. Then we moved on.",
+        );
+        assert_eq!(
+            span.as_deref(),
+            Some("I prefer small public APIs through Palace.")
+        );
+    }
+
+    #[test]
+    fn extracts_negative_preference_span() {
+        let span = preference_span("Normal note. I don't like adding new commands for tiny flows.");
+        assert_eq!(
+            span.as_deref(),
+            Some("I don't like adding new commands for tiny flows.")
+        );
     }
 
     #[test]

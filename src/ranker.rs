@@ -11,6 +11,7 @@ const BM25_B: f64 = 0.75;
 const COSINE_WEIGHT: f64 = 0.65;
 const BM25_WEIGHT: f64 = 0.35;
 const MAX_CODING_BOOST: f64 = 0.65;
+const MAX_PREFERENCE_MATCH: f64 = 0.22;
 /// Maximum recency bonus applied to brand-new drawers (filed today).
 const RECENCY_WEIGHT: f64 = 0.05;
 /// Exponential decay constant — half-life ≈ 35 days.
@@ -33,6 +34,8 @@ pub struct HybridResult {
     pub cosine: f64,
     pub bm25: f64,
     pub coding_boost: f64,
+    pub preference_match: f64,
+    pub rerank_score: Option<f64>,
     pub combined: f64,
 }
 
@@ -60,6 +63,8 @@ pub fn hybrid_search(
                     cosine: 0.0,
                     bm25: 0.0,
                     coding_boost: 0.0,
+                    preference_match: 0.0,
+                    rerank_score: None,
                     combined: 0.0,
                 },
             );
@@ -86,6 +91,8 @@ pub fn hybrid_search(
                     cosine: 0.0,
                     bm25: score,
                     coding_boost: 0.0,
+                    preference_match: 0.0,
+                    rerank_score: None,
                     combined: 0.0,
                 },
             );
@@ -104,10 +111,12 @@ pub fn hybrid_search(
             0.0
         };
         result.coding_boost = coding_agent_boost(query, &result.drawer.text, &result.drawer.room);
+        result.preference_match = preference_match(query, &result.drawer.text, &result.drawer.room);
         let recency = recency_boost(&result.drawer.filed_at);
         result.combined = (result.cosine * COSINE_WEIGHT)
             + (normalized_bm25 * BM25_WEIGHT)
             + result.coding_boost
+            + result.preference_match
             + recency;
         result.drawer.similarity = (result.combined * 1000.0).round() / 1000.0;
     }
@@ -306,16 +315,8 @@ fn coding_agent_boost(query: &str, text: &str, room: &str) -> f64 {
     // Extra boost for preference-tagged drawers when query asks about preferences,
     // conventions, or style — compensates for embedding distance between the question
     // form ("what do I prefer?") and the stored assertion form ("I prefer X").
-    let query_asks_about_prefs = query_lower.contains("prefer")
-        || query_lower.contains("convention")
-        || query_lower.contains("style")
-        || query_lower.contains("interface")
-        || query_lower.contains("retrieval results")
-        || query_lower.contains("provenance")
-        || query_lower.contains("always")
-        || query_lower.contains("never")
-        || query_lower.contains("how do you")
-        || query_lower.contains("what do you think");
+    let query_asks_about_prefs =
+        crate::query_intent::classify(query) == crate::query_intent::QueryIntent::Preference;
     let text_is_preference = text_lower.contains("i prefer")
         || text_lower.contains("i always")
         || text_lower.contains("i never")
@@ -396,6 +397,29 @@ fn coding_agent_boost(query: &str, text: &str, room: &str) -> f64 {
         boost += 0.04;
     }
     boost.min(MAX_CODING_BOOST)
+}
+
+fn preference_match(query: &str, text: &str, room: &str) -> f64 {
+    if crate::query_intent::classify(query) != crate::query_intent::QueryIntent::Preference
+        || !crate::preference::is_preference(text)
+    {
+        return 0.0;
+    }
+
+    let mut score: f64 = 0.12;
+    if room.eq_ignore_ascii_case("preference") || room.eq_ignore_ascii_case("preferences") {
+        score += 0.04;
+    }
+    if let Some(span) = crate::preference::preference_span(text) {
+        let span_lower = span.to_lowercase();
+        if tokenize(&query.to_lowercase())
+            .into_iter()
+            .any(|term| term.len() > 3 && span_lower.contains(&term))
+        {
+            score += 0.06;
+        }
+    }
+    score.min(MAX_PREFERENCE_MATCH)
 }
 
 fn intent_boost(
