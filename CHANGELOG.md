@@ -38,6 +38,14 @@ This Rust implementation uses its own `0.x` version track.
   from repeated similar writes. Durable decisions still belong in the
   deduplicated knowledge graph.
 
+### Fixed
+
+- **Resilient model download** — the embedding model fetch now retries with
+  exponential backoff, so transient HuggingFace failures (notably HTTP 429 rate
+  limiting) no longer fail the first embedding call or CI. CI also caches the
+  downloaded model (`~/.cache/huggingface`) across runs to avoid repeated
+  downloads.
+
 ## [0.4.0] - 2026-05-22
 
 ### Added

@@ -84,6 +84,11 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-hf-all-minilm-l6-v2-onnx
       - name: Run tests
         run: cargo test --all-features
 
@@ -103,6 +108,11 @@ jobs:
           key: ${{ runner.os }}-cargo-evals-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-hf-all-minilm-l6-v2-onnx
       - name: Run coding-agent memory eval
         run: cargo test --all-features --test coding_agent_eval -- --nocapture
       - name: Check LongMemEval sampled baseline guard

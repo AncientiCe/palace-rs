@@ -14,6 +14,7 @@ use ort::{
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::thread::available_parallelism;
+use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
 
 /// Embedding dimension for all-MiniLM-L6-v2.
@@ -282,16 +283,51 @@ struct Embedder {
 
 static EMBEDDER: OnceCell<Embedder> = OnceCell::new();
 
+/// How many times to attempt each model-file download before giving up.
+const DOWNLOAD_ATTEMPTS: usize = 4;
+/// Base delay for exponential backoff between download attempts.
+const DOWNLOAD_BASE_DELAY: Duration = Duration::from_millis(500);
+
+/// Retry `f` up to `attempts` times with exponential backoff, returning the
+/// last error if every attempt fails.
+///
+/// This guards model downloads against transient HuggingFace failures —
+/// notably HTTP 429 rate limiting, which otherwise fails CI runs that fetch the
+/// model fresh.
+fn retry<T, F>(attempts: usize, base_delay: Duration, mut f: F) -> Result<T>
+where
+    F: FnMut() -> Result<T>,
+{
+    let attempts = attempts.max(1);
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..attempts {
+        match f() {
+            Ok(value) => return Ok(value),
+            Err(err) => last_err = Some(err),
+        }
+        if attempt + 1 < attempts {
+            let factor = 2u32.saturating_pow(attempt as u32);
+            let delay = base_delay.checked_mul(factor).unwrap_or(base_delay);
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("retry: no attempts were made")))
+}
+
 fn download_model_files() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
     use hf_hub::api::sync::Api;
 
     let api = Api::new().context("initializing HuggingFace API")?;
     let repo = api.model(MODEL_REPO.to_string());
 
-    let model_path = repo
-        .get(MODEL_FILE)
-        .context("downloading ONNX model file")?;
-    let vocab_path = repo.get(VOCAB_FILE).context("downloading vocab file")?;
+    let model_path = retry(DOWNLOAD_ATTEMPTS, DOWNLOAD_BASE_DELAY, || {
+        repo.get(MODEL_FILE).context("downloading ONNX model file")
+    })?;
+    let vocab_path = retry(DOWNLOAD_ATTEMPTS, DOWNLOAD_BASE_DELAY, || {
+        repo.get(VOCAB_FILE).context("downloading vocab file")
+    })?;
 
     Ok((model_path, vocab_path))
 }
@@ -487,4 +523,41 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (norm_a * norm_b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn retry_recovers_from_transient_failures() {
+        let calls = Cell::new(0);
+        let result: Result<u32> = retry(4, Duration::ZERO, || {
+            let n = calls.get() + 1;
+            calls.set(n);
+            if n < 3 {
+                Err(anyhow::anyhow!("http status: 429"))
+            } else {
+                Ok(n)
+            }
+        });
+        assert_eq!(result.unwrap(), 3, "should succeed once the call recovers");
+        assert_eq!(
+            calls.get(),
+            3,
+            "should stop retrying after the first success"
+        );
+    }
+
+    #[test]
+    fn retry_gives_up_after_exhausting_attempts() {
+        let calls = Cell::new(0);
+        let result: Result<u32> = retry(3, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Err(anyhow::anyhow!("persistent 429"))
+        });
+        assert!(result.is_err(), "should surface the failure after retries");
+        assert_eq!(calls.get(), 3, "should attempt exactly `attempts` times");
+    }
 }
