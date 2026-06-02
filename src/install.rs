@@ -194,15 +194,24 @@ pub fn install_clients(options: &InstallOptions) -> Result<InstallReport> {
             }
         }
 
-        // Install the Cursor sessionStart hook for automatic context injection.
-        if client == Client::Cursor && options.scope == Scope::User {
-            let hooks_json = options.home_dir.join(".cursor").join("hooks.json");
-            let changed =
-                install_cursor_hook(&options.home_dir, &options.binary_path, options.dry_run)?;
-            if changed {
-                report.hook_changed.push(hooks_json);
-            } else {
-                report.hook_unchanged.push(hooks_json);
+        // Install automatic memory hooks at user scope so recall/save is
+        // automatic in every project without per-project rule edits.
+        if options.scope == Scope::User {
+            if client == Client::Cursor {
+                let hooks_json = options.home_dir.join(".cursor").join("hooks.json");
+                let changed =
+                    install_cursor_hook(&options.home_dir, &options.binary_path, options.dry_run)?;
+                if changed {
+                    report.hook_changed.push(hooks_json);
+                } else {
+                    report.hook_unchanged.push(hooks_json);
+                }
+            } else if let Some((path, changed)) = install_client_hooks(options, client)? {
+                if changed {
+                    report.hook_changed.push(path);
+                } else {
+                    report.hook_unchanged.push(path);
+                }
             }
         }
     }
@@ -245,13 +254,21 @@ pub fn uninstall_clients(options: &InstallOptions) -> Result<InstallReport> {
             }
         }
 
-        if client == Client::Cursor && options.scope == Scope::User {
-            let hooks_json = options.home_dir.join(".cursor").join("hooks.json");
-            let changed = uninstall_cursor_hook(&options.home_dir, options.dry_run)?;
-            if changed {
-                report.hook_changed.push(hooks_json);
-            } else {
-                report.hook_unchanged.push(hooks_json);
+        if options.scope == Scope::User {
+            if client == Client::Cursor {
+                let hooks_json = options.home_dir.join(".cursor").join("hooks.json");
+                let changed = uninstall_cursor_hook(&options.home_dir, options.dry_run)?;
+                if changed {
+                    report.hook_changed.push(hooks_json);
+                } else {
+                    report.hook_unchanged.push(hooks_json);
+                }
+            } else if let Some((path, changed)) = uninstall_client_hooks(options, client)? {
+                if changed {
+                    report.hook_changed.push(path);
+                } else {
+                    report.hook_unchanged.push(path);
+                }
             }
         }
     }
@@ -291,8 +308,14 @@ pub fn doctor(options: &InstallOptions) -> Result<DoctorReport> {
         let rule_installed = rule_installed(&target)?;
         let rule_stale = rule_is_stale(&target)?;
         let rule_weak = rule_is_weak(&target)?;
-        let hook_installed = if client == Client::Cursor && options.scope == Scope::User {
-            cursor_hook_installed(&options.home_dir)
+        let hook_installed = if options.scope == Scope::User {
+            if client == Client::Cursor {
+                cursor_hook_installed(&options.home_dir)
+            } else if let Some((path, _, _)) = nested_hook_target(&options.home_dir, client) {
+                nested_hook_installed(&path)
+            } else {
+                false
+            }
         } else {
             false
         };
@@ -369,6 +392,16 @@ pub fn print_install_report(action: &str, report: &InstallReport) {
     for path in &report.hook_unchanged {
         println!("  hook unchanged: {}", path.display());
     }
+    // Codex requires a one-time interactive trust review before newly written
+    // hooks will run, so call it out explicitly.
+    let codex_hooks_touched = report
+        .hook_changed
+        .iter()
+        .chain(report.hook_unchanged.iter())
+        .any(|p| p.ends_with("hooks.json") && p.components().any(|c| c.as_os_str() == ".codex"));
+    if codex_hooks_touched {
+        println!("  Codex: run `/hooks` in Codex once to review and trust the Palace hooks.");
+    }
 }
 
 pub fn print_doctor_report(report: &DoctorReport) {
@@ -437,13 +470,19 @@ pub fn print_doctor_report(report: &DoctorReport) {
             "✗ rule missing — run: palace install"
         };
         println!("      {rule_state}");
-        if status.client == Client::Cursor {
+        if matches!(
+            status.client,
+            Client::Cursor | Client::Claude | Client::Codex
+        ) {
             let hook_state = if status.hook_installed {
-                "✓ session hook installed"
+                "✓ memory hooks installed (session-start, post-tool-use recall, stop save)"
             } else {
-                "✗ session hook missing — run: palace install"
+                "✗ memory hooks missing — run: palace install"
             };
             println!("      {hook_state}");
+            if status.client == Client::Codex && status.hook_installed {
+                println!("      ↳ run `/hooks` in Codex once to trust the Palace hooks");
+            }
         }
     }
     println!("  {}", "─".repeat(52));
@@ -1059,19 +1098,68 @@ const CURSOR_HOOK_KEY: &str = "palace";
 /// The hook script outputs `{"additional_context": "<palace protocol>"}` at
 /// the start of every Cursor conversation, giving every workspace automatic
 /// palace coverage without any manual User Rules setup.
+/// A Cursor hook that Palace installs at user scope so memory use is automatic
+/// in every project without per-project `AGENTS.md` edits.
+struct CursorHook {
+    /// hooks.json event key (e.g. "sessionStart").
+    event: &'static str,
+    /// CLI sub-event passed to `palace hook <cli_event>`.
+    cli_event: &'static str,
+    /// Script filename stem under `~/.cursor/hooks/`.
+    script_stem: &'static str,
+    /// Optional tool matcher (postToolUse fires only for these tools).
+    matcher: Option<&'static str>,
+    /// Optional auto-continue loop cap (used by `stop`).
+    loop_limit: Option<i64>,
+}
+
+/// The Cursor hooks Palace manages:
+/// - `sessionStart`: inject protocol + export session id.
+/// - `postToolUse`: auto-recall relevant memory when the agent investigates.
+/// - `stop`: nudge the agent to record its work if it engaged Palace but saved nothing.
+fn cursor_hooks() -> &'static [CursorHook] {
+    &[
+        CursorHook {
+            event: "sessionStart",
+            cli_event: "session-start",
+            script_stem: "palace-session-start",
+            matcher: None,
+            loop_limit: None,
+        },
+        CursorHook {
+            event: "postToolUse",
+            cli_event: "post-tool-use",
+            script_stem: "palace-post-tool-use",
+            matcher: Some("Grep|Read"),
+            loop_limit: None,
+        },
+        CursorHook {
+            event: "stop",
+            cli_event: "stop",
+            script_stem: "palace-stop",
+            matcher: None,
+            loop_limit: Some(1),
+        },
+    ]
+}
+
 pub fn install_cursor_hook(home_dir: &Path, binary_path: &Path, dry_run: bool) -> Result<bool> {
     let hooks_dir = home_dir.join(".cursor").join("hooks");
     let hooks_json = home_dir.join(".cursor").join("hooks.json");
 
-    let script_path = write_hook_script(&hooks_dir, binary_path, dry_run)?;
-    let script_rel = format!(
-        "./hooks/{}",
-        script_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-    );
-    let changed = upsert_hooks_json(&hooks_json, &script_rel, dry_run)?;
+    let mut entries: Vec<(&CursorHook, String)> = Vec::new();
+    for hook in cursor_hooks() {
+        let script_path = write_hook_script(&hooks_dir, binary_path, hook, dry_run)?;
+        let script_rel = format!(
+            "./hooks/{}",
+            script_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        );
+        entries.push((hook, script_rel));
+    }
+    let changed = upsert_hooks_json(&hooks_json, &entries, dry_run)?;
     Ok(changed)
 }
 
@@ -1083,7 +1171,7 @@ pub fn uninstall_cursor_hook(home_dir: &Path, dry_run: bool) -> Result<bool> {
 
     let hooks_dir = home_dir.join(".cursor").join("hooks");
     for name in hook_script_names() {
-        let path = hooks_dir.join(name);
+        let path = hooks_dir.join(&name);
         if path.exists() && !dry_run {
             fs::remove_file(&path)
                 .with_context(|| format!("failed to remove {}", path.display()))?;
@@ -1123,55 +1211,47 @@ pub fn session_start_hook_response() -> Result<String> {
     Ok(serde_json::to_string(&response)?)
 }
 
-/// Handle a Cursor hook event received on stdin and write the response to stdout.
-/// Called as `palace hook session-start` by `~/.cursor/hooks/palace-session-start.*`.
-pub fn run_hook(event: &str) -> Result<()> {
-    // Read one line from stdin (the JSON event payload).
-    // We intentionally read only one line rather than all of stdin so the
-    // hook does not block when stdin is a terminal or when Cursor closes the
-    // pipe after sending the single-line JSON object.
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).ok();
-
-    match event {
-        "session-start" | "sessionStart" => {
-            println!("{}", session_start_hook_response()?);
-        }
-        other => {
-            // Unknown event — exit cleanly (fail-open per Cursor hook spec).
-            tracing::warn!(event = other, "palace hook: unknown event, ignoring");
-        }
-    }
-    Ok(())
+/// Handle a hook event received on stdin and write the response to stdout.
+/// Called as `palace hook session-start --client <cursor|claude|codex>` by the
+/// per-client hook scripts/commands. `client` selects the output dialect.
+pub fn run_hook(event: &str, client: &str) -> Result<()> {
+    crate::hooks::run(event, crate::hooks::HookClient::parse(client))
 }
 
-fn hook_script_names() -> &'static [&'static str] {
-    &[
-        "palace-session-start.bat",
-        "palace-session-start.sh",
-        "palace-session-start",
-    ]
+fn hook_script_names() -> Vec<String> {
+    cursor_hooks()
+        .iter()
+        .flat_map(|hook| {
+            [
+                format!("{}.bat", hook.script_stem),
+                format!("{}.sh", hook.script_stem),
+                hook.script_stem.to_string(),
+            ]
+        })
+        .collect()
 }
 
 fn write_hook_script(
     hooks_dir: &Path,
     binary_path: &Path,
+    hook: &CursorHook,
     dry_run: bool,
 ) -> Result<std::path::PathBuf> {
     let binary_str = path_to_string(binary_path);
+    let cli_event = hook.cli_event;
 
     #[cfg(windows)]
     let (filename, content) = (
-        "palace-session-start.bat",
-        format!("@echo off\r\n\"{binary_str}\" hook session-start\r\n"),
+        format!("{}.bat", hook.script_stem),
+        format!("@echo off\r\n\"{binary_str}\" hook {cli_event}\r\n"),
     );
     #[cfg(not(windows))]
     let (filename, content) = (
-        "palace-session-start.sh",
-        format!("#!/bin/sh\n\"{binary_str}\" hook session-start\n"),
+        format!("{}.sh", hook.script_stem),
+        format!("#!/bin/sh\n\"{binary_str}\" hook {cli_event}\n"),
     );
 
-    let script_path = hooks_dir.join(filename);
+    let script_path = hooks_dir.join(&filename);
 
     if dry_run {
         return Ok(script_path);
@@ -1214,55 +1294,64 @@ fn read_hooks_json(path: &Path) -> Result<Value> {
     serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
 }
 
-fn upsert_hooks_json(path: &Path, script_command: &str, dry_run: bool) -> Result<bool> {
+fn is_palace_entry(entry: &Value) -> bool {
+    entry
+        .get("command")
+        .and_then(Value::as_str)
+        .map(|c| c.contains(CURSOR_HOOK_KEY))
+        .unwrap_or(false)
+}
+
+/// Build the desired hooks.json entry for a Palace hook.
+fn hook_entry(hook: &CursorHook, script_command: &str) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("command".to_string(), json!(script_command));
+    if let Some(matcher) = hook.matcher {
+        obj.insert("matcher".to_string(), json!(matcher));
+    }
+    if let Some(loop_limit) = hook.loop_limit {
+        obj.insert("loop_limit".to_string(), json!(loop_limit));
+    }
+    Value::Object(obj)
+}
+
+fn upsert_hooks_json(
+    path: &Path,
+    entries: &[(&CursorHook, String)],
+    dry_run: bool,
+) -> Result<bool> {
     let existing = read_hooks_json(path)?;
     let mut next = existing.clone();
 
-    let hooks = next
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("hooks.json root is not an object"))?
-        .entry("hooks")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("hooks.json 'hooks' is not an object"))?;
+    {
+        let hooks = next
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("hooks.json root is not an object"))?
+            .entry("hooks")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("hooks.json 'hooks' is not an object"))?;
 
-    let session_start = hooks
-        .entry("sessionStart")
-        .or_insert_with(|| json!([]))
-        .as_array_mut()
-        .ok_or_else(|| anyhow!("sessionStart is not an array"))?;
+        for (hook, script_command) in entries {
+            let arr = hooks
+                .entry(hook.event)
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .ok_or_else(|| anyhow!("hooks.{} is not an array", hook.event))?;
 
-    // Check if palace entry already exists with the right command.
-    let already_present = session_start.iter().any(|e| {
-        e.get("command")
-            .and_then(Value::as_str)
-            .map(|c| c.contains(CURSOR_HOOK_KEY))
-            .unwrap_or(false)
-    });
-
-    if already_present {
-        // Update the command in case the binary path changed.
-        for entry in session_start.iter_mut() {
-            if entry
-                .get("command")
-                .and_then(Value::as_str)
-                .map(|c| c.contains(CURSOR_HOOK_KEY))
-                .unwrap_or(false)
-            {
-                if let Some(obj) = entry.as_object_mut() {
-                    obj.insert(
-                        "command".to_string(),
-                        serde_json::Value::String(script_command.to_string()),
-                    );
-                }
+            let desired = hook_entry(hook, script_command);
+            // Replace the existing palace entry (binary path / matcher may have
+            // changed) or append a fresh one, leaving unrelated entries intact.
+            if let Some(slot) = arr.iter_mut().find(|e| is_palace_entry(e)) {
+                *slot = desired;
+            } else {
+                arr.push(desired);
             }
         }
-        // Re-check if anything actually changed.
-        if existing == next {
-            return Ok(false);
-        }
-    } else {
-        session_start.push(json!({ "command": script_command }));
+    }
+
+    if existing == next {
+        return Ok(false);
     }
 
     if dry_run {
@@ -1291,19 +1380,16 @@ fn remove_hook_entry(path: &Path, dry_run: bool) -> Result<bool> {
         return Ok(false);
     };
 
-    let Some(session_start) = hooks.get_mut("sessionStart").and_then(Value::as_array_mut) else {
-        return Ok(false);
-    };
+    let mut removed_any = false;
+    for hook in cursor_hooks() {
+        if let Some(arr) = hooks.get_mut(hook.event).and_then(Value::as_array_mut) {
+            let before = arr.len();
+            arr.retain(|e| !is_palace_entry(e));
+            removed_any |= arr.len() != before;
+        }
+    }
 
-    let before = session_start.len();
-    session_start.retain(|e| {
-        !e.get("command")
-            .and_then(Value::as_str)
-            .map(|c| c.contains(CURSOR_HOOK_KEY))
-            .unwrap_or(false)
-    });
-
-    if session_start.len() == before {
+    if !removed_any {
         return Ok(false);
     }
 
@@ -1316,4 +1402,284 @@ fn remove_hook_entry(path: &Path, dry_run: bool) -> Result<bool> {
     fs::write(path, format!("{text}\n"))
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(true)
+}
+
+// ── Claude Code / Codex nested-hooks integration ─────────────────────────────
+//
+// Claude Code (`~/.claude/settings.json`) and Codex (`~/.codex/hooks.json`)
+// share a nested config shape that differs from Cursor's flat `hooks.json`:
+// each event maps to an array of matcher-groups, and each group holds a `hooks`
+// array of command handlers. Both clients also share a "Claude-style" output
+// dialect, so a single command runner (`palace hook <event> --client <c>`)
+// serves both — only the registration shape and tool matchers differ.
+
+/// A hook in the nested (Claude/Codex) config shape.
+struct NestedHook {
+    /// Event key (e.g. "SessionStart").
+    event: &'static str,
+    /// CLI sub-event passed to `palace hook <cli_event>`.
+    cli_event: &'static str,
+    /// Optional tool-name matcher (omitted = matches every tool).
+    matcher: Option<&'static str>,
+}
+
+/// Claude Code hooks: investigations surface through the Grep/Read/Glob tools.
+fn claude_hooks() -> &'static [NestedHook] {
+    &[
+        NestedHook {
+            event: "SessionStart",
+            cli_event: "session-start",
+            matcher: None,
+        },
+        NestedHook {
+            event: "PostToolUse",
+            cli_event: "post-tool-use",
+            matcher: Some("Grep|Read|Glob"),
+        },
+        NestedHook {
+            event: "Stop",
+            cli_event: "stop",
+            matcher: None,
+        },
+    ]
+}
+
+/// Codex hooks: investigations run through the shell, so PostToolUse matches Bash.
+fn codex_hooks() -> &'static [NestedHook] {
+    &[
+        NestedHook {
+            event: "SessionStart",
+            cli_event: "session-start",
+            matcher: None,
+        },
+        NestedHook {
+            event: "PostToolUse",
+            cli_event: "post-tool-use",
+            matcher: Some("Bash"),
+        },
+        NestedHook {
+            event: "Stop",
+            cli_event: "stop",
+            matcher: None,
+        },
+    ]
+}
+
+/// The nested-hooks config path, hook set, and `--client` flag for a client, or
+/// `None` for clients without a nested hook system (Cursor uses its own flat
+/// format; Claude Desktop has no hooks).
+fn nested_hook_target(
+    home_dir: &Path,
+    client: Client,
+) -> Option<(PathBuf, &'static [NestedHook], &'static str)> {
+    match client {
+        Client::Claude => Some((
+            home_dir.join(".claude").join("settings.json"),
+            claude_hooks(),
+            "claude",
+        )),
+        Client::Codex => Some((
+            home_dir.join(".codex").join("hooks.json"),
+            codex_hooks(),
+            "codex",
+        )),
+        _ => None,
+    }
+}
+
+/// Read a JSON object file, returning `{}` when missing or empty so unrelated
+/// keys in an existing config are always preserved.
+fn read_json_object(path: &Path) -> Result<Value> {
+    if !path.exists() {
+        return Ok(json!({}));
+    }
+    let text =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if text.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+/// True if a nested matcher-group contains a palace command handler.
+fn nested_group_is_palace(group: &Value) -> bool {
+    group
+        .get("hooks")
+        .and_then(Value::as_array)
+        .map(|handlers| {
+            handlers.iter().any(|h| {
+                h.get("command")
+                    .and_then(Value::as_str)
+                    .map(|c| c.contains(CURSOR_HOOK_KEY))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// The full command for a nested hook handler (quoted binary + event + client).
+fn nested_hook_command(binary_path: &Path, cli_event: &str, client_flag: &str) -> String {
+    format!(
+        "\"{}\" hook {} --client {}",
+        path_to_string(binary_path),
+        cli_event,
+        client_flag
+    )
+}
+
+/// Build the desired matcher-group for a Palace nested hook.
+fn nested_group(matcher: Option<&str>, command: &str) -> Value {
+    let mut group = serde_json::Map::new();
+    if let Some(matcher) = matcher {
+        group.insert("matcher".to_string(), json!(matcher));
+    }
+    group.insert(
+        "hooks".to_string(),
+        json!([{ "type": "command", "command": command }]),
+    );
+    Value::Object(group)
+}
+
+/// Install or update Palace hooks in a nested-format config file, preserving
+/// every unrelated key and matcher-group.
+fn install_nested_hooks(
+    path: &Path,
+    defs: &[NestedHook],
+    binary_path: &Path,
+    client_flag: &str,
+    dry_run: bool,
+) -> Result<bool> {
+    let existing = read_json_object(path)?;
+    let mut next = existing.clone();
+
+    {
+        let hooks = next
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("{} root is not an object", path.display()))?
+            .entry("hooks")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("{} 'hooks' is not an object", path.display()))?;
+
+        for def in defs {
+            let arr = hooks
+                .entry(def.event)
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .ok_or_else(|| anyhow!("hooks.{} is not an array", def.event))?;
+
+            let desired = nested_group(
+                def.matcher,
+                &nested_hook_command(binary_path, def.cli_event, client_flag),
+            );
+            // Replace the existing palace group (binary path / matcher may have
+            // changed) or append a fresh one, leaving unrelated groups intact.
+            if let Some(slot) = arr.iter_mut().find(|g| nested_group_is_palace(g)) {
+                *slot = desired;
+            } else {
+                arr.push(desired);
+            }
+        }
+    }
+
+    if existing == next {
+        return Ok(false);
+    }
+    if dry_run {
+        return Ok(true);
+    }
+
+    backup_existing(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let text = serde_json::to_string_pretty(&next)?;
+    fs::write(path, format!("{text}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(true)
+}
+
+/// Remove Palace matcher-groups from a nested-format config file.
+fn remove_nested_hooks(path: &Path, defs: &[NestedHook], dry_run: bool) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let existing = read_json_object(path)?;
+    let mut next = existing.clone();
+
+    let Some(hooks) = next.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return Ok(false);
+    };
+
+    let mut removed_any = false;
+    for def in defs {
+        if let Some(arr) = hooks.get_mut(def.event).and_then(Value::as_array_mut) {
+            let before = arr.len();
+            arr.retain(|g| !nested_group_is_palace(g));
+            removed_any |= arr.len() != before;
+        }
+    }
+
+    if !removed_any {
+        return Ok(false);
+    }
+    if dry_run {
+        return Ok(true);
+    }
+
+    backup_existing(path)?;
+    let text = serde_json::to_string_pretty(&next)?;
+    fs::write(path, format!("{text}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(true)
+}
+
+/// True if any Palace hook is registered in a nested-format config file.
+fn nested_hook_installed(path: &Path) -> bool {
+    read_json_object(path)
+        .ok()
+        .and_then(|v| {
+            v.get("hooks").and_then(Value::as_object).map(|hooks| {
+                hooks.values().any(|groups| {
+                    groups
+                        .as_array()
+                        .map(|gs| gs.iter().any(nested_group_is_palace))
+                        .unwrap_or(false)
+                })
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Install the automatic memory hooks for a client at user scope. Returns the
+/// hook config path and whether it changed, or `None` for clients without a
+/// nested hook system (Cursor is handled separately; Claude Desktop has none).
+fn install_client_hooks(
+    options: &InstallOptions,
+    client: Client,
+) -> Result<Option<(PathBuf, bool)>> {
+    let Some((path, defs, client_flag)) = nested_hook_target(&options.home_dir, client) else {
+        return Ok(None);
+    };
+    let changed = install_nested_hooks(
+        &path,
+        defs,
+        &options.binary_path,
+        client_flag,
+        options.dry_run,
+    )?;
+    Ok(Some((path, changed)))
+}
+
+/// Uninstall the automatic memory hooks for a client at user scope.
+fn uninstall_client_hooks(
+    options: &InstallOptions,
+    client: Client,
+) -> Result<Option<(PathBuf, bool)>> {
+    let Some((path, defs, _)) = nested_hook_target(&options.home_dir, client) else {
+        return Ok(None);
+    };
+    let changed = remove_nested_hooks(&path, defs, options.dry_run)?;
+    Ok(Some((path, changed)))
 }

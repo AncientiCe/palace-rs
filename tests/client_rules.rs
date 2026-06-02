@@ -738,6 +738,97 @@ fn install_cursor_hook_writes_hooks_json() {
     );
 }
 
+fn palace_commands_for(val: &Value, event: &str) -> Vec<String> {
+    val["hooks"][event]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e["command"].as_str())
+                .filter(|c| c.contains("palace"))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn install_cursor_hook_registers_post_tool_use_and_stop() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+
+    install_cursor_hook(temp.path(), &binary, false).unwrap();
+
+    let hooks_json = temp.path().join(".cursor").join("hooks.json");
+    let val: Value = read_json(&hooks_json);
+
+    assert!(
+        !palace_commands_for(&val, "sessionStart").is_empty(),
+        "sessionStart palace entry missing: {val}"
+    );
+    assert!(
+        !palace_commands_for(&val, "postToolUse").is_empty(),
+        "postToolUse palace entry missing: {val}"
+    );
+    assert!(
+        !palace_commands_for(&val, "stop").is_empty(),
+        "stop palace entry missing: {val}"
+    );
+
+    // postToolUse should filter to investigation tools, not fire on everything.
+    let post = val["hooks"]["postToolUse"].as_array().unwrap();
+    let palace_post = post
+        .iter()
+        .find(|e| {
+            e["command"]
+                .as_str()
+                .map(|c| c.contains("palace"))
+                .unwrap_or(false)
+        })
+        .unwrap();
+    assert!(
+        palace_post.get("matcher").is_some(),
+        "postToolUse hook should carry a matcher: {palace_post}"
+    );
+}
+
+#[test]
+fn install_cursor_hook_all_events_idempotent() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+
+    install_cursor_hook(temp.path(), &binary, false).unwrap();
+    let changed = install_cursor_hook(temp.path(), &binary, false).unwrap();
+    assert!(!changed, "second identical install should be unchanged");
+
+    let hooks_json = temp.path().join(".cursor").join("hooks.json");
+    let val: Value = read_json(&hooks_json);
+    for event in ["sessionStart", "postToolUse", "stop"] {
+        assert_eq!(
+            palace_commands_for(&val, event).len(),
+            1,
+            "exactly one palace {event} entry expected: {val}"
+        );
+    }
+}
+
+#[test]
+fn uninstall_cursor_hook_removes_all_event_entries() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+
+    install_cursor_hook(temp.path(), &binary, false).unwrap();
+    uninstall_cursor_hook(temp.path(), false).unwrap();
+
+    let hooks_json = temp.path().join(".cursor").join("hooks.json");
+    let val: Value = read_json(&hooks_json);
+    for event in ["sessionStart", "postToolUse", "stop"] {
+        assert!(
+            palace_commands_for(&val, event).is_empty(),
+            "uninstall should remove palace {event} entry: {val}"
+        );
+    }
+}
+
 #[test]
 fn install_cursor_hook_is_idempotent() {
     let temp = TempDir::new().unwrap();
@@ -861,4 +952,182 @@ fn session_start_hook_response_contains_protocol() {
         ctx.contains("Palace Memory Protocol"),
         "additional_context should include protocol header, got: {ctx}"
     );
+}
+
+// ── Claude Code / Codex nested hooks ─────────────────────────────────────────
+
+/// Collect every command string across all events of a nested hooks file.
+fn nested_commands(val: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(hooks) = val["hooks"].as_object() {
+        for groups in hooks.values() {
+            if let Some(groups) = groups.as_array() {
+                for group in groups {
+                    if let Some(handlers) = group["hooks"].as_array() {
+                        for handler in handlers {
+                            if let Some(cmd) = handler["command"].as_str() {
+                                out.push(cmd.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn install_clients_claude_installs_nested_hooks() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+
+    install_clients(&options(temp.path(), &binary, vec![Client::Claude])).unwrap();
+
+    let settings = temp.path().join(".claude").join("settings.json");
+    assert!(settings.exists(), "Claude settings.json should be created");
+    let val: Value = read_json(&settings);
+
+    for event in ["SessionStart", "PostToolUse", "Stop"] {
+        let groups = val["hooks"][event]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing event {event}: {val}"));
+        assert!(
+            groups.iter().any(|g| {
+                g["hooks"].as_array().is_some_and(|hs| {
+                    hs.iter().any(|h| {
+                        h["command"]
+                            .as_str()
+                            .is_some_and(|c| c.contains("palace") && c.contains("--client claude"))
+                    })
+                })
+            }),
+            "event {event} should hold a palace claude command: {val}"
+        );
+    }
+
+    // PostToolUse should target the file-investigation tools.
+    let post = &val["hooks"]["PostToolUse"][0];
+    assert_eq!(post["matcher"], "Grep|Read|Glob", "{val}");
+}
+
+#[test]
+fn install_clients_codex_installs_nested_hooks() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+
+    install_clients(&options(temp.path(), &binary, vec![Client::Codex])).unwrap();
+
+    let hooks_json = temp.path().join(".codex").join("hooks.json");
+    assert!(hooks_json.exists(), "Codex hooks.json should be created");
+    let val: Value = read_json(&hooks_json);
+
+    let commands = nested_commands(&val);
+    assert!(
+        commands.iter().any(|c| c.contains("--client codex")),
+        "codex hooks should pass --client codex: {val}"
+    );
+    // Codex investigates through the shell, so PostToolUse matches Bash.
+    assert_eq!(val["hooks"]["PostToolUse"][0]["matcher"], "Bash", "{val}");
+}
+
+#[test]
+fn install_clients_claude_hooks_preserve_existing_settings() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+
+    let claude_dir = temp.path().join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    let settings = claude_dir.join("settings.json");
+    fs::write(
+        &settings,
+        r#"{"model":"opus","hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"./fmt.sh"}]}]}}"#,
+    )
+    .unwrap();
+
+    install_clients(&options(temp.path(), &binary, vec![Client::Claude])).unwrap();
+
+    let val: Value = read_json(&settings);
+    assert_eq!(
+        val["model"], "opus",
+        "unrelated keys must be preserved: {val}"
+    );
+    let commands = nested_commands(&val);
+    assert!(
+        commands.iter().any(|c| c == "./fmt.sh"),
+        "unrelated hook must be preserved: {val}"
+    );
+    assert!(
+        commands.iter().any(|c| c.contains("palace")),
+        "palace hook must be added: {val}"
+    );
+}
+
+#[test]
+fn install_clients_claude_hooks_idempotent() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary, vec![Client::Claude]);
+
+    install_clients(&opts).unwrap();
+    let second = install_clients(&opts).unwrap();
+    assert!(
+        second
+            .hook_unchanged
+            .iter()
+            .any(|p| p.ends_with("settings.json")),
+        "second identical Claude hook install should be unchanged: {second:?}"
+    );
+
+    let val: Value = read_json(&temp.path().join(".claude").join("settings.json"));
+    assert_eq!(
+        val["hooks"]["PostToolUse"].as_array().map(|a| a.len()),
+        Some(1),
+        "no duplicate palace groups: {val}"
+    );
+}
+
+#[test]
+fn uninstall_clients_codex_removes_nested_hooks() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary, vec![Client::Codex]);
+
+    install_clients(&opts).unwrap();
+    uninstall_clients(&without_rule(opts)).unwrap();
+
+    let val: Value = read_json(&temp.path().join(".codex").join("hooks.json"));
+    let commands = nested_commands(&val);
+    assert!(
+        !commands.iter().any(|c| c.contains("palace")),
+        "palace hooks should be removed on uninstall: {val}"
+    );
+}
+
+#[test]
+fn doctor_reports_hook_installed_for_claude_and_codex() {
+    for client in [Client::Claude, Client::Codex] {
+        let temp = TempDir::new().unwrap();
+        let binary = fake_binary(temp.path());
+        let opts = options(temp.path(), &binary, vec![client]);
+
+        let before = doctor(&opts).unwrap();
+        assert!(
+            before
+                .clients
+                .iter()
+                .any(|s| s.client == client && !s.hook_installed),
+            "{client} hook should be reported missing before install"
+        );
+
+        install_clients(&opts).unwrap();
+        let after = doctor(&opts).unwrap();
+        assert!(
+            after
+                .clients
+                .iter()
+                .any(|s| s.client == client && s.hook_installed),
+            "{client} hook should be reported installed after install"
+        );
+    }
 }

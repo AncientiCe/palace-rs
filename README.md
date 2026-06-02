@@ -355,6 +355,41 @@ It also tells agents to warm-start with `palace_session_context`, search diaries
 with `palace_diary_search` before continuing old work, use KG tools for durable
 facts, and write `palace_diary_write` after substantive work.
 
+### Automatic memory hooks
+
+`palace install` registers user-scope hooks for every client that supports
+them, so memory use is automatic in **every** project without per-project rule
+edits. The three hooks behave the same everywhere:
+
+- **session start** — injects the protocol (Cursor also exports
+  `PALACE_SESSION_ID`).
+- **post tool use** — auto-recalls relevant memory while the agent
+  investigates, so a prior agent's decisions surface even before the agent
+  thinks to search.
+- **stop** — if the session engaged Palace but recorded nothing, it asks the
+  agent to `palace_diary_write` its investigation and `palace_kg_add` durable
+  decisions before finishing. It nudges at most once.
+
+| Client | Config file | Recall matches | Notes |
+| --- | --- | --- | --- |
+| Cursor | `~/.cursor/hooks.json` | `Grep`/`Read` | flat hook entries + wrapper scripts |
+| Claude Code | `~/.claude/settings.json` | `Grep`/`Read`/`Glob` | nested `hooks` blocks |
+| Codex | `~/.codex/hooks.json` | `Bash` (shell) | nested `hooks` blocks; run `/hooks` once to trust them |
+| Claude Desktop | — | — | no hook system; rules-only (`CLAUDE.md`) |
+
+Claude Code and Codex share a "Claude-style" output dialect
+(`hookSpecificOutput.additionalContext` for context, `decision: "block"` +
+`reason` to keep the agent working until it saves); Cursor uses its own
+`additional_context` / `followup_message` keys. The runner that produces these
+is `palace hook <event> --client <cursor|claude|codex>`.
+
+Cross-agent continuity: `palace_diary_search` accepts `all_agents: true` (and an
+optional `project_path`) to recall investigations recorded by any agent, and
+`palace_session_context` falls back to another agent's recent work for the
+project when you have none of your own. Durable decisions belong in the
+knowledge graph (`palace_kg_add` / `palace_kg_invalidate`), which dedupes facts
+and tracks changes over time, so re-recalled decisions never duplicate.
+
 Seed durable KG facts for adoption tracking:
 
 ```bash

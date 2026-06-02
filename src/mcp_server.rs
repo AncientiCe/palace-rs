@@ -874,6 +874,29 @@ fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     let timestamp = now.to_rfc3339();
     let date = now.format("%Y-%m-%d").to_string();
 
+    // Semantic dedup scoped to this agent's diary: skip near-identical entries
+    // (e.g. the same session summary written twice) so the diary grows with new
+    // information rather than repetition. Scoped per agent so a different agent
+    // recording the same observation keeps its own continuity record.
+    let dedup_filter = crate::store::DrawerFilter {
+        wing: Some(wing.clone()),
+        room: Some(room.clone()),
+    };
+    match crate::store::check_duplicate_filtered(conn, &entry, 0.95, &dedup_filter) {
+        Ok(dups) if !dups.is_empty() => {
+            let matches_json: Vec<Value> = dups
+                .iter()
+                .map(|m| json!({"id": m.id, "similarity": m.similarity}))
+                .collect();
+            return json!({
+                "success": false,
+                "reason": "duplicate",
+                "matches": matches_json,
+            });
+        }
+        _ => {}
+    }
+
     let entry_prefix = &entry[..50.min(entry.len())];
     let id = diary_id(&wing, &timestamp, entry_prefix);
 
@@ -993,25 +1016,44 @@ fn tool_diary_search(conn: &Connection, args: &Value) -> Value {
     };
     let limit = int_arg(args, "limit").unwrap_or(5) as usize;
     let tag_filter = str_arg(args, "tag");
+    // Cross-agent recall: when `all_agents` is set, search every agent's diary
+    // (room = "diary" across all `wing_diary__*` wings) instead of just the
+    // caller's own wing. This is what lets a different agent the next day pick
+    // up an investigation recorded by another agent.
+    let all_agents = bool_arg(args, "all_agents");
+    let project_path = str_arg(args, "project_path");
 
-    let wing = diary_wing(&agent_name);
-
-    let filter = crate::store::DrawerFilter {
-        wing: Some(wing),
-        room: Some("diary".to_string()),
+    let wing = if all_agents {
+        None
+    } else {
+        Some(diary_wing(&agent_name))
     };
+    let room = Some("diary".to_string());
 
     let _ = tag_filter; // tag filtering is on the roadmap; search is already wing/room scoped
+                        // When filtering by project we over-fetch, then post-filter on the
+                        // `project_path` stored in each drawer's metadata.
+    let fetch_limit = if project_path.is_some() {
+        limit.saturating_mul(4).max(limit)
+    } else {
+        limit
+    };
     let results = crate::searcher::search_memories(
         conn,
         &query,
-        filter.wing.as_deref(),
-        filter.room.as_deref(),
-        limit,
+        wing.as_deref(),
+        room.as_deref(),
+        fetch_limit,
     );
     if let Some(hits) = results.get("results").and_then(|v| v.as_array()) {
+        let mut hits = hits.clone();
+        if let Some(project) = project_path.as_deref() {
+            hits.retain(|hit| hit_project_path(conn, hit).as_deref() == Some(project));
+        }
+        hits.truncate(limit);
         json!({
             "agent": agent_name,
+            "all_agents": all_agents,
             "query": query,
             "results": hits,
         })
@@ -1020,100 +1062,144 @@ fn tool_diary_search(conn: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Look up the `project_path` recorded in the metadata of the drawer behind a
+/// search hit. Used to scope cross-agent recall to a single project.
+fn hit_project_path(conn: &Connection, hit: &Value) -> Option<String> {
+    let id = hit.get("id").and_then(|v| v.as_str())?;
+    let drawer = get_drawer(conn, id).ok().flatten()?;
+    drawer
+        .metadata
+        .get("project_path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// Gather recent diary drawers, newest first.
+///
+/// `wing = None` searches every agent's diary (cross-agent). When `project` is
+/// set, only entries for that project are returned.
+fn recent_diary_drawers(
+    conn: &Connection,
+    wing: Option<&str>,
+    project: Option<&str>,
+    within_hours: i64,
+    take: usize,
+) -> Vec<crate::store::Drawer> {
+    let filter = crate::store::DrawerFilter {
+        wing: wing.map(String::from),
+        room: Some("diary".to_string()),
+    };
+    let cutoff = (Utc::now() - chrono::Duration::hours(within_hours)).to_rfc3339();
+    let mut drawers = crate::store::list_drawers(conn, &filter, 10000).unwrap_or_default();
+    drawers.sort_by(|a, b| b.filed_at.cmp(&a.filed_at));
+    drawers
+        .into_iter()
+        .filter(|d| d.filed_at >= cutoff)
+        .filter(|d| {
+            project.is_none_or(|p| {
+                d.metadata
+                    .get("project_path")
+                    .and_then(|v| v.as_str())
+                    .map(|stored| stored == p)
+                    .unwrap_or(false)
+            })
+        })
+        .take(take)
+        .collect()
+}
+
 fn tool_session_context(conn: &Connection, args: &Value) -> Value {
     let agent_name = match str_arg(args, "agent_name") {
         Some(n) => n,
         None => return json!({"error": "agent_name is required"}),
     };
+    let project_path = str_arg(args, "project_path");
 
     let wing = diary_wing(&agent_name);
-    let filter = crate::store::DrawerFilter {
-        wing: Some(wing),
-        room: Some("diary".to_string()),
-    };
 
-    let cutoff = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+    // 1. Prefer the calling agent's own recent diary (last 24h).
+    let mut cross_agent = false;
+    let mut recent = recent_diary_drawers(conn, Some(&wing), project_path.as_deref(), 24, 3);
 
-    match crate::store::list_drawers(conn, &filter, 10000) {
-        Ok(mut drawers) => {
-            drawers.sort_by(|a, b| b.filed_at.cmp(&a.filed_at));
-            let recent: Vec<_> = drawers
-                .into_iter()
-                .filter(|d| d.filed_at >= cutoff)
-                .take(3)
-                .collect();
+    // 2. Fall back to any other agent's recent work (wider 7-day window) so a
+    //    different agent the next day still benefits from prior investigations.
+    if recent.is_empty() {
+        recent = recent_diary_drawers(conn, None, project_path.as_deref(), 24 * 7, 3);
+        cross_agent = !recent.is_empty();
+    }
 
-            if recent.is_empty() {
-                return json!({
-                    "agent": agent_name,
-                    "has_recent_session": false,
-                    "context": null,
-                });
-            }
+    {
+        if recent.is_empty() {
+            return json!({
+                "agent": agent_name,
+                "has_recent_session": false,
+                "context": null,
+            });
+        }
 
-            let project = recent
-                .first()
-                .and_then(|d| d.metadata.get("project_path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+        let project = recent
+            .first()
+            .and_then(|d| d.metadata.get("project_path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
-            let entries: Vec<Value> = recent
-                .iter()
-                .map(|d| {
-                    let topic = d
-                        .metadata
+        let entries: Vec<Value> = recent
+            .iter()
+            .map(|d| {
+                let topic = d
+                    .metadata
+                    .get("topic")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("general");
+                let session_id = d
+                    .metadata
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let project_path = d
+                    .metadata
+                    .get("project_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let tags = d.metadata.get("tags").cloned().unwrap_or_else(|| json!([]));
+                json!({
+                    "topic": topic,
+                    "timestamp": d.filed_at,
+                    "session_id": session_id,
+                    "project_path": project_path,
+                    "tags": tags,
+                    "text": compact_text(&d.content, 240),
+                })
+            })
+            .collect();
+        let summary = entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "[{}] {}",
+                    entry
                         .get("topic")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("general");
-                    let session_id = d
-                        .metadata
-                        .get("session_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let project_path = d
-                        .metadata
-                        .get("project_path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let tags = d.metadata.get("tags").cloned().unwrap_or_else(|| json!([]));
-                    json!({
-                        "topic": topic,
-                        "timestamp": d.filed_at,
-                        "session_id": session_id,
-                        "project_path": project_path,
-                        "tags": tags,
-                        "text": compact_text(&d.content, 240),
-                    })
-                })
-                .collect();
-            let summary = entries
-                .iter()
-                .map(|entry| {
-                    format!(
-                        "[{}] {}",
-                        entry
-                            .get("topic")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("general"),
-                        entry.get("text").and_then(|v| v.as_str()).unwrap_or("")
-                    )
-                })
-                .collect::<Vec<_>>();
-
-            json!({
-                "agent": agent_name,
-                "has_recent_session": true,
-                "last_active_project": project,
-                "recent_entries": entries,
-                "context": format!(
-                    "Last session ({}): {}",
-                    recent.first().map(|d| d.filed_at.as_str()).unwrap_or("unknown"),
-                    summary.join(" | ")
-                ),
+                        .unwrap_or("general"),
+                    entry.get("text").and_then(|v| v.as_str()).unwrap_or("")
+                )
             })
-        }
-        Err(e) => json!({"error": e.to_string()}),
+            .collect::<Vec<_>>();
+
+        json!({
+            "agent": agent_name,
+            "has_recent_session": true,
+            "cross_agent": cross_agent,
+            "last_active_project": project,
+            "recent_entries": entries,
+            "context": format!(
+                "{}({}): {}",
+                if cross_agent { "Recent work by another agent " } else { "Last session " },
+                recent.first().map(|d| d.filed_at.as_str()).unwrap_or("unknown"),
+                summary.join(" | ")
+            ),
+        })
     }
 }
 
@@ -1135,6 +1221,24 @@ fn tool_remember(conn: &Connection, args: &Value) -> Value {
         .and_then(|v| v.as_str())
         .unwrap_or("general")
         .to_string();
+
+    // Semantic dedup: a remembered fact filed under a different wing/room would
+    // otherwise slip past the deterministic-ID guard and create a duplicate.
+    match check_duplicate(conn, &text, 0.9) {
+        Ok(dups) if !dups.is_empty() => {
+            let matches_json: Vec<Value> = dups
+                .iter()
+                .map(|m| json!({"id": m.id, "wing": m.wing, "room": m.room, "similarity": m.similarity}))
+                .collect();
+            return json!({
+                "success": true,
+                "inserted": false,
+                "reason": "duplicate",
+                "matches": matches_json,
+            });
+        }
+        _ => {}
+    }
 
     let embedding = crate::embedder::embed_one(&text).ok();
     let emb_ref = embedding.as_deref();
@@ -1816,25 +1920,28 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_diary_search",
-            "description": "Semantic search within an agent's diary entries.",
+            "description": "Semantic search within diary entries. Set all_agents=true to recall investigations recorded by any agent (cross-agent continuity).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "agent_name": {"type": "string"},
                     "query": {"type": "string", "description": "Search query"},
                     "limit": {"type": "integer", "description": "Max results (default: 5)"},
-                    "tag": {"type": "string", "description": "Optional tag filter"}
+                    "tag": {"type": "string", "description": "Optional tag filter"},
+                    "all_agents": {"type": "boolean", "description": "Search every agent's diary instead of only your own (default: false)"},
+                    "project_path": {"type": "string", "description": "Restrict results to entries recorded for this project path"}
                 },
                 "required": ["agent_name", "query"]
             }
         },
         {
             "name": "palace_session_context",
-            "description": "Get warm-start context from the last 24h of diary entries for an agent.",
+            "description": "Get warm-start context from recent diary entries. Falls back to other agents' recent work for the project when you have none of your own.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "agent_name": {"type": "string"}
+                    "agent_name": {"type": "string"},
+                    "project_path": {"type": "string", "description": "Restrict and scope fallback recall to this project path"}
                 },
                 "required": ["agent_name"]
             }

@@ -76,6 +76,58 @@ pub fn record_event(
     insert_event(conn, &event)
 }
 
+/// MCP tools that constitute "memory-out": the agent recorded durable memory.
+pub const SAVE_TOOLS: &[&str] = &[
+    "palace_diary_write",
+    "palace_kg_add",
+    "palace_remember",
+    "palace_add_drawer",
+];
+
+/// MCP tools that constitute "engagement": the agent recalled or searched memory.
+pub const RECALL_TOOLS: &[&str] = &[
+    "palace_search",
+    "palace_kg_query",
+    "palace_diary_search",
+    "palace_diary_read",
+    "palace_session_context",
+    "palace_preference_search",
+    "palace_check_duplicate",
+    "palace_recall_check",
+    "palace_traverse",
+];
+
+/// Whether the recent window shows the agent engaged Palace and whether it saved.
+///
+/// Returns `(engaged, saved)`. Used by the `stop` hook to nudge agents that
+/// investigated with Palace but never recorded what they found.
+pub fn recent_save_status(conn: &Connection, within_minutes: i64) -> Result<(bool, bool)> {
+    let since = (Utc::now() - ChronoDuration::minutes(within_minutes.max(0))).to_rfc3339();
+    let engaged = tools_used_since(conn, &since, RECALL_TOOLS)?;
+    let saved = tools_used_since(conn, &since, SAVE_TOOLS)?;
+    Ok((engaged, saved))
+}
+
+fn tools_used_since(conn: &Connection, since: &str, tools: &[&str]) -> Result<bool> {
+    let placeholders = vec!["?"; tools.len()].join(", ");
+    let sql = format!(
+        "SELECT 1 FROM usage_events
+         WHERE datetime(ts) >= datetime(?1) AND tool IN ({placeholders})
+         LIMIT 1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(tools.len() + 1);
+    params.push(&since);
+    for tool in tools {
+        params.push(tool);
+    }
+    let found: Option<i64> = stmt
+        .query_row(rusqlite::params_from_iter(params), |row| row.get(0))
+        .optional()
+        .context("checking recent tool usage")?;
+    Ok(found.is_some())
+}
+
 pub fn insert_event(conn: &Connection, event: &UsageEvent) -> Result<()> {
     let meta = serde_json::to_string(&event.meta).unwrap_or_else(|_| "{}".to_string());
     conn.execute(

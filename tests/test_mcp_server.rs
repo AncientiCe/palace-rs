@@ -591,3 +591,245 @@ fn room_counts_filtered_by_wing() {
     assert!(rooms.contains_key("r1"));
     assert!(rooms.contains_key("r2"));
 }
+
+// ── Cross-agent, project-scoped recall ────────────────────────────────────
+
+fn write_diary(
+    conn: &rusqlite::Connection,
+    config: &palace::config::PalaceConfig,
+    agent: &str,
+    entry: &str,
+    project_path: &str,
+) {
+    let result = palace::mcp_server::dispatch_tool(
+        conn,
+        config,
+        "palace_diary_write",
+        &serde_json::json!({
+            "agent_name": agent,
+            "entry": entry,
+            "topic": "investigation",
+            "project_path": project_path,
+        }),
+    );
+    assert_eq!(result["success"], true, "diary_write failed: {result}");
+}
+
+#[test]
+fn diary_search_all_agents_finds_other_agent_entries() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    // Agent "claude-cli" investigates and records a decision.
+    write_diary(
+        &conn,
+        &config,
+        "claude-cli",
+        "Investigated the duplicate checkout endpoint and chose to deduplicate by idempotency key in the payment handler.",
+        "/proj/checkout",
+    );
+
+    // A different agent ("cursor") searches across all agents.
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_search",
+        &serde_json::json!({
+            "agent_name": "cursor",
+            "query": "why did we deduplicate the checkout endpoint idempotency key",
+            "all_agents": true,
+        }),
+    );
+
+    let hits = result["results"].as_array().expect("results array");
+    assert!(
+        !hits.is_empty(),
+        "cross-agent diary search should surface another agent's entry: {result}"
+    );
+    let joined = hits
+        .iter()
+        .filter_map(|h| h["text"].as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        joined.contains("idempotency key"),
+        "expected the claude-cli decision in results, got: {joined}"
+    );
+}
+
+#[test]
+fn diary_search_defaults_to_calling_agent_only() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    write_diary(
+        &conn,
+        &config,
+        "claude-cli",
+        "Investigated the duplicate checkout endpoint and chose to deduplicate by idempotency key.",
+        "/proj/checkout",
+    );
+
+    // Without all_agents, a different agent sees nothing (per-agent isolation).
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_search",
+        &serde_json::json!({
+            "agent_name": "cursor",
+            "query": "idempotency key checkout endpoint",
+        }),
+    );
+    let hits = result["results"].as_array().expect("results array");
+    assert!(
+        hits.is_empty(),
+        "default diary search must stay scoped to the calling agent: {result}"
+    );
+}
+
+// ── Write-path semantic dedup ─────────────────────────────────────────────
+
+#[test]
+fn remember_blocks_near_duplicate_facts_across_rooms() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    let text = "We deduplicate checkout requests using the idempotency key stored in Redis.";
+
+    let first = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &serde_json::json!({"text": text, "wing": "decisions", "room": "checkout"}),
+    );
+    assert_eq!(
+        first["inserted"], true,
+        "first remember should insert: {first}"
+    );
+
+    // Same fact filed under a different room would slip past the deterministic
+    // ID guard — semantic dedup must catch it.
+    let second = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &serde_json::json!({"text": text, "wing": "decisions", "room": "payments"}),
+    );
+    assert_eq!(
+        second["inserted"], false,
+        "near-duplicate remember should be skipped: {second}"
+    );
+    assert_eq!(
+        second["reason"], "duplicate",
+        "expected duplicate reason: {second}"
+    );
+
+    // Only the first fact should be stored.
+    assert_eq!(store::count_drawers(&conn).unwrap(), 1);
+}
+
+#[test]
+fn diary_write_blocks_near_duplicate_entries_for_same_agent() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    let entry =
+        "Investigated the duplicate suggestion bug and decided to dedupe by idempotency key.";
+
+    let first = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_write",
+        &serde_json::json!({"agent_name": "claude-cli", "entry": entry, "topic": "investigation"}),
+    );
+    assert_eq!(
+        first["success"], true,
+        "first diary_write should succeed: {first}"
+    );
+
+    let second = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_write",
+        &serde_json::json!({"agent_name": "claude-cli", "entry": entry, "topic": "investigation"}),
+    );
+    assert_eq!(
+        second["success"], false,
+        "near-duplicate diary entry should be skipped: {second}"
+    );
+    assert_eq!(
+        second["reason"], "duplicate",
+        "expected duplicate reason: {second}"
+    );
+
+    assert_eq!(store::count_drawers(&conn).unwrap(), 1);
+}
+
+#[test]
+fn diary_write_dedup_is_scoped_per_agent() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    let entry =
+        "Investigated the duplicate suggestion bug and decided to dedupe by idempotency key.";
+
+    let first = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_write",
+        &serde_json::json!({"agent_name": "claude-cli", "entry": entry}),
+    );
+    assert_eq!(first["success"], true);
+
+    // A different agent recording the same observation is NOT a duplicate — it
+    // is that agent's own continuity record.
+    let other = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_write",
+        &serde_json::json!({"agent_name": "cursor", "entry": entry}),
+    );
+    assert_eq!(
+        other["success"], true,
+        "another agent's identical entry must still be stored: {other}"
+    );
+    assert_eq!(store::count_drawers(&conn).unwrap(), 2);
+}
+
+#[test]
+fn session_context_falls_back_to_other_agents_for_project() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    // Yesterday's agent recorded recent work for a project.
+    write_diary(
+        &conn,
+        &config,
+        "claude-cli",
+        "Pushed a fix that removes the duplicate suggestion in the checkout flow.",
+        "/proj/checkout",
+    );
+
+    // A different agent opens a session for the same project and has no diary
+    // of its own — it should still see the prior agent's recent work.
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_session_context",
+        &serde_json::json!({
+            "agent_name": "cursor",
+            "project_path": "/proj/checkout",
+        }),
+    );
+
+    assert_eq!(
+        result["has_recent_session"], true,
+        "cross-agent fallback should report a recent session: {result}"
+    );
+    assert_eq!(
+        result["cross_agent"], true,
+        "fallback context must be flagged as cross-agent: {result}"
+    );
+    let entries = result["recent_entries"].as_array().expect("recent_entries");
+    assert!(!entries.is_empty());
+}

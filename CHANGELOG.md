@@ -4,6 +4,40 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Added
+
+- **Automatic memory hooks (all clients)** — `palace install` now registers
+  user-scope `session start`, `post tool use`, and `stop` hooks for every client
+  that supports them, enforcing memory use in every project without per-project
+  rules. `post tool use` auto-recalls relevant memory while the agent
+  investigates; `stop` nudges the agent to record its work when it engaged Palace
+  but saved nothing. Coverage:
+  - **Cursor** — `~/.cursor/hooks.json` (recall matched to `Grep`/`Read`).
+  - **Claude Code** — `~/.claude/settings.json` nested hooks (recall matched to
+    `Grep`/`Read`/`Glob`).
+  - **Codex** — `~/.codex/hooks.json` nested hooks (recall matched to `Bash`,
+    since Codex investigates through the shell; run `/hooks` once to trust them).
+  - **Claude Desktop** — no hook system, so it remains rules-only (`CLAUDE.md`).
+
+  Claude Code and Codex share a "Claude-style" output dialect
+  (`hookSpecificOutput.additionalContext`; `decision: "block"` + `reason` on
+  stop), selected via `palace hook <event> --client <cursor|claude|codex>`. The
+  `palace::hooks` module exposes the pure, client-aware response builders.
+- **Cross-agent recall** — `palace_diary_search` accepts `all_agents` and
+  `project_path` to surface investigations recorded by any agent, and
+  `palace_session_context` falls back to another agent's recent project work when
+  the caller has none, so a different agent the next day still benefits from
+  prior work.
+
+### Changed
+
+- **Write-path dedup** — `palace_diary_write` (scoped per agent) and
+  `palace_remember` now skip near-duplicate content, preventing diary/fact bloat
+  from repeated similar writes. Durable decisions still belong in the
+  deduplicated knowledge graph.
+
 ## [0.4.0] - 2026-05-22
 
 ### Added

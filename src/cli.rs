@@ -288,10 +288,13 @@ enum Commands {
     },
     /// Start the MCP stdio server
     Mcp,
-    /// Handle a Cursor agent hook event (used by hooks.json)
+    /// Handle an agent hook event (used by hooks.json / settings.json)
     Hook {
         /// Hook event name (e.g. session-start)
         event: String,
+        /// Client dialect for the response (cursor, claude, or codex)
+        #[arg(long, default_value = "cursor")]
+        client: String,
     },
 }
 
@@ -778,8 +781,8 @@ pub fn run() -> Result<()> {
             crate::mcp_server::run()?;
         }
 
-        Commands::Hook { event } => {
-            crate::install::run_hook(&event)?;
+        Commands::Hook { event, client } => {
+            crate::install::run_hook(&event, &client)?;
         }
     }
 

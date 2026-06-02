@@ -13,6 +13,7 @@ pub mod export;
 pub mod gain;
 pub mod general_extractor;
 pub mod hall_router;
+pub mod hooks;
 pub mod i18n;
 pub mod install;
 pub mod knowledge_graph;

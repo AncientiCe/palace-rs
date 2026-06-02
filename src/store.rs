@@ -451,8 +451,22 @@ pub fn check_duplicate(
     content: &str,
     threshold: f64,
 ) -> Result<Vec<SearchResult>> {
+    check_duplicate_filtered(conn, content, threshold, &DrawerFilter::default())
+}
+
+/// Check for near-duplicate content within a wing/room scope.
+///
+/// Used to keep dedup tight: diary entries are deduplicated only against the
+/// same agent's diary, so two agents recording the same observation each keep
+/// their own continuity record.
+pub fn check_duplicate_filtered(
+    conn: &Connection,
+    content: &str,
+    threshold: f64,
+    filter: &DrawerFilter,
+) -> Result<Vec<SearchResult>> {
     let embedding = crate::embedder::embed_one(content)?;
-    let results = vector_search(conn, &embedding, &DrawerFilter::default(), 5)?;
+    let results = vector_search(conn, &embedding, filter, 5)?;
     Ok(results
         .into_iter()
         .filter(|r| r.similarity >= threshold)
