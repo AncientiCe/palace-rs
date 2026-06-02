@@ -1,20 +1,41 @@
 name: Update Homebrew Formula
 
+# Runs after the Release workflow finishes. A `release: published` trigger does
+# NOT fire here, because that release is created by the Release workflow using
+# the default GITHUB_TOKEN, and GitHub never starts new workflow runs from
+# GITHUB_TOKEN-triggered events. `workflow_run` is not subject to that rule, so
+# it reliably chains after a tagged release build. `workflow_dispatch` is a
+# manual fallback (pass the tag, e.g. v0.5.0).
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to publish to Homebrew (e.g. v0.5.0)"
+        required: true
 
 jobs:
   update-formula:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
 
     steps:
-      - name: Extract version
+      - name: Resolve version
         id: version
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RAW="${{ github.event.inputs.version }}"
+          else
+            # For tag-triggered runs, head_branch is the tag name (e.g. v0.5.0).
+            RAW="${{ github.event.workflow_run.head_branch }}"
+          fi
+          VERSION="${RAW#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Version: ${VERSION}"
 
       - name: Download checksums
