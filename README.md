@@ -35,7 +35,7 @@ user preferences across sessions without running a separate vector database.
 
 ## Agent Memory Reliability
 
-Version `0.4.0` focuses on the retrieval cases that matter most during coding
+Version `0.5.0` focuses on the retrieval cases that matter most during coding
 work: preferences, project conventions, recent session continuity,
 source-grounded answers, and measurable usefulness in real agent sessions.
 Drawers that look like user preferences or conventions are tagged in metadata
