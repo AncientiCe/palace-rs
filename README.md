@@ -136,14 +136,26 @@ Per-question-type on `s_cleaned`:
 
 ## Installation
 
-### macOS / Linux
+### Homebrew (macOS Apple Silicon / Linux)
 
+```bash
+brew tap AncientiCe/palace
+brew install palace
+
+# Configure MCP servers
+palace install --all
+```
+
+**Note**: macOS Intel is not supported due to ONNX Runtime unavailability. Apple Silicon and Linux x86_64 are fully supported.
+
+### Install Script (macOS / Linux / Windows)
+
+**macOS / Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AncientiCe/palace-rs/main/scripts/install.sh | sh
 ```
 
-### Windows
-
+**Windows:**
 ```powershell
 irm https://raw.githubusercontent.com/AncientiCe/palace-rs/main/scripts/install.ps1 | iex
 ```
@@ -152,7 +164,7 @@ The installer downloads the matching GitHub Release binary, verifies its SHA-256
 checksum, installs it locally, and registers the MCP server with Cursor, Codex,
 and Claude Code.
 
-Development install:
+### Development Install
 
 ```bash
 cargo install --path .

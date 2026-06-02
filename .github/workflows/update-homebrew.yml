@@ -1,0 +1,89 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Version: ${VERSION}"
+
+      - name: Download checksums
+        id: checksums
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+
+          # Download macOS ARM64 checksum
+          MACOS_CHECKSUM=$(curl -fsSL "https://github.com/AncientiCe/palace-rs/releases/download/v${VERSION}/palace-aarch64-apple-darwin.sha256" | awk '{print $1}')
+          echo "macos_sha256=${MACOS_CHECKSUM}" >> $GITHUB_OUTPUT
+          echo "macOS ARM64 SHA256: ${MACOS_CHECKSUM}"
+
+          # Download Linux x86_64 checksum
+          LINUX_CHECKSUM=$(curl -fsSL "https://github.com/AncientiCe/palace-rs/releases/download/v${VERSION}/palace-x86_64-unknown-linux-gnu.sha256" | awk '{print $1}')
+          echo "linux_sha256=${LINUX_CHECKSUM}" >> $GITHUB_OUTPUT
+          echo "Linux x86_64 SHA256: ${LINUX_CHECKSUM}"
+
+      - name: Checkout homebrew-palace
+        uses: actions/checkout@v4
+        with:
+          repository: AncientiCe/homebrew-palace
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-palace
+
+      - name: Update formula
+        run: |
+          cd homebrew-palace
+          VERSION=${{ steps.version.outputs.version }}
+          MACOS_SHA=${{ steps.checksums.outputs.macos_sha256 }}
+          LINUX_SHA=${{ steps.checksums.outputs.linux_sha256 }}
+
+          # Update Formula/palace.rb
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/palace.rb
+          sed -i "s|download/v[0-9.]*|download/v${VERSION}|g" Formula/palace.rb
+          sed -i "s/palace-[0-9.].*-aarch64-apple-darwin/palace-${VERSION}-aarch64-apple-darwin/g" Formula/palace.rb
+          sed -i "s/palace-[0-9.].*-x86_64-unknown-linux-gnu/palace-${VERSION}-x86_64-unknown-linux-gnu/g" Formula/palace.rb
+
+          # Update SHA256 hashes (find lines with sha256 and replace)
+          # macOS ARM64 is first, Linux is second
+          awk -v macos="${MACOS_SHA}" -v linux="${LINUX_SHA}" '
+            /sha256/ {
+              if (!macos_done) {
+                sub(/sha256 ".*"/, "sha256 \"" macos "\"")
+                macos_done=1
+              } else {
+                sub(/sha256 ".*"/, "sha256 \"" linux "\"")
+              }
+            }
+            {print}
+          ' Formula/palace.rb > Formula/palace.rb.tmp
+          mv Formula/palace.rb.tmp Formula/palace.rb
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-palace
+          commit-message: "palace ${{ steps.version.outputs.version }}"
+          title: "Update palace to ${{ steps.version.outputs.version }}"
+          body: |
+            Automated update for palace v${{ steps.version.outputs.version }}
+
+            **Changes:**
+            - Version: ${{ steps.version.outputs.version }}
+            - macOS ARM64 SHA256: `${{ steps.checksums.outputs.macos_sha256 }}`
+            - Linux x86_64 SHA256: `${{ steps.checksums.outputs.linux_sha256 }}`
+
+            **Release:** https://github.com/AncientiCe/palace-rs/releases/tag/v${{ steps.version.outputs.version }}
+
+            Please review and merge if the checksums are correct.
+          branch: update-v${{ steps.version.outputs.version }}
+          delete-branch: true
