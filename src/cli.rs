@@ -288,6 +288,13 @@ enum Commands {
     },
     /// Start the MCP stdio server
     Mcp,
+    /// Configure and toggle remote MCP mode (connect to a shared palace-server)
+    Remote {
+        #[command(subcommand)]
+        action: RemoteAction,
+    },
+    /// Switch the MCP server back to the local palace (alias for `remote off`)
+    Local,
     /// Handle an agent hook event (used by hooks.json / settings.json)
     Hook {
         /// Hook event name (e.g. session-start)
@@ -296,6 +303,27 @@ enum Commands {
         #[arg(long, default_value = "cursor")]
         client: String,
     },
+}
+
+#[derive(Subcommand)]
+enum RemoteAction {
+    /// Set the remote endpoint and API key (does not switch mode by itself)
+    Set {
+        /// Remote palace-server URL (host, base URL, or full /mcp URL)
+        #[arg(long)]
+        endpoint: String,
+        /// API key (ps_*). Omit to be prompted on stdin instead of passing it on the command line.
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+    /// Turn remote mode on (route the MCP server to the remote palace-server)
+    On,
+    /// Turn remote mode off (route the MCP server to the local palace)
+    Off,
+    /// Show the current MCP mode, endpoint, and masked API key
+    Status,
+    /// Test connectivity and authentication against the configured remote server
+    Test,
 }
 
 pub fn run() -> Result<()> {
@@ -781,12 +809,116 @@ pub fn run() -> Result<()> {
             crate::mcp_server::run()?;
         }
 
+        Commands::Remote { action } => {
+            handle_remote(action)?;
+        }
+
+        Commands::Local => {
+            let mut cfg = PalaceConfig::new();
+            cfg.save_remote_settings(Some("local"), None, None)?;
+            println!("  MCP mode: local (using the local palace).");
+        }
+
         Commands::Hook { event, client } => {
             crate::install::run_hook(&event, &client)?;
         }
     }
 
     Ok(())
+}
+
+/// Handle the `palace remote <action>` command group.
+fn handle_remote(action: RemoteAction) -> Result<()> {
+    let mut cfg = PalaceConfig::new();
+    match action {
+        RemoteAction::Set { endpoint, api_key } => {
+            let endpoint = endpoint.trim().to_string();
+            let key = match api_key {
+                Some(k) => k.trim().to_string(),
+                None => prompt_api_key()?,
+            };
+            if key.is_empty() {
+                anyhow::bail!("No API key provided");
+            }
+            cfg.save_remote_settings(None, Some(&endpoint), Some(&key))?;
+            println!(
+                "  Remote endpoint set: {}",
+                crate::config::normalize_mcp_url(&endpoint)
+            );
+            println!("  API key stored ({}).", mask_key(&key));
+            println!("  Run `palace remote on` to switch, then `palace remote test` to verify.");
+        }
+        RemoteAction::On => {
+            if cfg.remote_endpoint().is_none() || cfg.remote_api_key().is_none() {
+                warn!(
+                    "Remote not configured. Run: palace remote set --endpoint <url> [--api-key <key>]"
+                );
+                std::process::exit(1);
+            }
+            cfg.save_remote_settings(Some("remote"), None, None)?;
+            println!(
+                "  MCP mode: remote → {}",
+                cfg.remote_endpoint_url().unwrap_or_default()
+            );
+            println!("  Restart your AI client (or reconnect the MCP server) to apply.");
+        }
+        RemoteAction::Off => {
+            cfg.save_remote_settings(Some("local"), None, None)?;
+            println!("  MCP mode: local (using the local palace).");
+            println!("  Restart your AI client (or reconnect the MCP server) to apply.");
+        }
+        RemoteAction::Status => {
+            println!("  MCP mode: {}", cfg.mcp_mode());
+            match cfg.remote_endpoint_url() {
+                Some(url) => println!("  Endpoint: {url}"),
+                None => println!("  Endpoint: (not set)"),
+            }
+            match cfg.remote_api_key() {
+                Some(k) => println!("  API key:  {}", mask_key(&k)),
+                None => println!("  API key:  (not set)"),
+            }
+        }
+        RemoteAction::Test => {
+            let url = cfg.remote_endpoint_url().ok_or_else(|| {
+                anyhow::anyhow!("Remote endpoint not set. Run: palace remote set --endpoint <url>")
+            })?;
+            let key = cfg.remote_api_key().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "API key not set. Run: palace remote set --endpoint <url> --api-key <key>"
+                )
+            })?;
+            println!("  Testing {url} ...");
+            match crate::remote::probe(&url, &key) {
+                Ok(n) => println!("  OK — authenticated, {n} tool(s) available."),
+                Err(e) => {
+                    warn!("FAILED: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Prompt for an API key on stdin so it is never required on the command line.
+fn prompt_api_key() -> Result<String> {
+    use std::io::Write;
+    print!("  Enter API key (ps_...): ");
+    std::io::stdout().flush()?;
+    let mut key = String::new();
+    std::io::stdin().read_line(&mut key)?;
+    Ok(key.trim().to_string())
+}
+
+/// Mask an API key for display, preserving a short prefix and suffix.
+fn mask_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 8 {
+        return "…".to_string();
+    }
+    let head: String = chars.iter().take(3).collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 fn install_options(

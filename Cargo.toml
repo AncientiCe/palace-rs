@@ -72,5 +72,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"], opt
 rayon = "1"
 notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
 
+# HTTP client for remote MCP proxy mode (native-tls to match ort/hf-hub TLS stack)
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
+
 [dev-dependencies]
 tempfile = "3"

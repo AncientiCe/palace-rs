@@ -33,6 +33,7 @@ pub mod query_intent;
 pub mod query_rewriter;
 pub mod query_sanitizer;
 pub mod ranker;
+pub mod remote;
 pub mod reranker;
 pub mod room_detector;
 pub mod searcher;

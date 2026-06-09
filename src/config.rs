@@ -116,6 +116,28 @@ struct FileConfig {
     hall_keywords: Option<HashMap<String, Vec<String>>>,
     people_map: Option<HashMap<String, String>>,
     entity_languages: Option<Vec<String>>,
+    /// MCP server mode: "local" (default) or "remote".
+    mcp_mode: Option<String>,
+    /// Remote palace-server endpoint (host, base URL, or full /mcp URL).
+    remote_endpoint: Option<String>,
+    /// API key (ps_*) for the remote palace-server.
+    remote_api_key: Option<String>,
+}
+
+/// Normalise a configured endpoint into the palace-server `/mcp` URL.
+/// Accepts a bare host, a base URL, or a URL already ending in `/mcp`.
+pub fn normalize_mcp_url(endpoint: &str) -> String {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
+    if with_scheme.ends_with("/mcp") {
+        with_scheme
+    } else {
+        format!("{with_scheme}/mcp")
+    }
 }
 
 /// Runtime configuration for Palace.
@@ -233,6 +255,88 @@ impl PalaceConfig {
         self.config_dir.join("known_names.json")
     }
 
+    /// MCP server mode: "local" (default) or "remote".
+    /// Priority: env `PALACE_MCP_MODE` > config.json > "local".
+    pub fn mcp_mode(&self) -> String {
+        if let Ok(v) = std::env::var("PALACE_MCP_MODE") {
+            let v = v.trim();
+            if !v.is_empty() {
+                return v.to_lowercase();
+            }
+        }
+        self.file_config
+            .mcp_mode
+            .clone()
+            .unwrap_or_else(|| "local".to_string())
+    }
+
+    /// Raw remote endpoint as configured (env `PALACE_REMOTE_ENDPOINT` > config.json).
+    pub fn remote_endpoint(&self) -> Option<String> {
+        std::env::var("PALACE_REMOTE_ENDPOINT")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .or_else(|| self.file_config.remote_endpoint.clone())
+    }
+
+    /// API key (ps_*) for the remote server (env `PALACE_API_KEY` > config.json).
+    pub fn remote_api_key(&self) -> Option<String> {
+        std::env::var("PALACE_API_KEY")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .or_else(|| self.file_config.remote_api_key.clone())
+    }
+
+    /// The configured endpoint normalised to a full `/mcp` URL, if set.
+    pub fn remote_endpoint_url(&self) -> Option<String> {
+        self.remote_endpoint().map(|e| normalize_mcp_url(&e))
+    }
+
+    /// Persist remote-mode settings into ~/.palace/config.json, preserving other keys.
+    /// The file is written with owner-only (0600) permissions since it may hold the key.
+    /// Any argument left `None` is left unchanged on disk.
+    pub fn save_remote_settings(
+        &mut self,
+        mode: Option<&str>,
+        endpoint: Option<&str>,
+        api_key: Option<&str>,
+    ) -> Result<PathBuf> {
+        std::fs::create_dir_all(&self.config_dir)?;
+        let config_file = self.config_dir.join("config.json");
+
+        // Load existing JSON object (preserving unknown keys) or start fresh.
+        let mut root: serde_json::Value = if config_file.exists() {
+            std::fs::read_to_string(&config_file)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_else(|| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+        if !root.is_object() {
+            root = serde_json::json!({});
+        }
+        let obj = root.as_object_mut().expect("root is an object");
+
+        if let Some(mode) = mode {
+            obj.insert("mcp_mode".into(), serde_json::json!(mode));
+            self.file_config.mcp_mode = Some(mode.to_string());
+        }
+        if let Some(endpoint) = endpoint {
+            obj.insert("remote_endpoint".into(), serde_json::json!(endpoint));
+            self.file_config.remote_endpoint = Some(endpoint.to_string());
+        }
+        if let Some(api_key) = api_key {
+            obj.insert("remote_api_key".into(), serde_json::json!(api_key));
+            self.file_config.remote_api_key = Some(api_key.to_string());
+        }
+
+        std::fs::write(&config_file, serde_json::to_string_pretty(&root)?)?;
+        restrict_permissions(&config_file)?;
+        Ok(config_file)
+    }
+
     /// Create config directory and write default config.json if it doesn't exist.
     pub fn init(&self) -> Result<PathBuf> {
         std::fs::create_dir_all(&self.config_dir)?;
@@ -262,4 +366,17 @@ impl Default for PalaceConfig {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Restrict a file to owner read/write (0600) on Unix; no-op elsewhere.
+#[cfg(unix)]
+fn restrict_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &Path) -> Result<()> {
+    Ok(())
 }

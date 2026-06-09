@@ -24,6 +24,22 @@ use crate::store::{
 /// Run the MCP stdio server. Blocks until stdin closes.
 pub fn run() -> Result<()> {
     let config = PalaceConfig::new();
+
+    // Remote mode: act as a transparent stdio→HTTP proxy to a shared palace-server.
+    if config.mcp_mode() == "remote" {
+        let url = config.remote_endpoint_url().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Remote MCP mode is on but no endpoint is set. Run: palace remote set --endpoint <url>"
+            )
+        })?;
+        let key = config.remote_api_key().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Remote MCP mode is on but no API key is set. Run: palace remote set --endpoint <url> --api-key <key>"
+            )
+        })?;
+        return crate::remote::run(&url, &key);
+    }
+
     let db_path = config.palace_db_path();
 
     // Open palace DB (or create if first run)
