@@ -35,7 +35,7 @@ user preferences across sessions without running a separate vector database.
 
 ## Agent Memory Reliability
 
-Version `0.5.0` focuses on the retrieval cases that matter most during coding
+Version `0.6.0` focuses on the retrieval cases that matter most during coding
 work: preferences, project conventions, recent session continuity,
 source-grounded answers, and measurable usefulness in real agent sessions.
 Drawers that look like user preferences or conventions are tagged in metadata
@@ -354,6 +354,34 @@ implementation details that may have changed since the project was mined.
 It also tells agents to warm-start with `palace_session_context`, search diaries
 with `palace_diary_search` before continuing old work, use KG tools for durable
 facts, and write `palace_diary_write` after substantive work.
+
+### Remote mode (shared palace-server)
+
+By default `palace mcp` serves the **local** palace. Point it at a shared remote
+[`palace-server`](https://github.com/AncientiCe/palace-server) instead — so a
+whole team shares one memory backend in their own infrastructure — without
+changing any client's stdio registration. In remote mode `palace mcp` becomes a
+transparent stdio→HTTP bridge that forwards each request to the server's `/mcp`
+endpoint with a `Bearer` API key.
+
+```bash
+# Store the endpoint and ps_… API key (prompts for the key if --api-key is omitted)
+palace remote set --endpoint https://palace.yourco.com
+
+# Switch the MCP server to the remote palace-server, then verify
+palace remote on
+palace remote test          # runs the MCP handshake; reports tool count
+
+# Back to the local palace at any time
+palace remote off           # (or: palace local)
+```
+
+Inspect the current wiring with `palace remote status` (prints the MCP mode, the
+normalised `/mcp` endpoint, and a masked API key). Remote settings are read from
+the `PALACE_MCP_MODE`, `PALACE_REMOTE_ENDPOINT`, and `PALACE_API_KEY` environment
+variables, falling back to the `mcp_mode`, `remote_endpoint`, and `remote_api_key`
+keys in `~/.palace/config.json` (written with owner-only `0600` permissions). The
+endpoint accepts a bare host, a base URL, or a full `/mcp` URL.
 
 ### Automatic memory hooks
 

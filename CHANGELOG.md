@@ -4,6 +4,37 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [0.6.0] - 2026-06-09
+
+### Added
+
+- **Remote MCP mode (shared palace-server client)** — `palace mcp` can now run as
+  a transparent stdio→HTTP bridge to a shared remote `palace-server` instead of the
+  local palace. Every AI client keeps its existing stdio registration; when remote
+  mode is on, each JSON-RPC request is forwarded to the server's `/mcp` endpoint
+  with a `Bearer` API key and the response is streamed back verbatim
+  (`application/json` and `text/event-stream` both handled). This lets a whole team
+  share one memory backend in their own infrastructure without per-client URL/header
+  wiring.
+  - **`palace remote set --endpoint <url> [--api-key <key>]`** — store the remote
+    endpoint and `ps_…` API key. The endpoint accepts a bare host, a base URL, or a
+    full `/mcp` URL (normalised automatically). Omit `--api-key` to be prompted on
+    stdin so the key never lands in shell history.
+  - **`palace remote on` / `palace remote off`** — switch the MCP server between the
+    remote palace-server and the local palace.
+  - **`palace local`** — alias for `palace remote off`.
+  - **`palace remote status`** — show the current MCP mode, normalised endpoint, and
+    masked API key.
+  - **`palace remote test`** — one-shot connectivity + auth probe that runs the MCP
+    `initialize` handshake and reports the number of tools the remote exposes.
+  - New configuration surface: `PALACE_MCP_MODE`, `PALACE_REMOTE_ENDPOINT`, and
+    `PALACE_API_KEY` environment variables, plus the `mcp_mode`, `remote_endpoint`,
+    and `remote_api_key` keys in `~/.palace/config.json` (written with owner-only
+    `0600` permissions since the file holds the API key).
+  - For non-standard responses, the proxy unwraps palace-server's text envelope for
+    `initialize` and `tools/list` so any spec-compliant MCP client understands the
+    handshake, while passing `tools/call` and error responses through unchanged.
+
 ## [0.5.0] - 2026-06-02
 
 ### Added
