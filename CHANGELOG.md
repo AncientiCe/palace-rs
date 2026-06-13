@@ -4,6 +4,40 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Added
+
+- **First-class wings registry** — a new `wings` table is now the source of truth
+  for every wing (both code repos and non-repo topics), recording `kind`
+  (`project`/`topic`), `description`, `project_path`, and `last_mined_at`. It is
+  populated idempotently on every database open by backfilling distinct wings
+  already present on drawers (`wing_diary__*`/`general`/`conversations` are
+  inferred as topics, everything else as projects), so existing palaces upgrade
+  automatically without touching drawer data.
+- **MCP project-awareness and on-demand mining** — three new MCP tools:
+  `palace_project_status` (reports whether the current repo is `mined` /
+  `registered_not_mined` / `unknown`, with a recommendation), `palace_mine`
+  (mines a code repository on demand after the user agrees, auto-initialising
+  `palace.yaml` for first-time repos and running with its own short-lived
+  connection so the server's shared connection is untouched), and
+  `palace_create_wing` (declares a topic wing for non-repo users such as sales
+  or PMs). `palace_remember` and `palace_add_drawer` now auto-register an unknown
+  wing as a topic, and `palace_list_wings` returns full registry records.
+- **`palace wings` CLI subcommand** — lists registered wings with their kind,
+  drawer counts, and last mined time.
+- **Session-start PROJECT CHECK guidance** — the bundled memory protocol now
+  tells agents to call `palace_project_status` when entering a workspace, ask the
+  user before mining a repo (mining is repo-only and implicitly initialises it),
+  and offer `palace_create_wing` for non-repo topics.
+
+### Changed
+
+- **Mining records registry state** — `miner::mine` marks the wing as mined
+  (`set_wing_mined`) on success, the watcher refreshes mined state, and `mine`
+  gained a `quiet` flag so MCP-triggered mining does not write progress to the
+  JSON-RPC stdout stream.
+
 ## [0.6.1] - 2026-06-13
 
 ### Removed
