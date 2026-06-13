@@ -36,9 +36,6 @@ enum Commands {
         /// Mine immediately after writing palace.yaml
         #[arg(long)]
         auto_mine: bool,
-        /// Disable optional LLM-assisted refinement
-        #[arg(long)]
-        no_llm: bool,
         /// Entity language list (comma-separated)
         #[arg(long, value_delimiter = ',')]
         lang: Vec<String>,
@@ -335,13 +332,9 @@ pub fn run() -> Result<()> {
             dir,
             yes,
             auto_mine,
-            no_llm,
             lang,
         } => {
             let dir = dir.canonicalize().unwrap_or(dir);
-            if no_llm {
-                println!("  LLM refinement disabled; using heuristic detection.");
-            }
             if !lang.is_empty() {
                 println!("  Entity languages: {}", lang.join(","));
             }

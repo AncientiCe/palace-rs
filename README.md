@@ -173,7 +173,7 @@ palace install
 
 The first time you run `mine`, the embedding model is downloaded automatically from HuggingFace and cached.
 
-> **Upgrading from `mempalace` (≤ 0.1.9)?** See [Migrating from `mempalace` to `palace`](#migrating-from-mempalace-to-palace). The 0.2.x line ships a `mempalace` shim binary that forwards to `palace` for one release; it is removed in 0.3.0.
+> **Upgrading from `mempalace` (≤ 0.1.9)?** See [Migrating from `mempalace` to `palace`](#migrating-from-mempalace-to-palace). The legacy `mempalace` shim binary and `MEMPALACE_*` env vars were removed in 0.3.0 — install 0.2.x first if you need the automated migration path.
 
 ---
 
@@ -277,8 +277,7 @@ palace gain - last 30d (palace_rs)
   Top wings          : palace_rs(120), checkout(40)
 ```
 
-Set `PALACE_GAIN_DISABLED=1` to disable usage recording. The legacy
-`MEMPALACE_GAIN_DISABLED` is still honored in 0.2.x with a deprecation warning.
+Set `PALACE_GAIN_DISABLED=1` to disable usage recording.
 
 `palace_gain` also accepts an optional `record` payload for MCP callers that want
 to file explicit usefulness feedback without learning a new tool:
@@ -358,11 +357,13 @@ facts, and write `palace_diary_write` after substantive work.
 ### Remote mode (shared palace-server)
 
 By default `palace mcp` serves the **local** palace. Point it at a shared remote
-[`palace-server`](https://github.com/AncientiCe/palace-server) instead — so a
-whole team shares one memory backend in their own infrastructure — without
-changing any client's stdio registration. In remote mode `palace mcp` becomes a
-transparent stdio→HTTP bridge that forwards each request to the server's `/mcp`
-endpoint with a `Bearer` API key.
+[Palace Server](https://palacememory.com) instead — so a whole team shares one
+memory backend in their own infrastructure — without changing any client's
+stdio registration. In remote mode `palace mcp` becomes a transparent
+stdio→HTTP bridge that forwards each request to the server's `/mcp` endpoint
+with a `Bearer` API key. Palace Server is the commercial, self-hosted team
+edition — licenses, docs, and deployment guides live at
+[palacememory.com](https://palacememory.com).
 
 ```bash
 # Store the endpoint and ps_… API key (prompts for the key if --api-key is omitted)
@@ -525,8 +526,10 @@ graph operations, graph tunnels, hook acknowledgements, and agent diaries:
 
 ## Migrating from `mempalace` to `palace`
 
-The 0.2.0 release renames the project from `mempalace` to `palace`. The 0.2.x line
-keeps the old names working with deprecation warnings; they will be removed in 0.3.0.
+The 0.2.0 release renamed the project from `mempalace` to `palace`. The 0.2.x line
+kept the old names working with deprecation warnings; they were **removed in 0.3.0**.
+On current versions, migrate via a 0.2.x release first or rename manually
+(`~/.mempalace` → `~/.palace`, `mempalace.yaml` → `palace.yaml`).
 
 | Surface | Before (0.1.x) | After (0.2.x) |
 |---|---|---|
@@ -596,12 +599,9 @@ instead of re-indexing the repository from scratch.
 |---|---|---|
 | `PALACE_PALACE_PATH` | `~/.palace/palace` | Palace data directory |
 
-The legacy `MEMPALACE_PALACE_PATH` is still honored in 0.2.x with a deprecation warning.
-
 ### `palace.yaml` (per-project)
 
-Created by `palace init`. The legacy filename `mempalace.yaml` is still read.
-Example:
+Created by `palace init`. Example:
 
 ```yaml
 wing: my_project

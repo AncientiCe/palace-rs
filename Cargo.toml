@@ -5,8 +5,7 @@ edition = "2021"
 description = "Local memory palace for AI assistants — Rust edition"
 license = "MIT"
 repository = "https://github.com/AncientiCe/palace-rs"
-homepage = "https://github.com/AncientiCe/palace-rs"
-documentation = "https://docs.rs/palace-rs"
+homepage = "https://palacememory.com"
 readme = "README.md"
 rust-version = "1.82"
 keywords = ["memory", "ai", "mcp", "llm", "embeddings"]
@@ -24,7 +23,6 @@ path = "src/lib.rs"
 [features]
 default = ["cli"]
 cli = ["dep:clap", "dep:tracing-subscriber"]
-llm = []
 
 [dependencies]
 # CLI (optional — only needed for the binary)

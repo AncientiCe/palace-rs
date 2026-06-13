@@ -18,7 +18,6 @@ pub mod i18n;
 pub mod install;
 pub mod knowledge_graph;
 pub mod layers;
-pub mod llm;
 pub mod manifest_entities;
 pub mod mcp_server;
 pub mod migrate;

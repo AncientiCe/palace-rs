@@ -129,3 +129,28 @@ jobs:
             dist/palace-*-${{ matrix.target }}.${{ matrix.archive_ext }}
             dist/palace-${{ matrix.target }}.sha256
 
+  # End-to-end smoke of the published release: the install script must detect
+  # the platform, download the real asset, verify its checksum, and install.
+  install-smoke:
+    name: Release install smoke (${{ matrix.os }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+          - os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install from published release
+        shell: bash
+        env:
+          PALACE_VERSION: ${{ github.ref_name }}
+          PALACE_INSTALL_DIR: ${{ runner.temp }}/palace-bin
+          HOME: ${{ runner.temp }}/palace-home
+        run: |
+          mkdir -p "$HOME"
+          sh scripts/install.sh
+          "$PALACE_INSTALL_DIR/palace" --version
+
