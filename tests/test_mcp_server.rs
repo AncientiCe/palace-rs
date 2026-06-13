@@ -833,3 +833,72 @@ fn session_context_falls_back_to_other_agents_for_project() {
     let entries = result["recent_entries"].as_array().expect("recent_entries");
     assert!(!entries.is_empty());
 }
+
+// ── Wings registry: create / project status / auto-register ─────────────────
+
+#[test]
+fn create_wing_declares_topic_wing() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    let args = serde_json::json!({
+        "name": "Enterprise Sales",
+        "description": "Sales account notes",
+    });
+    let result = palace::mcp_server::dispatch_tool(&conn, &config, "palace_create_wing", &args);
+    assert_eq!(result["success"], true, "{result}");
+    assert_eq!(result["wing"]["name"], "enterprise_sales");
+    assert_eq!(result["wing"]["kind"], "topic");
+
+    let record = store::get_wing(&conn, "enterprise_sales").unwrap().unwrap();
+    assert_eq!(record.description, "Sales account notes");
+}
+
+#[test]
+fn project_status_unknown_for_fresh_dir() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    let args = serde_json::json!({ "project_path": tmp.path().to_string_lossy() });
+    let result = palace::mcp_server::dispatch_tool(&conn, &config, "palace_project_status", &args);
+    assert_eq!(result["state"], "unknown", "{result}");
+    assert!(result["recommendation"].is_string());
+}
+
+#[test]
+fn remember_auto_registers_new_wing() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    let args = serde_json::json!({
+        "text": "A brand new fact for a brand new topic wing",
+        "wing": "fresh_topic",
+        "room": "general",
+    });
+    let result = palace::mcp_server::dispatch_tool(&conn, &config, "palace_remember", &args);
+    assert_eq!(result["success"], true, "{result}");
+
+    let record = store::get_wing(&conn, "fresh_topic").unwrap();
+    assert!(record.is_some(), "wing should be auto-registered");
+    assert_eq!(record.unwrap().kind, "topic");
+}
+
+#[test]
+fn list_wings_returns_registry_records() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    store::upsert_wing(&conn, "topic_x", "topic", "desc", None).unwrap();
+
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_list_wings",
+        &serde_json::json!({}),
+    );
+    let wings = result["wings"].as_array().expect("wings array");
+    assert!(
+        wings
+            .iter()
+            .any(|w| w["name"] == "topic_x" && w["kind"] == "topic"),
+        "registry should list topic_x: {result}"
+    );
+}

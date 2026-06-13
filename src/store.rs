@@ -480,6 +480,123 @@ pub fn wing_counts(conn: &Connection) -> Result<HashMap<String, i64>> {
     rows.map(|r| r.context("wing counts")).collect()
 }
 
+/// A row from the `wings` registry, enriched with the wing's drawer count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WingRecord {
+    pub name: String,
+    /// `project` or `topic`.
+    pub kind: String,
+    pub description: String,
+    /// Canonical on-disk path for project wings; `None` for topics.
+    pub project_path: Option<String>,
+    /// RFC3339 timestamp of the last successful mine; `None` if never mined.
+    pub last_mined_at: Option<String>,
+    pub created_at: String,
+    pub drawer_count: i64,
+}
+
+const WING_SELECT: &str = "SELECT w.name, w.kind, w.description, w.project_path, w.last_mined_at, \
+     w.created_at, (SELECT COUNT(*) FROM drawers d WHERE d.wing = w.name) AS drawer_count \
+     FROM wings w";
+
+fn wing_record_from_row(row: &rusqlite::Row) -> rusqlite::Result<WingRecord> {
+    Ok(WingRecord {
+        name: row.get(0)?,
+        kind: row.get(1)?,
+        description: row.get(2)?,
+        project_path: row.get(3)?,
+        last_mined_at: row.get(4)?,
+        created_at: row.get(5)?,
+        drawer_count: row.get(6)?,
+    })
+}
+
+/// Insert or update a wing registry entry.
+///
+/// Non-empty incoming values win; empty values preserve whatever is already
+/// stored, so this never clobbers a richer record with blanks. A `project` kind
+/// always wins over `topic` (a wing can be promoted but not demoted).
+pub fn upsert_wing(
+    conn: &Connection,
+    name: &str,
+    kind: &str,
+    description: &str,
+    project_path: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO wings (name, kind, description, project_path)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(name) DO UPDATE SET
+             kind = CASE
+                 WHEN excluded.kind = 'project' OR wings.kind = 'project' THEN 'project'
+                 ELSE excluded.kind
+             END,
+             description = CASE
+                 WHEN excluded.description != '' THEN excluded.description
+                 ELSE wings.description
+             END,
+             project_path = COALESCE(NULLIF(excluded.project_path, ''), wings.project_path)",
+        params![name, kind, description, project_path],
+    )
+    .context("upserting wing")?;
+    Ok(())
+}
+
+/// Fetch a single wing registry entry by name.
+pub fn get_wing(conn: &Connection, name: &str) -> Result<Option<WingRecord>> {
+    let sql = format!("{WING_SELECT} WHERE w.name = ?1");
+    match conn.query_row(&sql, params![name], wing_record_from_row) {
+        Ok(record) => Ok(Some(record)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Find a project wing by its canonical on-disk path.
+pub fn find_wing_by_path(conn: &Connection, project_path: &str) -> Result<Option<WingRecord>> {
+    let sql = format!("{WING_SELECT} WHERE w.project_path = ?1");
+    match conn.query_row(&sql, params![project_path], wing_record_from_row) {
+        Ok(record) => Ok(Some(record)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// List all registered wings, most-populated first.
+pub fn list_wings_registry(conn: &Connection) -> Result<Vec<WingRecord>> {
+    let sql = format!("{WING_SELECT} ORDER BY drawer_count DESC, w.name ASC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], wing_record_from_row)?;
+    rows.map(|r| r.context("listing wings registry")).collect()
+}
+
+/// Mark a wing as a mined project: set kind=project, path, and last_mined_at.
+pub fn set_wing_mined(conn: &Connection, name: &str, project_path: &str) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO wings (name, kind, project_path, last_mined_at)
+         VALUES (?1, 'project', ?2, ?3)
+         ON CONFLICT(name) DO UPDATE SET
+             kind = 'project',
+             project_path = ?2,
+             last_mined_at = ?3",
+        params![name, project_path, now],
+    )
+    .context("marking wing as mined")?;
+    Ok(())
+}
+
+/// Register a wing as a topic if it isn't already known. Never modifies an
+/// existing entry, so project wings keep their richer metadata.
+pub fn ensure_wing_registered(conn: &Connection, name: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO wings (name, kind) VALUES (?1, 'topic')",
+        params![name],
+    )
+    .context("ensuring wing registered")?;
+    Ok(())
+}
+
 /// Room-level drawer counts (optionally filtered by wing).
 pub fn room_counts(conn: &Connection, wing: Option<&str>) -> Result<HashMap<String, i64>> {
     let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(w) = wing {

@@ -443,3 +443,158 @@ fn taxonomy_works() {
     assert_eq!(tax["wing_code"]["frontend"], 1);
     assert_eq!(tax["wing_docs"]["readme"], 1);
 }
+
+// ── Wings registry ──────────────────────────────────────────────────────────
+
+#[test]
+fn upsert_wing_creates_and_is_idempotent() {
+    let conn = open_test_db();
+    upsert_wing(&conn, "sales", "topic", "Sales notes", None).unwrap();
+    upsert_wing(&conn, "sales", "topic", "Sales notes", None).unwrap();
+
+    let record = get_wing(&conn, "sales").unwrap().expect("wing exists");
+    assert_eq!(record.name, "sales");
+    assert_eq!(record.kind, "topic");
+    assert_eq!(record.description, "Sales notes");
+    assert_eq!(record.project_path, None);
+    assert_eq!(record.drawer_count, 0);
+}
+
+#[test]
+fn upsert_wing_does_not_clobber_with_blank_values() {
+    let conn = open_test_db();
+    upsert_wing(
+        &conn,
+        "acme",
+        "project",
+        "Important repo",
+        Some("/code/acme"),
+    )
+    .unwrap();
+    // A later blank upsert must not erase the richer record.
+    upsert_wing(&conn, "acme", "topic", "", None).unwrap();
+
+    let record = get_wing(&conn, "acme").unwrap().expect("wing exists");
+    // project kind must win over topic (no demotion).
+    assert_eq!(record.kind, "project");
+    assert_eq!(record.description, "Important repo");
+    assert_eq!(record.project_path.as_deref(), Some("/code/acme"));
+}
+
+#[test]
+fn set_wing_mined_promotes_and_stamps() {
+    let conn = open_test_db();
+    ensure_wing_registered(&conn, "myrepo").unwrap();
+    let before = get_wing(&conn, "myrepo").unwrap().unwrap();
+    assert_eq!(before.kind, "topic");
+    assert!(before.last_mined_at.is_none());
+
+    set_wing_mined(&conn, "myrepo", "/code/myrepo").unwrap();
+    let after = get_wing(&conn, "myrepo").unwrap().unwrap();
+    assert_eq!(after.kind, "project");
+    assert_eq!(after.project_path.as_deref(), Some("/code/myrepo"));
+    assert!(after.last_mined_at.is_some());
+}
+
+#[test]
+fn ensure_wing_registered_never_overwrites() {
+    let conn = open_test_db();
+    set_wing_mined(&conn, "repo", "/code/repo").unwrap();
+    ensure_wing_registered(&conn, "repo").unwrap();
+
+    let record = get_wing(&conn, "repo").unwrap().unwrap();
+    assert_eq!(record.kind, "project");
+    assert_eq!(record.project_path.as_deref(), Some("/code/repo"));
+}
+
+#[test]
+fn find_wing_by_path_matches_project() {
+    let conn = open_test_db();
+    set_wing_mined(&conn, "repo", "/code/repo").unwrap();
+    let found = find_wing_by_path(&conn, "/code/repo")
+        .unwrap()
+        .expect("found by path");
+    assert_eq!(found.name, "repo");
+    assert!(find_wing_by_path(&conn, "/nope").unwrap().is_none());
+}
+
+#[test]
+fn list_wings_registry_includes_drawer_counts() {
+    let conn = open_test_db();
+    upsert_wing(&conn, "topic_only", "topic", "", None).unwrap();
+    add_drawer(
+        &conn,
+        "with_data",
+        "general",
+        "c",
+        None,
+        "f.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+    ensure_wing_registered(&conn, "with_data").unwrap();
+
+    let wings = list_wings_registry(&conn).unwrap();
+    let with_data = wings
+        .iter()
+        .find(|w| w.name == "with_data")
+        .expect("with_data registered");
+    assert_eq!(with_data.drawer_count, 1);
+    let topic_only = wings
+        .iter()
+        .find(|w| w.name == "topic_only")
+        .expect("topic_only registered");
+    assert_eq!(topic_only.drawer_count, 0);
+}
+
+#[test]
+fn backfill_registers_existing_wings_with_inferred_kind() {
+    let conn = open_test_db();
+    add_drawer(
+        &conn,
+        "mempalace_rs",
+        "src",
+        "c",
+        None,
+        "a.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+    add_drawer(
+        &conn,
+        "wing_diary__cursor",
+        "diary",
+        "c",
+        None,
+        "b.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+    add_drawer(
+        &conn, "general", "general", "c", None, "c.txt", 0, "test", 3.0,
+    )
+    .unwrap();
+
+    let inserted = palace::migrate::backfill_wings_registry(&conn).unwrap();
+    assert!(inserted >= 3);
+
+    assert_eq!(
+        get_wing(&conn, "mempalace_rs").unwrap().unwrap().kind,
+        "project"
+    );
+    assert_eq!(
+        get_wing(&conn, "wing_diary__cursor").unwrap().unwrap().kind,
+        "topic"
+    );
+    assert_eq!(get_wing(&conn, "general").unwrap().unwrap().kind, "topic");
+
+    // Idempotent: a second backfill inserts nothing new.
+    let again = palace::migrate::backfill_wings_registry(&conn).unwrap();
+    assert_eq!(again, 0);
+}

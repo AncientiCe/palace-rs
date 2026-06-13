@@ -11,11 +11,84 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use rusqlite::Connection;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 
 use crate::room_detector::{load_config, Room};
 use crate::store::{add_drawer, file_already_mined};
+
+/// Whether a project directory has been mined into the palace yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ProjectWingStatus {
+    /// The wing exists with content (or a recorded mine timestamp).
+    Mined {
+        wing: String,
+        drawers: i64,
+        last_mined_at: Option<String>,
+    },
+    /// The wing is declared in the registry but holds no drawers yet.
+    RegisteredNotMined { wing: String, drawers: i64 },
+    /// No registry entry and no drawers — the project is unknown to the palace.
+    Unknown {
+        suggested_wing: String,
+        has_palace_yaml: bool,
+    },
+}
+
+/// Slugify a project directory name into a wing name (matches `palace init`).
+pub fn wing_slug_from_dir(dir: &Path) -> String {
+    dir.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase()
+        .replace([' ', '-'], "_")
+}
+
+/// Determine whether `project_dir` has been mined, using the wings registry.
+///
+/// Resolves the wing name from `palace.yaml` when present, otherwise from the
+/// directory slug. Looks the wing up by canonical path first, then by name.
+pub fn project_wing_status(conn: &Connection, project_dir: &Path) -> Result<ProjectWingStatus> {
+    let canonical = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+    let has_palace_yaml = canonical.join("palace.yaml").exists();
+    let wing = if has_palace_yaml {
+        load_config(&canonical)
+            .map(|c| c.wing)
+            .unwrap_or_else(|_| wing_slug_from_dir(&canonical))
+    } else {
+        wing_slug_from_dir(&canonical)
+    };
+    let canonical_str = canonical.to_string_lossy().to_string();
+
+    let record = match crate::store::find_wing_by_path(conn, &canonical_str)? {
+        Some(r) => Some(r),
+        None => crate::store::get_wing(conn, &wing)?,
+    };
+
+    if let Some(r) = record {
+        let drawers = r.drawer_count;
+        if r.last_mined_at.is_some() || drawers > 0 {
+            return Ok(ProjectWingStatus::Mined {
+                wing: r.name,
+                drawers,
+                last_mined_at: r.last_mined_at,
+            });
+        }
+        return Ok(ProjectWingStatus::RegisteredNotMined {
+            wing: r.name,
+            drawers,
+        });
+    }
+
+    Ok(ProjectWingStatus::Unknown {
+        suggested_wing: wing,
+        has_palace_yaml,
+    })
+}
 
 pub const CHUNK_SIZE: usize = 800;
 pub const CHUNK_OVERLAP: usize = 100;
@@ -176,6 +249,7 @@ pub fn mine(
     dry_run: bool,
     respect_gitignore: bool,
     include_ignored: &[String],
+    quiet: bool,
 ) -> Result<()> {
     let project_path = project_dir
         .canonicalize()
@@ -220,23 +294,25 @@ pub fn mine(
         files.truncate(limit);
     }
 
-    println!("\n{}", "=".repeat(55));
-    println!("  MemPalace Mine");
-    println!("{}", "=".repeat(55));
-    println!("  Wing:    {wing}");
-    println!(
-        "  Rooms:   {}",
-        rooms
-            .iter()
-            .map(|r| r.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    println!("  Files:   {}", files.len());
-    if dry_run {
-        println!("  DRY RUN — nothing will be filed");
+    if !quiet {
+        println!("\n{}", "=".repeat(55));
+        println!("  MemPalace Mine");
+        println!("{}", "=".repeat(55));
+        println!("  Wing:    {wing}");
+        println!(
+            "  Rooms:   {}",
+            rooms
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!("  Files:   {}", files.len());
+        if dry_run {
+            println!("  DRY RUN — nothing will be filed");
+        }
+        println!("{}\n", "-".repeat(55));
     }
-    println!("{}\n", "-".repeat(55));
 
     let mut total_drawers = 0usize;
     let mut files_skipped = 0usize;
@@ -296,11 +372,13 @@ pub fn mine(
         let source_file = filepath.to_string_lossy().to_string();
 
         if dry_run {
-            println!(
-                "    [DRY RUN] {} → room:{room} ({} drawers)",
-                filepath.file_name().unwrap_or_default().to_string_lossy(),
-                chunk_entries.len()
-            );
+            if !quiet {
+                println!(
+                    "    [DRY RUN] {} → room:{room} ({} drawers)",
+                    filepath.file_name().unwrap_or_default().to_string_lossy(),
+                    chunk_entries.len()
+                );
+            }
             total_drawers += chunk_entries.len();
             *room_counts.entry(room.clone()).or_default() += 1;
             continue;
@@ -332,28 +410,37 @@ pub fn mine(
         if drawers_added > 0 {
             *room_counts.entry(room.clone()).or_default() += 1;
             total_drawers += drawers_added;
-            println!(
-                "  ✓ [{:4}/{}] {:50} +{drawers_added}",
-                i + 1,
-                file_count_total,
-                filepath.file_name().unwrap_or_default().to_string_lossy()
-            );
+            if !quiet {
+                println!(
+                    "  ✓ [{:4}/{}] {:50} +{drawers_added}",
+                    i + 1,
+                    file_count_total,
+                    filepath.file_name().unwrap_or_default().to_string_lossy()
+                );
+            }
         }
     }
 
-    println!("\n{}", "=".repeat(55));
-    println!("  Done.");
-    println!("  Files processed: {}", files.len() - files_skipped);
-    println!("  Files skipped (already filed): {files_skipped}");
-    println!("  Drawers filed: {total_drawers}");
-    println!("\n  By room:");
-    let mut sorted: Vec<(&String, &usize)> = room_counts.iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(a.1));
-    for (room, count) in sorted {
-        println!("    {:20} {count} files", room);
+    if !dry_run {
+        crate::store::set_wing_mined(conn, &wing, &project_path.to_string_lossy())
+            .context("recording wing mine status")?;
     }
-    println!();
-    println!("{}", "=".repeat(55));
+
+    if !quiet {
+        println!("\n{}", "=".repeat(55));
+        println!("  Done.");
+        println!("  Files processed: {}", files.len() - files_skipped);
+        println!("  Files skipped (already filed): {files_skipped}");
+        println!("  Drawers filed: {total_drawers}");
+        println!("\n  By room:");
+        let mut sorted: Vec<(&String, &usize)> = room_counts.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        for (room, count) in sorted {
+            println!("    {:20} {count} files", room);
+        }
+        println!();
+        println!("{}", "=".repeat(55));
+    }
 
     Ok(())
 }

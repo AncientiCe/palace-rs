@@ -74,6 +74,11 @@ pub fn watch(db_path: &Path, project_dir: &Path, wing_override: Option<&str>) ->
 
         let mut conn = crate::db::open(db_path).context("opening palace db")?;
 
+        if let Err(e) = crate::store::set_wing_mined(&conn, &wing, &project_path.to_string_lossy())
+        {
+            tracing::warn!(error = %e, "recording wing mine status failed");
+        }
+
         for filepath in &paths {
             if let Err(e) = mine_file(&mut conn, filepath, &wing, &rooms, &project_path) {
                 tracing::warn!(path = %filepath.display(), error = %e, "re-mine failed");

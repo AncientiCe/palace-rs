@@ -107,6 +107,8 @@ enum Commands {
     },
     /// Show palace status (drawer counts by wing/room)
     Status,
+    /// List registered wings (projects and topics) with mined status
+    Wings,
     /// Show automatic MCP usage gains and estimated savings
     Gain {
         /// Filter to one project
@@ -350,7 +352,7 @@ pub fn run() -> Result<()> {
             if auto_mine {
                 let db_path = config.palace_db_path();
                 let mut conn = crate::db::open(&db_path)?;
-                crate::miner::mine(&mut conn, &dir, None, "palace", 0, false, true, &[])?;
+                crate::miner::mine(&mut conn, &dir, None, "palace", 0, false, true, &[], false)?;
             } else {
                 println!("\n  Next step:\n    palace mine {}\n", dir.display());
             }
@@ -382,6 +384,7 @@ pub fn run() -> Result<()> {
                 dry_run,
                 !no_gitignore,
                 &include,
+                false,
             )?;
         }
 
@@ -462,6 +465,29 @@ pub fn run() -> Result<()> {
             }
             let conn = crate::db::open(&db_path)?;
             crate::miner::status(&conn, &db_path)?;
+        }
+
+        Commands::Wings => {
+            let db_path = config.palace_db_path();
+            if !db_path.exists() {
+                println!("\n  No palace found at {}", db_path.display());
+                println!("  Run: palace init <dir> then palace mine <dir>");
+                return Ok(());
+            }
+            let conn = crate::db::open(&db_path)?;
+            let wings = crate::store::list_wings_registry(&conn)?;
+            println!("\n  Registered wings ({}):\n", wings.len());
+            for w in &wings {
+                let mined = w.last_mined_at.as_deref().unwrap_or("never");
+                println!(
+                    "    {:<32} {:<8} {:>6} drawers   mined: {}",
+                    w.name, w.kind, w.drawer_count, mined
+                );
+                if !w.description.is_empty() {
+                    println!("        {}", w.description);
+                }
+            }
+            println!();
         }
 
         Commands::Gain {

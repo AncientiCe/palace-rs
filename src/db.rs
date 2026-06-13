@@ -97,6 +97,21 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_tunnels_a ON tunnels(wing_a, room_a);
         CREATE INDEX IF NOT EXISTS idx_tunnels_b ON tunnels(wing_b, room_b);
 
+        -- ── Wings registry ───────────────────────────────────────────────────
+        -- First-class declaration of wings (both repos and topics). Drawers keep
+        -- their `wing` string; this table is the source of truth for what wings
+        -- exist, their kind, and (for projects) their on-disk path + mined state.
+        CREATE TABLE IF NOT EXISTS wings (
+            name          TEXT PRIMARY KEY,
+            kind          TEXT NOT NULL DEFAULT 'topic',
+            description   TEXT NOT NULL DEFAULT '',
+            project_path  TEXT,
+            last_mined_at TEXT,
+            created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_wings_kind ON wings(kind);
+        CREATE INDEX IF NOT EXISTS idx_wings_path ON wings(project_path);
+
         -- ── BM25 index ───────────────────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS bm25_terms (
             drawer_id   TEXT NOT NULL REFERENCES drawers(id) ON DELETE CASCADE,
@@ -201,6 +216,9 @@ fn migrate(conn: &Connection) -> Result<()> {
         "#,
     )
     .context("creating phase one drawer indexes")?;
+
+    crate::migrate::backfill_wings_registry(conn)
+        .context("backfilling wings registry from existing drawers")?;
 
     conn.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)

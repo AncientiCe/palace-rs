@@ -1,6 +1,56 @@
 use palace::miner::{chunk_text, detect_room, CHUNK_SIZE};
 use palace::room_detector::Room;
 use std::path::Path;
+use tempfile::TempDir;
+
+#[test]
+fn project_wing_status_unknown_for_fresh_dir() {
+    use palace::miner::{project_wing_status, ProjectWingStatus};
+    let conn = palace::db::open_in_memory().unwrap();
+    let tmp = TempDir::new().unwrap();
+
+    let status = project_wing_status(&conn, tmp.path()).unwrap();
+    match status {
+        ProjectWingStatus::Unknown {
+            has_palace_yaml, ..
+        } => assert!(!has_palace_yaml),
+        other => panic!("expected Unknown, got {other:?}"),
+    }
+}
+
+#[test]
+fn project_wing_status_registered_not_mined() {
+    use palace::miner::{project_wing_status, wing_slug_from_dir, ProjectWingStatus};
+    let conn = palace::db::open_in_memory().unwrap();
+    let tmp = TempDir::new().unwrap();
+    let wing = wing_slug_from_dir(tmp.path());
+    palace::store::ensure_wing_registered(&conn, &wing).unwrap();
+
+    let status = project_wing_status(&conn, tmp.path()).unwrap();
+    assert!(matches!(
+        status,
+        ProjectWingStatus::RegisteredNotMined { .. }
+    ));
+}
+
+#[test]
+fn project_wing_status_mined_when_drawers_present() {
+    use palace::miner::{project_wing_status, wing_slug_from_dir, ProjectWingStatus};
+    let conn = palace::db::open_in_memory().unwrap();
+    let tmp = TempDir::new().unwrap();
+    let wing = wing_slug_from_dir(tmp.path());
+    palace::store::add_drawer(
+        &conn, &wing, "general", "content", None, "f.txt", 0, "test", 3.0,
+    )
+    .unwrap();
+    palace::store::ensure_wing_registered(&conn, &wing).unwrap();
+
+    let status = project_wing_status(&conn, tmp.path()).unwrap();
+    match status {
+        ProjectWingStatus::Mined { drawers, .. } => assert_eq!(drawers, 1),
+        other => panic!("expected Mined, got {other:?}"),
+    }
+}
 
 #[test]
 fn chunk_text_short_content_produces_one_chunk() {

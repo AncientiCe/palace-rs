@@ -167,6 +167,9 @@ pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args:
     match name {
         "palace_status" => tool_status(conn, config),
         "palace_list_wings" => tool_list_wings(conn),
+        "palace_create_wing" => tool_create_wing(conn, args),
+        "palace_project_status" => tool_project_status(conn, args),
+        "palace_mine" => tool_mine(config, args),
         "palace_list_rooms" => tool_list_rooms(conn, args),
         "palace_get_taxonomy" => tool_get_taxonomy(conn),
         "palace_get_aaak_spec" => json!({"aaak_spec": AAAK_SPEC}),
@@ -478,7 +481,165 @@ fn tool_conflicts(conn: &Connection, args: &Value) -> Value {
 }
 
 fn tool_list_wings(conn: &Connection) -> Value {
-    json!({"wings": wing_counts(conn).unwrap_or_default()})
+    match crate::store::list_wings_registry(conn) {
+        Ok(wings) => json!({"wings": wings}),
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+/// Declare a wing in the registry. Used to create a topic wing for non-repo
+/// work (e.g. sales) or to pre-declare a project wing before mining.
+fn tool_create_wing(conn: &Connection, args: &Value) -> Value {
+    let raw_name = match str_arg(args, "name") {
+        Some(n) => n,
+        None => return json!({"success": false, "error": "name is required"}),
+    };
+    let name = crate::config::normalize_wing_name(&raw_name);
+    if name.is_empty() {
+        return json!({"success": false, "error": "name normalizes to an empty wing"});
+    }
+    let kind = str_arg(args, "kind").unwrap_or_else(|| "topic".to_string());
+    if kind != "topic" && kind != "project" {
+        return json!({"success": false, "error": "kind must be 'topic' or 'project'"});
+    }
+    let description = str_arg(args, "description").unwrap_or_default();
+    let project_path = str_arg(args, "project_path");
+
+    match crate::store::upsert_wing(conn, &name, &kind, &description, project_path.as_deref()) {
+        Ok(()) => match crate::store::get_wing(conn, &name) {
+            Ok(Some(record)) => json!({"success": true, "wing": record}),
+            Ok(None) => json!({"success": true, "wing": {"name": name, "kind": kind}}),
+            Err(e) => json!({"success": false, "error": e.to_string()}),
+        },
+        Err(e) => json!({"success": false, "error": e.to_string()}),
+    }
+}
+
+/// Report whether the current project/topic is known to the palace, with a
+/// recommendation the agent can act on (mine the repo, or create a topic wing).
+fn tool_project_status(conn: &Connection, args: &Value) -> Value {
+    use crate::miner::ProjectWingStatus;
+    let project_path = match str_arg(args, "project_path") {
+        Some(p) => p,
+        None => return json!({"error": "project_path is required"}),
+    };
+    let wing_override = str_arg(args, "wing");
+    let path = std::path::Path::new(&project_path);
+
+    let status = match crate::miner::project_wing_status(conn, path) {
+        Ok(s) => s,
+        Err(e) => return json!({"error": e.to_string()}),
+    };
+
+    // If the caller named a specific wing and the path lookup is Unknown,
+    // report on that named wing instead (e.g. a non-repo topic wing).
+    let status = match (&status, &wing_override) {
+        (
+            ProjectWingStatus::Unknown {
+                has_palace_yaml, ..
+            },
+            Some(w),
+        ) => match crate::store::get_wing(conn, w) {
+            Ok(Some(r)) if r.last_mined_at.is_some() || r.drawer_count > 0 => {
+                ProjectWingStatus::Mined {
+                    wing: r.name,
+                    drawers: r.drawer_count,
+                    last_mined_at: r.last_mined_at,
+                }
+            }
+            Ok(Some(r)) => ProjectWingStatus::RegisteredNotMined {
+                wing: r.name,
+                drawers: r.drawer_count,
+            },
+            _ => ProjectWingStatus::Unknown {
+                suggested_wing: w.clone(),
+                has_palace_yaml: *has_palace_yaml,
+            },
+        },
+        _ => status,
+    };
+
+    let recommendation = match &status {
+        ProjectWingStatus::Mined { .. } => "ready — memories are available for this wing",
+        ProjectWingStatus::RegisteredNotMined { .. } => {
+            "registered but empty — if this is a code repo, ask the user whether to mine it with palace_mine (mining implicitly initialises it)"
+        }
+        ProjectWingStatus::Unknown {
+            has_palace_yaml, ..
+        } => {
+            if *has_palace_yaml {
+                "not mined — ask the user whether to mine this repo with palace_mine (mining implicitly initialises it)"
+            } else {
+                "unknown — mining is for code repos only: if this is a repo, ask the user to mine it with palace_mine (which implicitly initialises it); if it is a non-repo topic or chat, offer to create a topic wing with palace_create_wing"
+            }
+        }
+    };
+
+    let mut value = serde_json::to_value(&status).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("project_path".to_string(), json!(project_path));
+        obj.insert("recommendation".to_string(), json!(recommendation));
+    }
+    value
+}
+
+/// Mine a project directory into the palace on demand. Opens its own
+/// connection because the shared MCP connection is immutable and the miner
+/// needs a mutable handle. Auto-initialises `palace.yaml` for first-time repos.
+fn tool_mine(config: &PalaceConfig, args: &Value) -> Value {
+    let project_path = match str_arg(args, "project_path") {
+        Some(p) => p,
+        None => return json!({"success": false, "error": "project_path is required"}),
+    };
+    let dir = std::path::Path::new(&project_path);
+    if !dir.is_dir() {
+        return json!({"success": false, "error": format!("not a directory: {project_path}")});
+    }
+    let wing = str_arg(args, "wing");
+    let limit = int_arg(args, "limit").unwrap_or(0).max(0) as usize;
+    let dry_run = bool_arg(args, "dry_run");
+
+    // Auto-init palace.yaml for first-time projects so they can be mined without
+    // a separate `palace init` step. Skipped on dry runs (which must not write).
+    if !dir.join("palace.yaml").exists() && !dry_run {
+        let rooms = crate::room_detector::detect_rooms_from_folders(dir);
+        let project_name = wing
+            .clone()
+            .unwrap_or_else(|| crate::miner::wing_slug_from_dir(dir));
+        if let Err(e) = crate::room_detector::save_config(dir, &project_name, &rooms) {
+            return json!({"success": false, "error": format!("auto-init failed: {e}")});
+        }
+    }
+
+    let mut conn = match crate::db::open(&config.palace_db_path()) {
+        Ok(c) => c,
+        Err(e) => return json!({"success": false, "error": e.to_string()}),
+    };
+
+    match crate::miner::mine(
+        &mut conn,
+        dir,
+        wing.as_deref(),
+        "palace-mcp",
+        limit,
+        dry_run,
+        true,
+        &[],
+        true,
+    ) {
+        Ok(()) => {
+            let status = crate::miner::project_wing_status(&conn, dir)
+                .ok()
+                .and_then(|s| serde_json::to_value(s).ok());
+            json!({
+                "success": true,
+                "project_path": project_path,
+                "dry_run": dry_run,
+                "status": status,
+            })
+        }
+        Err(e) => json!({"success": false, "error": e.to_string()}),
+    }
 }
 
 fn tool_list_rooms(conn: &Connection, args: &Value) -> Value {
@@ -585,7 +746,10 @@ fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         &added_by,
         None,
     ) {
-        Ok(true) => json!({"success": true, "drawer_id": drawer_id, "wing": wing, "room": room}),
+        Ok(true) => {
+            let _ = crate::store::ensure_wing_registered(conn, &wing);
+            json!({"success": true, "drawer_id": drawer_id, "wing": wing, "room": room})
+        }
         Ok(false) => json!({"success": false, "reason": "already exists"}),
         Err(e) => json!({"success": false, "error": e.to_string()}),
     }
@@ -1270,13 +1434,16 @@ fn tool_remember(conn: &Connection, args: &Value) -> Value {
         "mcp",
         5.0,
     ) {
-        Ok((inserted, id)) => json!({
-            "success": true,
-            "inserted": inserted,
-            "id": id,
-            "wing": wing,
-            "room": room,
-        }),
+        Ok((inserted, id)) => {
+            let _ = crate::store::ensure_wing_registered(conn, &wing);
+            json!({
+                "success": true,
+                "inserted": inserted,
+                "id": id,
+                "wing": wing,
+                "room": room,
+            })
+        }
         Err(e) => json!({"error": e.to_string()}),
     }
 }
@@ -1658,8 +1825,48 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_list_wings",
-            "description": "List all wings with drawer counts",
+            "description": "List all registered wings with their kind (project/topic), description, project path, last mined time, and drawer counts.",
             "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "palace_project_status",
+            "description": "Check whether the current project or topic is known to the palace. Returns a state (mined / registered_not_mined / unknown) plus a recommendation. Call this when entering a workspace; if it is unmined, ask the user before calling palace_mine, and offer palace_create_wing for non-repo topics.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string", "description": "Absolute path to the project/workspace directory"},
+                    "wing": {"type": "string", "description": "Optional explicit wing name to check instead of deriving one from the path"}
+                },
+                "required": ["project_path"]
+            }
+        },
+        {
+            "name": "palace_mine",
+            "description": "Mine a CODE REPOSITORY directory into the palace (only after the user agrees). Repos only — chats or non-repo topics have no folder to mine, use palace_create_wing for those. Accepting this implicitly initialises palace.yaml for first-time repos and then ingests files into the project's wing in one step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string", "description": "Absolute path to the project directory to mine"},
+                    "wing": {"type": "string", "description": "Override the wing name (defaults to palace.yaml or the directory slug)"},
+                    "limit": {"type": "integer", "description": "Max files to process (0 = no limit)"},
+                    "dry_run": {"type": "boolean", "description": "Report what would be mined without writing"}
+                },
+                "required": ["project_path"]
+            }
+        },
+        {
+            "name": "palace_create_wing",
+            "description": "Declare a wing in the registry. Use kind='topic' for non-repo work (e.g. sales topics) so memories have a dedicated area, or kind='project' to pre-declare a repo wing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Wing name (will be normalised to a slug)"},
+                    "kind": {"type": "string", "enum": ["topic", "project"], "description": "Wing kind (default: topic)"},
+                    "description": {"type": "string", "description": "What this wing is for (optional)"},
+                    "project_path": {"type": "string", "description": "Canonical path for project wings (optional)"}
+                },
+                "required": ["name"]
+            }
         },
         {
             "name": "palace_list_rooms",
