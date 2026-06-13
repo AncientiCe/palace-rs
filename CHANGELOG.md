@@ -4,6 +4,36 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [0.6.1] - 2026-06-13
+
+### Removed
+
+- **Dead `llm` module and `--no-llm` flag** — the unused local LLM refinement
+  scaffolding (`src/llm.rs`), its `pub mod llm;` export, the empty `llm` Cargo
+  feature, and the `palace init --no-llm` flag have been removed. Nothing in the
+  default path used them.
+
+### Fixed
+
+- **No more panic on an invalid built-in entity pattern** — `compile_regex` in
+  the entity detector no longer `panic!`s if a built-in regex fails to compile;
+  it logs to stderr and falls back to a never-matching pattern so detection
+  degrades gracefully instead of crashing. Covered by new tests that verify the
+  built-in patterns compile and the fallback behaves.
+
+### Changed
+
+- **Crate metadata** — removed the broken `docs.rs/palace-rs` documentation link
+  (the crate is not published there) and pointed `homepage` at
+  `https://palacememory.com`.
+- **Docs** — corrected stale `MEMPALACE_*` / `mempalace.yaml` migration claims in
+  the README (those names were removed in 0.3.0) and linked `palacememory.com`
+  for remote mode.
+- **CI/release** — the install smoke matrix now targets `aarch64-apple-darwin`
+  to match the actual macOS runner architecture, and the release workflow runs an
+  `install-smoke` job that downloads the freshly published asset on macOS and
+  Linux and verifies an end-to-end install.
+
 ## [0.6.0] - 2026-06-09
 
 ### Added
