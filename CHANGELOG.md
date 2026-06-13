@@ -4,6 +4,14 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Fixed
+
+- **Docs** — updated remaining contributor, mission, and Claude notes references
+  from the old `mempalace-rs` / `mempalace mcp` names to `palace-rs` /
+  `palace mcp`.
+
 ## [0.7.0] - 2026-06-13
 
 ### Added
