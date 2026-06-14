@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve `mempalace-rs`.
+Thanks for helping improve `palace-rs`.
 
 Before opening a pull request:
 

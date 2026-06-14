@@ -1,6 +1,6 @@
 # Claude Notes
 
-Use `mempalace mcp` to expose this repository as an MCP server.
+Use `palace mcp` to expose this repository as an MCP server.
 
 Development commands:
 
