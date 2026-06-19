@@ -6,6 +6,8 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-19
+
 ### Added
 
 - **First-class protocol tools** — the nine memory-protocol-critical MCP tools
