@@ -1752,8 +1752,49 @@ fn tool_names() -> Vec<String> {
 
 // ── Tool schema list ──────────────────────────────────────────────────────
 
+/// Protocol-critical tools pinned first-class (loaded into context at session
+/// start) via the Anthropic `alwaysLoad` tool-meta hint, so the mandatory Palace
+/// Memory Protocol does not depend on Claude Code's ToolSearch deferral. These are
+/// exactly the three-hard-trigger tools: SESSION START, BEFORE ANSWERING, AFTER WORK.
+/// Requires Claude Code >= 2.1.121. All other tools remain deferrable.
+const ALWAYS_LOAD_TOOLS: &[&str] = &[
+    // SESSION START
+    "palace_status",
+    "palace_session_context",
+    "palace_diary_search",
+    // PROJECT CHECK
+    "palace_project_status",
+    // BEFORE ANSWERING
+    "palace_search",
+    "palace_kg_query",
+    "palace_preference_search",
+    // AFTER WORK
+    "palace_diary_write",
+    "palace_kg_add",
+];
+
+/// Stamp `_meta.anthropic/alwaysLoad = true` onto each protocol-critical tool so
+/// clients that honor the hint keep them resident instead of deferring behind
+/// tool search. Tools not in [`ALWAYS_LOAD_TOOLS`] are left untouched.
+fn pin_protocol_tools(tools: &mut Value) {
+    let Some(arr) = tools.as_array_mut() else {
+        return;
+    };
+    for tool in arr {
+        let is_protocol = tool
+            .get("name")
+            .and_then(|n| n.as_str())
+            .is_some_and(|name| ALWAYS_LOAD_TOOLS.contains(&name));
+        if is_protocol {
+            if let Some(obj) = tool.as_object_mut() {
+                obj.insert("_meta".to_string(), json!({ "anthropic/alwaysLoad": true }));
+            }
+        }
+    }
+}
+
 fn tool_list() -> Value {
-    json!([
+    let mut tools = json!([
         {
             "name": "palace_status",
             "description": "Palace overview — total drawers, wing and room counts",
@@ -2255,7 +2296,9 @@ fn tool_list() -> Value {
                 "required": ["older_than_days"]
             }
         }
-    ])
+    ]);
+    pin_protocol_tools(&mut tools);
+    tools
 }
 
 // ── Argument helpers ──────────────────────────────────────────────────────
@@ -2311,4 +2354,51 @@ fn float_arg(args: &Value, key: &str) -> Option<f64> {
 
 fn compact_text(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_tools_are_pinned_always_load() {
+        let tools = tool_list();
+        let arr = tools.as_array().expect("tool_list returns an array");
+
+        for tool in arr {
+            let name = tool.get("name").and_then(|n| n.as_str()).unwrap();
+            let meta = tool
+                .get("_meta")
+                .and_then(|m| m.get("anthropic/alwaysLoad"));
+            if ALWAYS_LOAD_TOOLS.contains(&name) {
+                assert_eq!(
+                    meta.and_then(|v| v.as_bool()),
+                    Some(true),
+                    "protocol tool {name} must be pinned alwaysLoad"
+                );
+            } else {
+                assert!(
+                    meta.is_none(),
+                    "non-protocol tool {name} must not carry alwaysLoad meta"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_always_load_tool_exists_in_tool_list() {
+        let tools = tool_list();
+        let names: Vec<&str> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        for pinned in ALWAYS_LOAD_TOOLS {
+            assert!(
+                names.contains(pinned),
+                "pinned tool {pinned} is not present in tool_list"
+            );
+        }
+    }
 }

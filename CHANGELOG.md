@@ -6,6 +6,19 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Added
+
+- **First-class protocol tools** — the nine memory-protocol-critical MCP tools
+  (`palace_status`, `palace_session_context`, `palace_diary_search`,
+  `palace_project_status`, `palace_search`, `palace_kg_query`,
+  `palace_preference_search`, `palace_diary_write`, `palace_kg_add`) now emit
+  `_meta."anthropic/alwaysLoad" = true` in `tools/list`. Clients that honor the
+  hint (Claude Code >= 2.1.121) keep these resident at session start instead of
+  deferring them behind tool search, so the mandatory three-trigger protocol
+  (SESSION START / BEFORE ANSWERING / AFTER WORK) no longer depends on the agent
+  remembering to load the tools first. All other tools remain deferrable to keep
+  standing context cost low.
+
 ### Fixed
 
 - **Docs** — updated remaining contributor, mission, and Claude notes references
