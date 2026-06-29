@@ -1130,7 +1130,7 @@ fn cursor_hooks() -> &'static [CursorHook] {
             event: "postToolUse",
             cli_event: "post-tool-use",
             script_stem: "palace-post-tool-use",
-            matcher: Some("Grep|Read"),
+            matcher: Some("Grep|Read|Glob"),
             loop_limit: None,
         },
         CursorHook {

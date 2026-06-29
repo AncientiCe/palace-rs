@@ -355,3 +355,38 @@ fn compact(text: &str, max: usize) -> String {
     let truncated: String = collapsed.chars().take(max).collect();
     format!("{truncated}…")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn q(tool_input: Value) -> Option<String> {
+        investigation_query(&json!({ "tool_input": tool_input }))
+    }
+
+    #[test]
+    fn investigation_query_extracts_each_investigation_tool_field() {
+        assert_eq!(
+            q(json!({"pattern": "retry loop"})).as_deref(),
+            Some("retry loop")
+        ); // Grep/Glob
+        assert_eq!(q(json!({"command": "rg dlq"})).as_deref(), Some("rg dlq")); // Codex/Bash
+                                                                                // Regression: Claude's Read passes `file_path`. The installed matcher
+                                                                                // fires the hook for Read, so we MUST extract it or recall stays silent.
+        assert_eq!(
+            q(json!({"file_path": "/proj/src/dlq_consumer.rs"})).as_deref(),
+            Some("/proj/src/dlq_consumer.rs")
+        );
+    }
+
+    #[test]
+    fn investigation_query_silent_for_non_investigation_tools() {
+        // No recognised field (e.g. a Write with only `content`) → no recall.
+        assert_eq!(q(json!({"content": "hello"})), None);
+        // Too-short query is not worth a search.
+        assert_eq!(q(json!({"pattern": "x"})), None);
+        // Missing tool_input entirely.
+        assert_eq!(investigation_query(&json!({})), None);
+    }
+}
