@@ -225,6 +225,7 @@ fn stop_silent_on_repeat_loop() {
 #[test]
 fn session_start_emits_session_id_env_and_protocol() {
     let raw = session_start_response(
+        None,
         &json!({"session_id": "abc-123", "composer_mode": "agent"}),
         HookClient::Cursor,
     )
@@ -240,8 +241,8 @@ fn session_start_emits_session_id_env_and_protocol() {
 
 #[test]
 fn session_start_claude_dialect_uses_hook_specific_output() {
-    let raw =
-        session_start_response(&json!({"session_id": "abc-123"}), HookClient::Claude).unwrap();
+    let raw = session_start_response(None, &json!({"session_id": "abc-123"}), HookClient::Claude)
+        .unwrap();
     let out: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart");
     let ctx = out["hookSpecificOutput"]["additionalContext"]
@@ -255,4 +256,79 @@ fn session_start_claude_dialect_uses_hook_specific_output() {
         out.get("additional_context").is_none() && out.get("env").is_none(),
         "claude-style output must not use cursor keys: {out}"
     );
+}
+
+#[test]
+fn session_start_injects_recent_diary_for_project() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    // A prior agent recorded a project-scoped diary entry.
+    palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_write",
+        &json!({
+            "agent_name": "claude",
+            "entry": "Investigated the payment_refunded DLQ and found the retry loop bug.",
+            "project_path": "/proj",
+            "topic": "dlq-investigation"
+        }),
+    );
+
+    let raw = session_start_response(
+        Some(&conn),
+        &json!({"session_id": "abc-123", "cwd": "/proj"}),
+        HookClient::Claude,
+    )
+    .unwrap();
+    let out: Value = serde_json::from_str(&raw).unwrap();
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        ctx.contains("Palace Memory Protocol"),
+        "must still inject the protocol: {out}"
+    );
+    assert!(
+        ctx.contains("payment_refunded DLQ"),
+        "session start must inject real recall of prior diary work: {out}"
+    );
+}
+
+#[test]
+fn session_start_fails_open_with_empty_db() {
+    let conn = test_db();
+    let raw = session_start_response(
+        Some(&conn),
+        &json!({"session_id": "abc-123", "cwd": "/proj"}),
+        HookClient::Claude,
+    )
+    .unwrap();
+    let out: Value = serde_json::from_str(&raw).unwrap();
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        ctx.contains("Palace Memory Protocol"),
+        "empty palace must still inject the protocol: {out}"
+    );
+    assert!(
+        !ctx.contains("Recalled from Palace memory"),
+        "nothing to recall → no recall block: {out}"
+    );
+}
+
+#[test]
+fn session_start_no_recall_without_db() {
+    // No DB handle at all (e.g. palace missing) → protocol only, no panic.
+    let raw = session_start_response(
+        None,
+        &json!({"session_id": "abc-123", "cwd": "/proj"}),
+        HookClient::Cursor,
+    )
+    .unwrap();
+    let out: Value = serde_json::from_str(&raw).unwrap();
+    let ctx = out["additional_context"].as_str().unwrap_or("");
+    assert!(ctx.contains("Palace Memory Protocol"), "{out}");
+    assert!(!ctx.contains("Recalled from Palace memory"), "{out}");
 }

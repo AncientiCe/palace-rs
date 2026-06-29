@@ -118,8 +118,9 @@ impl Layer1 {
                     .unwrap_or_default();
 
                 let snippet = drawer.content.trim().replace('\n', " ");
-                let snippet = if snippet.len() > 200 {
-                    format!("{}...", &snippet[..197])
+                let snippet = if snippet.chars().count() > 200 {
+                    let truncated: String = snippet.chars().take(197).collect();
+                    format!("{truncated}...")
                 } else {
                     snippet
                 };
@@ -184,8 +185,9 @@ impl Layer2 {
                 .unwrap_or_default();
 
             let snippet = drawer.content.trim().replace('\n', " ");
-            let snippet = if snippet.len() > 300 {
-                format!("{}...", &snippet[..297])
+            let snippet = if snippet.chars().count() > 300 {
+                let truncated: String = snippet.chars().take(297).collect();
+                format!("{truncated}...")
             } else {
                 snippet
             };
@@ -236,8 +238,9 @@ impl Layer3 {
         let mut lines = vec![format!("## L3 — SEARCH RESULTS for \"{query}\"")];
         for (i, r) in results.iter().enumerate() {
             let snippet = r.drawer.text.trim().replace('\n', " ");
-            let snippet = if snippet.len() > 300 {
-                format!("{}...", &snippet[..297])
+            let snippet = if snippet.chars().count() > 300 {
+                let truncated: String = snippet.chars().take(297).collect();
+                format!("{truncated}...")
             } else {
                 snippet
             };
@@ -351,5 +354,37 @@ impl MemoryStack {
             },
             "total_drawers": total,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: L1 truncation used to slice `&snippet[..197]` on a byte
+    /// boundary, panicking when the 197th byte fell mid-UTF-8 char (e.g. `─`).
+    /// `wake_up`/`generate` must handle multibyte content without panicking.
+    #[test]
+    fn layer1_generate_handles_multibyte_content() {
+        let conn = crate::db::open_in_memory().unwrap();
+        // Box-drawing chars (3 bytes each) make byte length far exceed char
+        // count, forcing the truncation branch onto a non-char boundary.
+        let content = "─".repeat(300);
+        crate::store::add_drawer(
+            &conn,
+            "wing_test",
+            "room",
+            &content,
+            None,
+            "src.md",
+            0,
+            "test",
+            5.0,
+        )
+        .unwrap();
+
+        let l1 = Layer1::new(Path::new(":memory:"), None);
+        let story = l1.generate(&conn); // must not panic on the multibyte slice
+        assert!(story.contains("L1"), "expected L1 story output: {story}");
     }
 }

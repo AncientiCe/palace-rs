@@ -1258,7 +1258,7 @@ fn hit_project_path(conn: &Connection, hit: &Value) -> Option<String> {
 ///
 /// `wing = None` searches every agent's diary (cross-agent). When `project` is
 /// set, only entries for that project are returned.
-fn recent_diary_drawers(
+pub(crate) fn recent_diary_drawers(
     conn: &Connection,
     wing: Option<&str>,
     project: Option<&str>,

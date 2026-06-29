@@ -58,14 +58,29 @@ const SAVE_NUDGE: &str = "Before finishing: you investigated using Palace memory
     investigated and decided, and palace_kg_add for any durable facts or decisions (use \
     palace_kg_invalidate first if a fact changed). Then stop.";
 
-/// Build the session-start response: inject the protocol. Cursor additionally
-/// exports `PALACE_SESSION_ID` so later hooks can correlate the session;
-/// Claude/Codex use the `hookSpecificOutput` shape instead.
-pub fn session_start_response(input: &Value, client: HookClient) -> Result<String> {
-    let context = format!(
+/// Build the session-start response: inject the protocol AND — when a palace DB
+/// is available — real warm-start recall (recent diary + project knowledge for
+/// the session's cwd) so memory is in context deterministically, without the
+/// agent having to call any palace tool. Cursor additionally exports
+/// `PALACE_SESSION_ID` so later hooks can correlate the session; Claude/Codex
+/// use the `hookSpecificOutput` shape instead. Fail-open: a missing/empty DB
+/// just yields the protocol text alone.
+pub fn session_start_response(
+    conn: Option<&Connection>,
+    input: &Value,
+    client: HookClient,
+) -> Result<String> {
+    let mut context = format!(
         "# Palace Memory Protocol — MANDATORY\n\n{}",
         crate::install::RULE_BODY
     );
+    if let Some(conn) = conn {
+        let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
+        if let Some(recall) = session_start_recall(conn, cwd) {
+            context.push_str("\n\n");
+            context.push_str(&recall);
+        }
+    }
     let response = if client.claude_style() {
         json!({
             "hookSpecificOutput": {
@@ -139,6 +154,82 @@ fn recall_context(conn: &Connection, input: &Value) -> Option<String> {
     ))
 }
 
+/// How many recent diary entries / project drawers to surface at session start.
+const SESSION_START_RECALL_LIMIT: usize = 3;
+/// How far back the session-start diary lookback reaches (days → hours).
+const SESSION_START_DIARY_HOURS: i64 = 24 * 30;
+
+/// Build the warm-start recall block injected at session start, or `None` when
+/// there is nothing relevant. Pulls recent diary entries for the session's
+/// project (any agent — cross-agent continuity) plus the top drawers of the
+/// wing the cwd maps to. Mirrors `palace_session_context` so the agent sees the
+/// same warm-start context without having to call the tool.
+fn session_start_recall(conn: &Connection, cwd: &str) -> Option<String> {
+    if cwd.trim().is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(cwd);
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let project = canonical.to_string_lossy().to_string();
+    let wing = crate::miner::wing_slug_from_dir(&canonical);
+
+    let mut sections: Vec<String> = Vec::new();
+
+    // Recent diary for this project, any agent — the high-value warm-start signal.
+    let diary = crate::mcp_server::recent_diary_drawers(
+        conn,
+        None,
+        Some(&project),
+        SESSION_START_DIARY_HOURS,
+        SESSION_START_RECALL_LIMIT,
+    );
+    if !diary.is_empty() {
+        let mut lines =
+            vec!["Recent diary for this project (what prior agents did here):".to_string()];
+        for d in &diary {
+            let topic = d
+                .metadata
+                .get("topic")
+                .and_then(Value::as_str)
+                .unwrap_or("general");
+            let date = d.filed_at.get(..10).unwrap_or(&d.filed_at);
+            lines.push(format!("- [{date}] ({topic}) {}", compact(&d.content, 220)));
+        }
+        sections.push(lines.join("\n"));
+    }
+
+    // Top drawers of the wing this cwd maps to (project knowledge, if mined).
+    let project_drawers = crate::store::list_drawers(
+        conn,
+        &crate::store::DrawerFilter {
+            wing: Some(wing.clone()),
+            room: None,
+        },
+        SESSION_START_RECALL_LIMIT,
+    )
+    .unwrap_or_default();
+    let project_drawers: Vec<_> = project_drawers
+        .into_iter()
+        .filter(|d| d.room != "diary")
+        .collect();
+    if !project_drawers.is_empty() {
+        let mut lines = vec![format!("Project knowledge (wing `{wing}`):")];
+        for d in &project_drawers {
+            lines.push(format!("- [{}] {}", d.room, compact(&d.content, 200)));
+        }
+        sections.push(lines.join("\n"));
+    }
+
+    if sections.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "# Recalled from Palace memory (this project — consult before re-investigating or \
+         re-deciding; a prior agent may have already done this)\n{}",
+        sections.join("\n\n")
+    ))
+}
+
 /// Build the stop response: ask the agent to record its work when the session
 /// engaged Palace but saved nothing; otherwise `{}` (no auto-continue).
 pub fn stop_response(conn: &Connection, input: &Value, client: HookClient) -> Value {
@@ -193,7 +284,9 @@ pub fn run(event: &str, client: HookClient) -> Result<()> {
 
     let response = match event {
         "session-start" | "sessionStart" | "SessionStart" => {
-            session_start_response(&input, client)?
+            // Open the DB for warm-start recall; fail-open to protocol-only.
+            let conn = open_palace();
+            session_start_response(conn.as_ref(), &input, client)?
         }
         "post-tool-use" | "postToolUse" | "PostToolUse" => {
             serde_json::to_string(&with_db(|conn| {
@@ -218,12 +311,20 @@ fn with_db<F>(f: F) -> Value
 where
     F: FnOnce(&Connection) -> Value,
 {
+    match open_palace() {
+        Some(conn) => f(&conn),
+        None => json!({}),
+    }
+}
+
+/// Open the palace DB, or `None` if it cannot be opened (fail-open).
+fn open_palace() -> Option<Connection> {
     let config = PalaceConfig::new();
     match crate::db::open(&config.palace_db_path()) {
-        Ok(conn) => f(&conn),
+        Ok(conn) => Some(conn),
         Err(err) => {
             tracing::warn!(error = %err, "palace hook: could not open palace, skipping");
-            json!({})
+            None
         }
     }
 }
@@ -233,10 +334,11 @@ where
 fn investigation_query(input: &Value) -> Option<String> {
     let tool_input = input.get("tool_input");
     let candidate = tool_input
-        .and_then(|ti| ti.get("pattern").and_then(Value::as_str)) // Grep
+        .and_then(|ti| ti.get("pattern").and_then(Value::as_str)) // Grep / Glob
         .or_else(|| tool_input.and_then(|ti| ti.get("query").and_then(Value::as_str)))
-        .or_else(|| tool_input.and_then(|ti| ti.get("command").and_then(Value::as_str))) // Shell
-        .or_else(|| tool_input.and_then(|ti| ti.get("path").and_then(Value::as_str))) // Read
+        .or_else(|| tool_input.and_then(|ti| ti.get("command").and_then(Value::as_str))) // Codex/Bash shell
+        .or_else(|| tool_input.and_then(|ti| ti.get("file_path").and_then(Value::as_str))) // Claude Read/Edit
+        .or_else(|| tool_input.and_then(|ti| ti.get("path").and_then(Value::as_str))) // Grep/Glob path scope
         .or_else(|| tool_input.and_then(|ti| ti.get("file").and_then(Value::as_str)));
     let text = candidate?.trim();
     if text.len() < 3 {
