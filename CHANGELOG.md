@@ -6,6 +6,30 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Added
+
+- **Ambient warm-start recall at session start** — the `SessionStart` hook now
+  injects real recalled memory alongside the protocol text: recent diary entries
+  for the session's project (cross-agent, so a different agent the next day still
+  benefits) plus the top drawers of the wing the `cwd` maps to. Prior
+  investigations land in context deterministically, without the agent having to
+  call any palace tool. Fail-open: a missing or empty palace yields the protocol
+  text alone. Applies to every client with a `SessionStart` hook (Claude Code,
+  Codex, Cursor).
+
+### Fixed
+
+- **Read recall gap** — `PostToolUse` auto-recall fired for the `Read` tool (it is
+  in the installed matcher) but never surfaced anything, because the query
+  extractor did not read Claude's `file_path` field. Reads now surface relevant
+  prior memory. The Cursor `postToolUse` matcher was also aligned to
+  `Grep|Read|Glob` for parity with Claude.
+- **UTF-8 truncation panic in memory layers** — snippet truncation in the L1/L2/L3
+  layer renderers sliced on a byte index (`&s[..197]` / `&s[..297]`), panicking
+  when a multibyte character (e.g. `─`, `—`) straddled the boundary — reachable
+  via `palace wake-up`, `palace recall`, and `palace search` on real mined
+  content. Truncation is now char-boundary safe.
+
 ## [0.8.0] - 2026-06-19
 
 ### Added
