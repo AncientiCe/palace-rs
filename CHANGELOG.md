@@ -6,6 +6,8 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-29
+
 ### Added
 
 - **Ambient warm-start recall at session start** — the `SessionStart` hook now
