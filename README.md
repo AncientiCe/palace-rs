@@ -32,10 +32,16 @@ user preferences across sessions without running a separate vector database.
   optional folded feedback on the existing `palace_gain` MCP tool.
 - Exposes MCP tools for assistants that support Model Context Protocol.
 - Offers a small Rust library API for embedding memory into other services.
+- Tracks a first-class wings registry (project vs. topic wings) with on-demand
+  project mining and topic-wing creation.
+- Pins the nine protocol-critical MCP tools resident with `alwaysLoad` so the
+  memory protocol doesn't depend on tool-search deferral (Claude Code >= 2.1.121).
+- Injects real recalled memory — recent diary entries plus top drawers for the
+  session's project — directly into `SessionStart`, not just protocol text.
 
 ## Agent Memory Reliability
 
-Version `0.6.0` focuses on the retrieval cases that matter most during coding
+Palace focuses on the retrieval cases that matter most during coding
 work: preferences, project conventions, recent session continuity,
 source-grounded answers, and measurable usefulness in real agent sessions.
 Drawers that look like user preferences or conventions are tagged in metadata
@@ -204,6 +210,7 @@ call the MCP tools when its installed rule tells it to consult memory.
 | `palace search <query>` | Semantic search with similarity scores |
 | `palace wake-up` | Print L0 (identity) + L1 (essential story) context |
 | `palace status` | Palace overview: drawer counts by wing/room |
+| `palace wings` | List registered wings with kind, drawer counts, and last mined time |
 | `palace gain` | Show MCP usage gains, estimated savings, and per-project value |
 | `palace split` | Split Claude Code mega-transcripts by session |
 | `palace repair` | Re-embed any drawers missing vectors |
@@ -298,6 +305,15 @@ clients: Cursor, Codex, Claude Code, and Claude Desktop. It writes both:
   `palace_search`, `palace_preference_search`, `palace_kg_query`, and
   `palace_diary_write`
 
+The nine protocol-critical tools (`palace_status`, `palace_session_context`,
+`palace_diary_search`, `palace_project_status`, `palace_search`,
+`palace_kg_query`, `palace_preference_search`, `palace_diary_write`,
+`palace_kg_add`) are also stamped with `_meta."anthropic/alwaysLoad" = true`.
+Clients that honor the hint (Claude Code >= 2.1.121) keep them resident at
+session start instead of deferring them behind tool search, so the mandatory
+three-trigger protocol doesn't depend on the agent remembering to load tools
+first. All other tools remain deferrable.
+
 ```bash
 palace install
 ```
@@ -390,8 +406,11 @@ endpoint accepts a bare host, a base URL, or a full `/mcp` URL.
 them, so memory use is automatic in **every** project without per-project rule
 edits. The three hooks behave the same everywhere:
 
-- **session start** — injects the protocol (Cursor also exports
-  `PALACE_SESSION_ID`).
+- **session start** — injects the protocol text plus real recalled memory:
+  recent diary entries for the session's project (cross-agent, so another
+  agent's prior work is visible the next day) and the top drawers of the wing
+  the `cwd` maps to. Fails open — a missing or empty palace yields the
+  protocol text alone. Cursor also exports `PALACE_SESSION_ID`.
 - **post tool use** — auto-recalls relevant memory while the agent
   investigates, so a prior agent's decisions surface even before the agent
   thinks to search.
@@ -500,14 +519,24 @@ graph operations, graph tunnels, hook acknowledgements, and agent diaries:
 | `palace_verify` | Verify MCP tools, database health, embeddings, and model cache |
 | `palace_recall_check` | Run project-memory probes and report expected-memory hits |
 | `palace_conflicts` | Surface likely stale or contradictory KG facts |
-| `palace_list_wings` | List wings with drawer counts |
+| `palace_list_wings` | List registered wings: kind, description, project path, last mined time, drawer counts |
+| `palace_project_status` | Check whether the current project/topic is mined, registered but unmined, or unknown |
+| `palace_mine` | Mine a code repository on demand, after the user agrees |
+| `palace_create_wing` | Declare a topic or project wing in the registry |
 | `palace_list_rooms` | List rooms within a wing |
 | `palace_get_taxonomy` | Full wing → room → count tree |
 | `palace_get_aaak_spec` | AAAK compressed memory dialect spec |
 | `palace_search` | Semantic search over drawers |
+| `palace_preference_search` | Dedicated recall pass for preference-shaped queries |
 | `palace_check_duplicate` | Check if content already exists |
 | `palace_add_drawer` | File content into the palace |
+| `palace_remember` | Shortcut for `palace_add_drawer` with importance=5 |
+| `palace_get_drawer` | Get a drawer by ID |
+| `palace_list_drawers` | List drawers with optional wing/room filters |
+| `palace_update_drawer` | Update drawer content and refresh metadata |
 | `palace_delete_drawer` | Remove a drawer by ID |
+| `palace_forget` | Delete a drawer by ID (outdated/incorrect memory) |
+| `palace_explain` | Full provenance for a drawer: who filed it, when, from where, importance |
 | `palace_kg_query` | Query entity relationships |
 | `palace_kg_add` | Add a fact (subject → predicate → object) |
 | `palace_kg_invalidate` | Mark a fact as no longer true |
@@ -516,11 +545,20 @@ graph operations, graph tunnels, hook acknowledgements, and agent diaries:
 | `palace_seed_adoption_facts` | Seed durable KG facts for four-client adoption |
 | `palace_traverse` | BFS graph walk from a room |
 | `palace_find_tunnels` | Rooms bridging two wings |
+| `palace_create_tunnel` | Create a persisted tunnel between two wing/room pairs |
+| `palace_list_tunnels` | List persisted tunnels |
+| `palace_delete_tunnel` | Delete a persisted tunnel |
+| `palace_follow_tunnels` | Follow persisted tunnels from a wing/room pair |
 | `palace_graph_stats` | Palace graph summary |
 | `palace_diary_write` | Write a diary entry in AAAK format |
 | `palace_diary_read` | Read recent diary entries |
-| `palace_diary_search` | Search within an agent's diary entries |
+| `palace_diary_search` | Search within an agent's diary entries (or `all_agents: true` for cross-agent) |
 | `palace_session_context` | Get recent diary context for agent warm-start |
+| `palace_list_agents` | List agent diary wings |
+| `palace_export` / `palace_import` | Export/import palace data |
+| `palace_upgrade_embeddings` | Re-embed drawers; refresh preference-span vectors |
+| `palace_prune` | Prune stale or low-value drawers |
+| `palace_hook_settings` | Return hook settings |
 
 ---
 
