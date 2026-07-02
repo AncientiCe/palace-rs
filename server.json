@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ancientice/palace-rs",
+  "title": "Palace",
+  "description": "Local-first memory for coding agents — MCP server, single SQLite file, local embeddings",
+  "version": "0.0.0",
+  "repository": {
+    "url": "https://github.com/AncientiCe/palace-rs",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/AncientiCe/palace-rs/releases/download/v0.0.0/palace-0.0.0.mcpb",
+      "version": "0.0.0",
+      "fileSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

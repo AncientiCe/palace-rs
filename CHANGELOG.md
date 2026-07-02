@@ -6,6 +6,21 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-02
+
+### Added
+
+- **MCP Bundle (`.mcpb`) release artifact** — the release workflow now assembles a
+  single `palace-<version>.mcpb` bundle containing the Linux x86_64, macOS
+  arm64, and Windows x86_64 binaries plus an MCPB `manifest.json` (binary server
+  type with per-platform overrides). The bundle and its SHA-256 are uploaded as
+  release assets, enabling one-click install in MCPB-aware hosts.
+- **Official MCP registry auto-publish** — a `server.json` (namespace
+  `io.github.ancientice/palace-rs`, MCPB package pointing at the release bundle)
+  is published to `registry.modelcontextprotocol.io` on every tagged release. The
+  release workflow authenticates via GitHub Actions OIDC (no stored secret) and
+  fills in the version, download URL, and bundle hash automatically.
+
 ## [0.9.0] - 2026-06-29
 
 ### Added

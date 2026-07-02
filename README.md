@@ -170,6 +170,14 @@ The installer downloads the matching GitHub Release binary, verifies its SHA-256
 checksum, installs it locally, and registers the MCP server with Cursor, Codex,
 and Claude Code.
 
+### MCP Registry / MCPB bundle
+
+Palace is published to the official [MCP registry](https://registry.modelcontextprotocol.io)
+as `io.github.ancientice/palace-rs`. Registry-aware clients can discover and
+install it directly. Each release also ships a self-contained `palace-<version>.mcpb`
+bundle (Linux x86_64, macOS arm64, Windows x86_64) as a GitHub Release asset for
+one-click install in MCPB-aware hosts such as Claude Desktop.
+
 ### Development Install
 
 ```bash

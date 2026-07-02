@@ -129,6 +129,107 @@ jobs:
             dist/palace-*-${{ matrix.target }}.${{ matrix.archive_ext }}
             dist/palace-${{ matrix.target }}.sha256
 
+      - name: Upload raw binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/palace
+            target/${{ matrix.target }}/release/palace.exe
+          if-no-files-found: ignore
+          retention-days: 1
+
+  # Assemble a single MCP Bundle (.mcpb) containing the linux/macOS/windows
+  # binaries plus a manifest, upload it to the release, and expose its SHA-256 so
+  # the registry publish job can reference it. The .mcpb extension satisfies the
+  # official MCP registry rule that MCPB package URLs must contain "mcp".
+  bundle:
+    name: Build MCPB bundle
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      sha256: ${{ steps.hash.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: artifacts
+
+      - name: Assemble MCPB bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p bundle/server dist
+          cp "artifacts/binary-x86_64-unknown-linux-gnu/palace"  "bundle/server/palace-linux-x86_64"
+          cp "artifacts/binary-aarch64-apple-darwin/palace"      "bundle/server/palace-darwin-arm64"
+          cp "artifacts/binary-x86_64-pc-windows-msvc/palace.exe" "bundle/server/palace-windows-x86_64.exe"
+          chmod +x "bundle/server/palace-linux-x86_64" "bundle/server/palace-darwin-arm64"
+          jq --arg v "$version" '.version = $v' manifest.json > "bundle/manifest.json"
+          ( cd bundle && zip -r -X "../dist/palace-${version}.mcpb" . )
+
+      - name: Compute bundle SHA-256
+        id: hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          file="dist/palace-${version}.mcpb"
+          sha="$(openssl dgst -sha256 "$file" | awk '{print $NF}')"
+          echo "sha256=${sha}" >> "$GITHUB_OUTPUT"
+          echo "${sha}  palace-${version}.mcpb" > "dist/palace-${version}.mcpb.sha256"
+          echo "MCPB SHA-256: ${sha}"
+
+      - name: Upload MCPB to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/palace-*.mcpb
+            dist/palace-*.mcpb.sha256
+
+  # Publish the server metadata to the official MCP registry. Uses GitHub Actions
+  # OIDC to authenticate the io.github.ancientice namespace (no browser, no
+  # stored secret). Runs after the bundle so the .mcpb URL resolves and its
+  # SHA-256 is known.
+  publish-registry:
+    name: Publish to MCP registry
+    needs: bundle
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fill server.json for this release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/palace-${version}.mcpb"
+          sha="${{ needs.bundle.outputs.sha256 }}"
+          jq \
+            --arg v "$version" \
+            --arg url "$url" \
+            --arg sha "$sha" \
+            '.version = $v | .packages[0].version = $v | .packages[0].identifier = $url | .packages[0].fileSha256 = $sha' \
+            server.json > server.tmp
+          mv server.tmp server.json
+          cat server.json
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to MCP registry (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server to MCP registry
+        run: ./mcp-publisher publish
+
   # End-to-end smoke of the published release: the install script must detect
   # the platform, download the real asset, verify its checksum, and install.
   install-smoke:
