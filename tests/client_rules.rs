@@ -20,6 +20,7 @@ fn options(home: &Path, binary_path: &Path, clients: Vec<Client>) -> InstallOpti
         dry_run: false,
         force: false,
         install_rule: true,
+        profile: palace::config::Profile::Coding,
     }
 }
 

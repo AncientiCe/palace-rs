@@ -198,6 +198,9 @@ enum Commands {
         /// Reserved for future overwrite prompts
         #[arg(long)]
         force: bool,
+        /// Usage profile shaping defaults: coding (default), creative, or personal
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Remove the Palace MCP server from local AI clients
     Uninstall {
@@ -340,7 +343,8 @@ pub fn run() -> Result<()> {
             if !lang.is_empty() {
                 println!("  Entity languages: {}", lang.join(","));
             }
-            let rooms = crate::room_detector::detect_rooms_interactive(&dir, yes)?;
+            let rooms =
+                crate::room_detector::detect_rooms_interactive(&dir, yes, config.profile())?;
             let project_name = dir
                 .file_name()
                 .unwrap_or_default()
@@ -624,13 +628,28 @@ pub fn run() -> Result<()> {
             dry_run,
             no_rule,
             force,
+            profile,
         } => {
-            let options = install_options(&client, all, &scope, path, dry_run, force)?;
+            // Resolve the profile: explicit flag > persisted config > default.
+            let profile = match profile {
+                Some(name) => crate::config::Profile::parse(&name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown profile '{name}' (expected: coding, creative, or personal)"
+                    )
+                })?,
+                None => config.profile(),
+            };
+            let mut options = install_options(&client, all, &scope, path, dry_run, force)?;
+            options.profile = profile;
             let options = with_rule_option(options, !no_rule);
             let report = crate::install::install_clients(&options)?;
             let action = if dry_run { "would update" } else { "updated" };
             crate::install::print_install_report(action, &report);
             if !dry_run {
+                // Persist the profile so the MCP server serves matching protocol text.
+                let mut cfg = PalaceConfig::new();
+                cfg.save_profile(profile)?;
+                println!("  Profile: {profile}");
                 println!("  Restart Cursor, Codex, Claude Code, or Claude Desktop to load the MCP server.");
             }
         }

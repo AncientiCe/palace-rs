@@ -11,7 +11,7 @@ use std::time::Instant;
 use tracing::{error, info, warn};
 
 use crate::config::PalaceConfig;
-use crate::dialect::{AAAK_SPEC, PALACE_PROTOCOL};
+use crate::dialect::AAAK_SPEC;
 use crate::knowledge_graph as kg;
 use crate::palace_graph;
 use crate::searcher::search_memories_with_options;
@@ -110,12 +110,29 @@ fn handle_request(
                 .unwrap_or("2024-11-05");
             Some(json!({
                 "protocolVersion": protocol_version,
-                "capabilities": {"tools": {}},
+                "capabilities": {"tools": {}, "prompts": {}},
                 "serverInfo": {"name": "palace", "version": env!("CARGO_PKG_VERSION")},
             }))
         }
         "notifications/initialized" => return None,
         "tools/list" => Some(json!({"tools": tool_list()})),
+        "prompts/list" => Some(json!({"prompts": prompt_list()})),
+        "prompts/get" => {
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            match prompt_get(config, name) {
+                Some(result) => Some(result),
+                None => {
+                    return Some(
+                        serde_json::to_string(&json!({
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {"code": -32602, "message": format!("Unknown prompt: {name}")}
+                        }))
+                        .unwrap(),
+                    )
+                }
+            }
+        }
         "tools/call" => {
             let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or_default();
@@ -212,6 +229,7 @@ pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args:
         "palace_import" => tool_import(conn, args),
         "palace_upgrade_embeddings" => tool_upgrade_embeddings(conn, args),
         "palace_prune" => tool_prune(conn, args),
+        "palace_memory_report" => tool_memory_report(conn, config, args),
         _ => json!({"error": format!("Unknown tool: {name}")}),
     }
 }
@@ -272,7 +290,8 @@ fn tool_status(conn: &Connection, config: &PalaceConfig) -> Value {
         "wings": wings,
         "rooms": rooms,
         "palace_path": config.palace_db_path().to_string_lossy(),
-        "protocol": PALACE_PROTOCOL,
+        "profile": config.profile().as_str(),
+        "protocol": crate::dialect::palace_protocol(config.profile()),
         "aaak_dialect": AAAK_SPEC,
     });
 
@@ -281,6 +300,73 @@ fn tool_status(conn: &Connection, config: &PalaceConfig) -> Value {
     }
 
     response
+}
+
+/// Human-readable inventory of palace memory. Non-developer friendly: shows
+/// the active profile, per-wing/room breakdown, and recent activity — no UI needed.
+fn tool_memory_report(conn: &Connection, config: &PalaceConfig, args: &Value) -> Value {
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let wing_filter = str_arg(args, "wing");
+
+    let total = count_drawers(conn).unwrap_or(0);
+    let all_wings = wing_counts(conn).unwrap_or_default();
+
+    let mut wings_report: Vec<Value> = all_wings
+        .iter()
+        .filter(|(wing, _)| {
+            wing_filter
+                .as_deref()
+                .is_none_or(|only| only == wing.as_str())
+        })
+        .map(|(wing, dcount)| {
+            let rooms = room_counts(conn, Some(wing.as_str()))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(room, c)| json!({"room": room, "drawers": c}))
+                .collect::<Vec<_>>();
+            json!({"wing": wing, "drawers": dcount, "rooms": rooms})
+        })
+        .collect();
+    wings_report.sort_by(|a, b| {
+        b["drawers"]
+            .as_i64()
+            .unwrap_or(0)
+            .cmp(&a["drawers"].as_i64().unwrap_or(0))
+    });
+
+    // Recent diary activity across all diary wings, newest first.
+    let mut recent: Vec<_> = all_wings
+        .keys()
+        .filter(|w| w.starts_with("wing_diary__"))
+        .flat_map(|wing| {
+            let filter = DrawerFilter {
+                wing: Some(wing.clone()),
+                room: Some("diary".to_string()),
+            };
+            crate::store::list_drawers(conn, &filter, 10000).unwrap_or_default()
+        })
+        .collect();
+    recent.sort_by(|a, b| b.filed_at.cmp(&a.filed_at));
+    let recent_activity: Vec<Value> = recent
+        .into_iter()
+        .take(limit)
+        .map(|d| {
+            json!({
+                "topic": d.metadata.get("topic").and_then(|v| v.as_str()).unwrap_or("general"),
+                "timestamp": d.filed_at,
+                "text": compact_text(&d.content, 160),
+            })
+        })
+        .collect();
+
+    json!({
+        "profile": config.profile().as_str(),
+        "total_drawers": total,
+        "wing_count": wings_report.len(),
+        "wings": wings_report,
+        "recent_activity": recent_activity,
+        "palace_path": config.palace_db_path().to_string_lossy(),
+    })
 }
 
 fn tool_gain(conn: &Connection, args: &Value) -> Value {
@@ -602,7 +688,7 @@ fn tool_mine(config: &PalaceConfig, args: &Value) -> Value {
     // Auto-init palace.yaml for first-time projects so they can be mined without
     // a separate `palace init` step. Skipped on dry runs (which must not write).
     if !dir.join("palace.yaml").exists() && !dry_run {
-        let rooms = crate::room_detector::detect_rooms_from_folders(dir);
+        let rooms = crate::room_detector::detect_rooms_from_folders(dir, config.profile());
         let project_name = wing
             .clone()
             .unwrap_or_else(|| crate::miner::wing_slug_from_dir(dir));
@@ -2295,10 +2381,79 @@ fn tool_list() -> Value {
                 },
                 "required": ["older_than_days"]
             }
+        },
+        {
+            "name": "palace_memory_report",
+            "description": "Human-readable overview of what the palace remembers: profile, total drawers, wings and rooms with counts, recent diary topics, and top remembered facts. Use this to inspect memory without a UI — ideal for non-developer users who want to see what's stored.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wing": {"type": "string", "description": "Restrict the report to a single wing (optional)"},
+                    "limit": {"type": "integer", "description": "Max recent diary entries and sample drawers to include (default 10)"}
+                }
+            }
         }
     ]);
     pin_protocol_tools(&mut tools);
     tools
+}
+
+/// Prompts advertised to MCP clients (e.g. Claude Desktop) via `prompts/list`.
+/// These give non-developer users one-click session continuity without hooks.
+fn prompt_list() -> Value {
+    json!([
+        {
+            "name": "continue-session",
+            "description": "Load Palace memory before you start — recent work, decisions, and context.",
+            "arguments": []
+        },
+        {
+            "name": "save-session",
+            "description": "Save what happened this session to Palace memory so it carries over next time.",
+            "arguments": [
+                {"name": "summary", "description": "Optional one-line summary of what to remember", "required": false}
+            ]
+        }
+    ])
+}
+
+/// Resolve a prompt by name into a `prompts/get` result. Wording adapts to the
+/// active profile so the guidance reads naturally for the user's use case.
+fn prompt_get(config: &PalaceConfig, name: &str) -> Option<Value> {
+    let noun = match config.profile() {
+        crate::config::Profile::Coding => "project",
+        crate::config::Profile::Creative => "world or story",
+        crate::config::Profile::Personal => "person or household",
+    };
+    match name {
+        "continue-session" => {
+            let text = format!(
+                "Before doing anything else, load Palace memory for this {noun}:\n\
+                 1. Call palace_status.\n\
+                 2. Call palace_session_context(agent_name) for warm-start context.\n\
+                 3. Call palace_diary_search for recent work.\n\
+                 Then briefly summarise what you found so we can pick up where we left off."
+            );
+            Some(json!({
+                "description": "Load Palace memory for this session",
+                "messages": [{"role": "user", "content": {"type": "text", "text": text}}]
+            }))
+        }
+        "save-session" => {
+            let text = format!(
+                "Save this session to Palace memory for next time:\n\
+                 1. Call palace_diary_write with what happened, what changed, and what matters.\n\
+                 2. Call palace_kg_add for any stable new facts about this {noun}.\n\
+                 3. Use palace_remember (importance=5) for anything critical.\n\
+                 Then confirm what you saved."
+            );
+            Some(json!({
+                "description": "Save this session to Palace memory",
+                "messages": [{"role": "user", "content": {"type": "text", "text": text}}]
+            }))
+        }
+        _ => None,
+    }
 }
 
 // ── Argument helpers ──────────────────────────────────────────────────────
@@ -2400,5 +2555,35 @@ mod tests {
                 "pinned tool {pinned} is not present in tool_list"
             );
         }
+    }
+
+    #[test]
+    fn tool_list_includes_memory_report() {
+        let tools = tool_list();
+        let names: Vec<&str> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"palace_memory_report"));
+    }
+
+    #[test]
+    fn prompts_are_advertised_and_resolvable() {
+        let prompts = prompt_list();
+        let names: Vec<&str> = prompts
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"continue-session"));
+        assert!(names.contains(&"save-session"));
+
+        let cfg = PalaceConfig::new();
+        assert!(prompt_get(&cfg, "continue-session").is_some());
+        assert!(prompt_get(&cfg, "save-session").is_some());
+        assert!(prompt_get(&cfg, "does-not-exist").is_none());
     }
 }

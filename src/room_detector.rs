@@ -2,6 +2,7 @@
 //! Writes and reads palace.yaml for a project.
 //! Port of room_detector_local.py.
 
+use crate::config::Profile;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -35,7 +36,107 @@ static SKIP_DIRS: &[&str] = &[
     "target",
 ];
 
-fn folder_room_map() -> HashMap<&'static str, &'static str> {
+/// Folder→room mapping, selected by usage profile. `Coding` keeps the original
+/// code-oriented map; `Creative` and `Personal` use topic-first defaults so
+/// non-developer content lands in meaningful rooms.
+fn folder_room_map(profile: Profile) -> HashMap<&'static str, &'static str> {
+    match profile {
+        Profile::Coding => coding_folder_room_map(),
+        Profile::Creative => creative_folder_room_map(),
+        Profile::Personal => personal_folder_room_map(),
+    }
+}
+
+fn creative_folder_room_map() -> HashMap<&'static str, &'static str> {
+    [
+        ("characters", "characters"),
+        ("character", "characters"),
+        ("cast", "characters"),
+        ("npcs", "characters"),
+        ("npc", "characters"),
+        ("protagonists", "characters"),
+        ("places", "places"),
+        ("locations", "places"),
+        ("location", "places"),
+        ("world", "places"),
+        ("worlds", "places"),
+        ("maps", "places"),
+        ("geography", "places"),
+        ("regions", "places"),
+        ("lore", "lore"),
+        ("canon", "lore"),
+        ("history", "lore"),
+        ("mythology", "lore"),
+        ("backstory", "lore"),
+        ("factions", "factions"),
+        ("faction", "factions"),
+        ("guilds", "factions"),
+        ("organizations", "factions"),
+        ("houses", "factions"),
+        ("sessions", "sessions"),
+        ("session", "sessions"),
+        ("campaign", "sessions"),
+        ("campaigns", "sessions"),
+        ("adventures", "sessions"),
+        ("chapters", "sessions"),
+        ("scenes", "sessions"),
+        ("timeline", "timeline"),
+        ("timelines", "timeline"),
+        ("events", "timeline"),
+        ("calendar", "timeline"),
+        ("items", "items"),
+        ("artifacts", "items"),
+        ("equipment", "items"),
+        ("magic", "items"),
+        ("notes", "notes"),
+        ("ideas", "notes"),
+    ]
+    .iter()
+    .cloned()
+    .collect()
+}
+
+fn personal_folder_room_map() -> HashMap<&'static str, &'static str> {
+    [
+        ("people", "people"),
+        ("person", "people"),
+        ("contacts", "people"),
+        ("clients", "people"),
+        ("client", "people"),
+        ("family", "people"),
+        ("friends", "people"),
+        ("health", "health"),
+        ("medical", "health"),
+        ("medications", "health"),
+        ("symptoms", "health"),
+        ("finances", "finances"),
+        ("finance", "finances"),
+        ("budget", "finances"),
+        ("money", "finances"),
+        ("expenses", "finances"),
+        ("bills", "finances"),
+        ("home", "home"),
+        ("household", "home"),
+        ("chores", "home"),
+        ("maintenance", "home"),
+        ("groceries", "home"),
+        ("appointments", "schedule"),
+        ("calendar", "schedule"),
+        ("schedule", "schedule"),
+        ("events", "schedule"),
+        ("goals", "goals"),
+        ("plans", "goals"),
+        ("planning", "goals"),
+        ("notes", "notes"),
+        ("journal", "notes"),
+        ("diary", "notes"),
+    ]
+    .iter()
+    .cloned()
+    .collect()
+}
+
+fn coding_folder_room_map() -> HashMap<&'static str, &'static str> {
     [
         ("frontend", "frontend"),
         ("front_end", "frontend"),
@@ -110,8 +211,8 @@ fn folder_room_map() -> HashMap<&'static str, &'static str> {
 }
 
 /// Detect rooms from top-level folder structure.
-pub fn detect_rooms_from_folders(project_dir: &Path) -> Vec<Room> {
-    let map = folder_room_map();
+pub fn detect_rooms_from_folders(project_dir: &Path, profile: Profile) -> Vec<Room> {
+    let map = folder_room_map(profile);
     let mut found: HashMap<String, String> = HashMap::new();
     let skip: std::collections::HashSet<&str> = SKIP_DIRS.iter().cloned().collect();
 
@@ -187,8 +288,8 @@ pub fn detect_rooms_from_folders(project_dir: &Path) -> Vec<Room> {
 }
 
 /// Fallback: detect rooms from filename keyword frequency.
-pub fn detect_rooms_from_files(project_dir: &Path) -> Vec<Room> {
-    let map = folder_room_map();
+pub fn detect_rooms_from_files(project_dir: &Path, profile: Profile) -> Vec<Room> {
+    let map = folder_room_map(profile);
     let mut counts: HashMap<String, usize> = HashMap::new();
     let skip: std::collections::HashSet<&str> = SKIP_DIRS.iter().cloned().collect();
 
@@ -279,10 +380,14 @@ pub fn load_config(project_dir: &Path) -> Result<ProjectConfig> {
 }
 
 /// Interactive first-run detection: detect rooms, print proposal, ask approval.
-pub fn detect_rooms_interactive(project_dir: &Path, yes: bool) -> Result<Vec<Room>> {
-    let mut rooms = detect_rooms_from_folders(project_dir);
+pub fn detect_rooms_interactive(
+    project_dir: &Path,
+    yes: bool,
+    profile: Profile,
+) -> Result<Vec<Room>> {
+    let mut rooms = detect_rooms_from_folders(project_dir, profile);
     let source = if rooms.len() <= 1 {
-        rooms = detect_rooms_from_files(project_dir);
+        rooms = detect_rooms_from_files(project_dir, profile);
         "filename patterns"
     } else {
         "folder structure"

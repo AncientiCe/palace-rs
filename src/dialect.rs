@@ -25,6 +25,59 @@ MEMORY ROUTING: use Palace for prior decisions, user preferences, previous fixes
 
 Skipping any trigger is a protocol violation. Storage is not memory — but storage + this protocol = memory.";
 
+/// Creative-profile protocol embedded in the MCP status response.
+pub const PALACE_PROTOCOL_CREATIVE: &str = "MANDATORY — Palace Memory Protocol (three hard triggers, every session, no exceptions):
+
+SESSION START — always, before anything else:
+→ palace_status → palace_session_context(agent_name) → palace_diary_search (recent work on this world or story)
+
+BEFORE ANSWERING — any question about established canon: characters, places, timelines, relationships, prior sessions, or \"what did we decide?\":
+→ palace_search + palace_kg_query — never invent canon that contradicts what's stored.
+  CANON-FIRST: call palace_search before answering from imagination for anything already established.
+  For tone, style, and player preferences: also call palace_preference_search.
+  When Palace answers, cite provenance (wing, room, source file, drawer id).
+
+AFTER A SESSION — after any scene, decision, or worldbuilding discovery:
+→ palace_diary_write (what happened, what changed in the canon, what matters)
+→ palace_kg_add for stable facts (who rules where, who's related to whom); palace_kg_invalidate + palace_kg_add when canon changes.
+  To lock in a key fact: palace_remember (importance=5). To retire retconned canon: palace_forget.
+
+MEMORY ROUTING: use Palace for established canon, character and place facts, prior sessions, and \"what did we decide?\". Use KG for stable relationships. Use diary for session-to-session continuity.
+
+Skipping any trigger breaks canon continuity. Storage is not memory — but storage + this protocol = memory.";
+
+/// Personal-profile protocol embedded in the MCP status response.
+pub const PALACE_PROTOCOL_PERSONAL: &str = "MANDATORY — Palace Memory Protocol (three hard triggers, every session, no exceptions):
+
+SESSION START — always, before anything else:
+→ palace_status → palace_session_context(agent_name) → palace_diary_search (recent notes for this person or household)
+
+BEFORE ANSWERING — any question about past notes: people, preferences, commitments, history, prior conversations, or \"what did we discuss last time?\":
+→ palace_search + palace_kg_query — never answer from memory alone.
+  NOTES-FIRST: call palace_search before answering for anything previously recorded.
+  For preferences and routines: also call palace_preference_search.
+  When Palace answers, cite provenance (wing, room, source file, drawer id).
+
+AFTER A CONVERSATION — after any meaningful update, decision, or observation:
+→ palace_diary_write (what happened, what you learned, what matters)
+→ palace_kg_add for stable facts; palace_kg_invalidate + palace_kg_add when things change.
+  To keep a key fact: palace_remember (importance=5). To remove outdated info: palace_forget.
+
+MEMORY ROUTING: use Palace for prior notes, people, preferences, commitments, and \"what happened last time?\". Use KG for stable facts. Use diary for continuity between conversations.
+
+Skipping any trigger loses continuity. Storage is not memory — but storage + this protocol = memory.";
+
+/// Select the status-response protocol text for a usage profile.
+/// `Coding` preserves the original developer-focused wording.
+pub fn palace_protocol(profile: crate::config::Profile) -> &'static str {
+    use crate::config::Profile;
+    match profile {
+        Profile::Coding => PALACE_PROTOCOL,
+        Profile::Creative => PALACE_PROTOCOL_CREATIVE,
+        Profile::Personal => PALACE_PROTOCOL_PERSONAL,
+    }
+}
+
 /// The AAAK compressed memory dialect specification.
 pub const AAAK_SPEC: &str = "AAAK is a compressed memory dialect that MemPalace uses for efficient storage.
 It is designed to be readable by both humans and LLMs without decoding.

@@ -6,6 +6,26 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Added
+
+- **Non-developer profiles** — a usage profile (`coding` (default), `creative`,
+  or `personal`) now shapes Palace for its audience. Set it with
+  `palace install --profile <name>`; it persists to `~/.palace/config.json` and
+  can be overridden per process with `PALACE_PROFILE`.
+  - The injected agent rule (`RULE_BODY`) and the MCP `palace_status` protocol
+    text are now persona-shaped: worldbuilding/canon wording for `creative`,
+    notes/people/continuity wording for `personal`. `coding` is unchanged.
+  - Room auto-detection uses topic-first maps per profile — characters, places,
+    lore, factions, sessions, timeline for `creative`; people, health, finances,
+    home, schedule, notes for `personal`.
+- **MCP prompts** — the server now implements `prompts/list` and `prompts/get`
+  (advertised via the `prompts` capability) with `continue-session` and
+  `save-session` prompts, giving Claude Desktop users one-click session
+  continuity without hooks.
+- **`palace_memory_report` tool** — a human-readable inventory of what the palace
+  remembers (active profile, per-wing/room counts, recent activity), for
+  inspecting memory without a UI.
+
 ## [0.9.1] - 2026-07-02
 
 ### Added

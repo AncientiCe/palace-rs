@@ -10,6 +10,54 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_COLLECTION_NAME: &str = "palace_drawers";
 
+/// Install/usage profile that shapes persona defaults: protocol wording,
+/// topic-first taxonomy, and room maps. `Coding` preserves the original
+/// developer-focused behaviour and is the default for backward compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Profile {
+    #[default]
+    Coding,
+    Creative,
+    Personal,
+}
+
+impl Profile {
+    /// Canonical lowercase identifier persisted in config.json.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Profile::Coding => "coding",
+            Profile::Creative => "creative",
+            Profile::Personal => "personal",
+        }
+    }
+
+    /// Parse a user-supplied profile name, accepting common aliases.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_lowercase().as_str() {
+            "coding" | "code" | "dev" | "developer" | "developers" => Some(Profile::Coding),
+            "creative" | "worldbuilding" | "writing" | "writer" | "dnd" | "d&d" => {
+                Some(Profile::Creative)
+            }
+            "personal" | "life" | "household" | "caregiver" | "coach" | "therapist" => {
+                Some(Profile::Personal)
+            }
+            _ => None,
+        }
+    }
+
+    /// All profiles, for help text and validation.
+    pub fn all() -> &'static [Profile] {
+        &[Profile::Coding, Profile::Creative, Profile::Personal]
+    }
+}
+
+impl std::fmt::Display for Profile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 pub const DEFAULT_TOPIC_WINGS: &[&str] = &[
     "emotions",
     "consciousness",
@@ -122,6 +170,8 @@ struct FileConfig {
     remote_endpoint: Option<String>,
     /// API key (ps_*) for the remote palace-server.
     remote_api_key: Option<String>,
+    /// Usage profile: "coding" (default), "creative", or "personal".
+    profile: Option<String>,
 }
 
 /// Normalise a configured endpoint into the palace-server `/mcp` URL.
@@ -270,6 +320,45 @@ impl PalaceConfig {
             .unwrap_or_else(|| "local".to_string())
     }
 
+    /// Usage profile shaping persona defaults.
+    /// Priority: env `PALACE_PROFILE` > config.json > `Coding`.
+    pub fn profile(&self) -> Profile {
+        if let Ok(v) = std::env::var("PALACE_PROFILE") {
+            if let Some(p) = Profile::parse(&v) {
+                return p;
+            }
+        }
+        self.file_config
+            .profile
+            .as_deref()
+            .and_then(Profile::parse)
+            .unwrap_or_default()
+    }
+
+    /// Persist the usage profile into ~/.palace/config.json, preserving other keys.
+    pub fn save_profile(&mut self, profile: Profile) -> Result<PathBuf> {
+        std::fs::create_dir_all(&self.config_dir)?;
+        let config_file = self.config_dir.join("config.json");
+
+        let mut root: serde_json::Value = if config_file.exists() {
+            std::fs::read_to_string(&config_file)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_else(|| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+        if !root.is_object() {
+            root = serde_json::json!({});
+        }
+        let obj = root.as_object_mut().expect("root is an object");
+        obj.insert("profile".into(), serde_json::json!(profile.as_str()));
+        self.file_config.profile = Some(profile.as_str().to_string());
+
+        std::fs::write(&config_file, serde_json::to_string_pretty(&root)?)?;
+        Ok(config_file)
+    }
+
     /// Raw remote endpoint as configured (env `PALACE_REMOTE_ENDPOINT` > config.json).
     pub fn remote_endpoint(&self) -> Option<String> {
         std::env::var("PALACE_REMOTE_ENDPOINT")
@@ -348,6 +437,7 @@ impl PalaceConfig {
                 "topic_wings": DEFAULT_TOPIC_WINGS,
                 "hall_keywords": default_hall_keywords(),
                 "entity_languages": ["en"],
+                "profile": self.profile().as_str(),
             });
             std::fs::write(&config_file, serde_json::to_string_pretty(&default)?)?;
         }
@@ -379,4 +469,46 @@ fn restrict_permissions(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn parse_accepts_aliases_and_rejects_junk() {
+        assert_eq!(Profile::parse("coding"), Some(Profile::Coding));
+        assert_eq!(Profile::parse("Developer"), Some(Profile::Coding));
+        assert_eq!(Profile::parse("worldbuilding"), Some(Profile::Creative));
+        assert_eq!(Profile::parse("  Personal "), Some(Profile::Personal));
+        assert_eq!(Profile::parse("therapist"), Some(Profile::Personal));
+        assert_eq!(Profile::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn default_is_coding_for_backward_compat() {
+        assert_eq!(Profile::default(), Profile::Coding);
+    }
+
+    #[test]
+    fn as_str_roundtrips_through_parse() {
+        for p in Profile::all() {
+            assert_eq!(Profile::parse(p.as_str()), Some(*p));
+        }
+    }
+
+    #[test]
+    fn save_and_reload_profile() {
+        let dir = std::env::temp_dir().join(format!("palace_profile_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cfg = PalaceConfig::with_config_dir(Some(&dir));
+        assert_eq!(cfg.profile(), Profile::Coding);
+        // Env var must not be set for this assertion to be meaningful.
+        if std::env::var_os("PALACE_PROFILE").is_none() {
+            cfg.save_profile(Profile::Creative).unwrap();
+            let reloaded = PalaceConfig::with_config_dir(Some(&dir));
+            assert_eq!(reloaded.profile(), Profile::Creative);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

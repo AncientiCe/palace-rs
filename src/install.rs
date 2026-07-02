@@ -1,3 +1,4 @@
+use crate::config::Profile;
 use anyhow::{anyhow, Context, Result};
 use directories::UserDirs;
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,22 @@ use toml_edit::{value, Array, DocumentMut, Item, Table};
 const RULE_BEGIN: &str = "<!-- BEGIN PALACE -->";
 const RULE_END: &str = "<!-- END PALACE -->";
 pub const RULE_BODY: &str = "**MANDATORY — three hard triggers, every session, no exceptions.**\n\n## SESSION START\n*Always, before anything else — no skipping.*\n→ `palace_status` → `palace_session_context(agent_name)` → `palace_diary_search` (recent work in this project)\n\n## PROJECT CHECK\n*When you enter a workspace or a new topic comes up.*\n→ `palace_project_status(project_path)`. Mining is ONLY for code repositories (a real folder of files on disk). If a repo is not mined, ASK the user first — accepting runs `palace_mine`, which implicitly initialises and mines the repo in one step. For chats or non-repo topics (Claude/Codex sessions, sales notes — nothing to mine), DON'T mine; offer `palace_create_wing` instead. Never mine silently.\n\n## BEFORE ANSWERING\n*Any question about past decisions, preferences, people, projects, commands, or \"what happened last time?\"*\n→ `palace_search` + `palace_kg_query` — never answer from training data alone.\n- MEMORY-FIRST: call palace_search before grep/file-search for remembered decisions, fixes, conventions, or session history.\n- CODE-SEARCH-FIRST: use grep only for current symbols, exact definitions, or implementation details that may have changed.\n- For preferences/conventions: also call `palace_preference_search`.\n- When Palace answers, cite provenance (wing, room, source file, drawer id).\n\n## AFTER WORK\n*After any substantive task, fix, decision, or discovery.*\n→ `palace_diary_write` (what happened, what you learned, what matters)\n→ `palace_kg_add` for stable facts; `palace_kg_invalidate` + `palace_kg_add` when facts change.\n- To file a key fact: `palace_remember` (importance=5). To delete outdated info: `palace_forget`.\n\n**MEMORY ROUTING**: use Palace for prior decisions, user preferences, previous fixes, commands that worked, project history, and \"what happened last time?\". Use KG for stable facts. Use diary for session continuity. Use code search first only for current source symbols, exact definitions, and implementation details that may have changed.\n\nSkipping any trigger is a protocol violation. Storage is not memory; this protocol is.";
+
+/// Persona-shaped protocol for the Creative profile (worldbuilding, D&D, writing).
+pub const CREATIVE_RULE_BODY: &str = "**MANDATORY — three hard triggers, every session, no exceptions.**\n\n## SESSION START\n*Always, before anything else — no skipping.*\n→ `palace_status` → `palace_session_context(agent_name)` → `palace_diary_search` (recent work on this world or story)\n\n## NEW THREAD\n*When a new character, place, session, or plotline comes up.*\n→ `palace_project_status(project_path)` for the world folder. Palace stores canon, not code — DON'T mine source. Offer `palace_create_wing` to organize a new region, arc, or campaign. Never mine silently.\n\n## BEFORE ANSWERING\n*Any question about established canon: characters, places, timelines, relationships, prior sessions, or \"what did we decide?\"*\n→ `palace_search` + `palace_kg_query` — never invent canon that contradicts what's stored.\n- CANON-FIRST: call palace_search before answering from imagination for anything already established.\n- For tone, style, and player preferences: also call `palace_preference_search`.\n- When Palace answers, cite provenance (wing, room, source file, drawer id).\n\n## AFTER A SESSION\n*After any scene, decision, or worldbuilding discovery.*\n→ `palace_diary_write` (what happened, what changed in the canon, what matters)\n→ `palace_kg_add` for stable facts (who rules where, who's related to whom); `palace_kg_invalidate` + `palace_kg_add` when canon changes.\n- To lock in a key fact: `palace_remember` (importance=5). To retire retconned canon: `palace_forget`.\n\n**MEMORY ROUTING**: use Palace for established canon, character and place facts, prior sessions, and \"what did we decide?\". Use KG for stable relationships. Use diary for session-to-session continuity.\n\nSkipping any trigger breaks canon continuity. Storage is not memory; this protocol is.";
+
+/// Persona-shaped protocol for the Personal profile (coaching, caregiving, household, client memory).
+pub const PERSONAL_RULE_BODY: &str = "**MANDATORY — three hard triggers, every session, no exceptions.**\n\n## SESSION START\n*Always, before anything else — no skipping.*\n→ `palace_status` → `palace_session_context(agent_name)` → `palace_diary_search` (recent notes for this person or household)\n\n## NEW TOPIC\n*When a new person, matter, or area of life comes up.*\n→ `palace_project_status(project_path)`. Palace stores notes, not code — DON'T mine files. Offer `palace_create_wing` to organize a new person, client, or area. Never mine silently.\n\n## BEFORE ANSWERING\n*Any question about past notes: people, preferences, commitments, history, prior conversations, or \"what did we discuss last time?\"*\n→ `palace_search` + `palace_kg_query` — never answer from memory alone.\n- NOTES-FIRST: call palace_search before answering for anything previously recorded.\n- For preferences and routines: also call `palace_preference_search`.\n- When Palace answers, cite provenance (wing, room, source file, drawer id).\n\n## AFTER A CONVERSATION\n*After any meaningful update, decision, or observation.*\n→ `palace_diary_write` (what happened, what you learned, what matters)\n→ `palace_kg_add` for stable facts; `palace_kg_invalidate` + `palace_kg_add` when things change.\n- To keep a key fact: `palace_remember` (importance=5). To remove outdated info: `palace_forget`.\n\n**MEMORY ROUTING**: use Palace for prior notes, people, preferences, commitments, and \"what happened last time?\". Use KG for stable facts. Use diary for continuity between conversations.\n\nSkipping any trigger loses continuity. Storage is not memory; this protocol is.";
+
+/// Select the protocol body for a usage profile. `Coding` preserves the
+/// original developer-focused wording.
+pub fn rule_body(profile: Profile) -> &'static str {
+    match profile {
+        Profile::Coding => RULE_BODY,
+        Profile::Creative => CREATIVE_RULE_BODY,
+        Profile::Personal => PERSONAL_RULE_BODY,
+    }
+}
 
 // ── Legacy marker names (0.1.x) — recognized for migration, never written ────
 const LEGACY_RULE_BEGIN: &str = "<!-- BEGIN MEMPALACE -->";
@@ -44,6 +61,8 @@ pub struct InstallOptions {
     pub dry_run: bool,
     pub force: bool,
     pub install_rule: bool,
+    /// Usage profile shaping the injected protocol wording.
+    pub profile: Profile,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -153,6 +172,7 @@ impl InstallOptions {
             dry_run: false,
             force: false,
             install_rule: true,
+            profile: Profile::default(),
         })
     }
 }
@@ -186,7 +206,7 @@ pub fn install_clients(options: &InstallOptions) -> Result<InstallReport> {
         }
         if options.install_rule {
             let target = rule_target(options, client)?;
-            let changed = install_rule(&target, options.dry_run)?;
+            let changed = install_rule(&target, options.profile, options.dry_run)?;
             if changed {
                 report.rule_changed.push(target.path);
             } else {
@@ -786,13 +806,13 @@ fn write_toml_if_changed(
     Ok(true)
 }
 
-fn install_rule(target: &RuleTarget, dry_run: bool) -> Result<bool> {
+fn install_rule(target: &RuleTarget, profile: Profile, dry_run: bool) -> Result<bool> {
     let original = read_text_file(&target.path)?;
     // Migrate any legacy block to the new markers before upserting.
     let migrated = migrate_legacy_rule_block(&original)?;
     let next = match target.kind {
-        RuleKind::Standalone => cursor_rule_text(),
-        RuleKind::ManagedBlock => upsert_managed_rule(&migrated)?,
+        RuleKind::Standalone => cursor_rule_text(profile),
+        RuleKind::ManagedBlock => upsert_managed_rule(&migrated, profile)?,
     };
     // Compare against the original file content so that a legacy-only migration
     // (where migrated == next) still triggers a write.
@@ -828,9 +848,14 @@ fn rule_installed(target: &RuleTarget) -> Result<bool> {
     }
     let text = read_text_file(&target.path)?;
     Ok(match target.kind {
-        RuleKind::Standalone => text == cursor_rule_text(),
+        RuleKind::Standalone => matches_any_cursor_rule(&text),
         RuleKind::ManagedBlock => find_managed_block(&text)?.is_some(),
     })
+}
+
+/// True if the standalone rule text matches the generated rule for any profile.
+fn matches_any_cursor_rule(text: &str) -> bool {
+    Profile::all().iter().any(|p| text == cursor_rule_text(*p))
 }
 
 /// True if the rule file exists and contains legacy `mempalace_*` tool names
@@ -842,7 +867,7 @@ fn rule_is_stale(target: &RuleTarget) -> Result<bool> {
     let text = read_text_file(&target.path)?;
     let has_legacy = text.contains(LEGACY_RULE_BEGIN) || text.contains("mempalace_status");
     let has_current = match target.kind {
-        RuleKind::Standalone => text == cursor_rule_text(),
+        RuleKind::Standalone => matches_any_cursor_rule(&text),
         RuleKind::ManagedBlock => find_managed_block(&text)?.is_some(),
     };
     Ok(has_legacy && !has_current)
@@ -934,18 +959,20 @@ fn write_text_if_changed(path: &Path, existing: &str, next: &str, dry_run: bool)
     Ok(true)
 }
 
-fn cursor_rule_text() -> String {
+fn cursor_rule_text(profile: Profile) -> String {
+    let body = rule_body(profile);
     format!(
-        "---\ndescription: Consult Palace memory before answering about remembered facts\nalwaysApply: true\n---\n\n# Palace Memory Protocol — MANDATORY\n\n{RULE_BODY}\n"
+        "---\ndescription: Consult Palace memory before answering about remembered facts\nalwaysApply: true\n---\n\n# Palace Memory Protocol — MANDATORY\n\n{body}\n"
     )
 }
 
-fn managed_rule_block() -> String {
-    format!("{RULE_BEGIN}\n# Palace Memory Protocol — MANDATORY\n\n{RULE_BODY}\n{RULE_END}")
+fn managed_rule_block(profile: Profile) -> String {
+    let body = rule_body(profile);
+    format!("{RULE_BEGIN}\n# Palace Memory Protocol — MANDATORY\n\n{body}\n{RULE_END}")
 }
 
-fn upsert_managed_rule(existing: &str) -> Result<String> {
-    let block = managed_rule_block();
+fn upsert_managed_rule(existing: &str, profile: Profile) -> Result<String> {
+    let block = managed_rule_block(profile);
     if let Some((start, end)) = find_managed_block(existing)? {
         let mut next = String::with_capacity(existing.len() + block.len());
         next.push_str(&existing[..start]);
@@ -1006,9 +1033,10 @@ fn migrate_legacy_rule_block(text: &str) -> Result<String> {
     let block_end = search_from + end_relative + LEGACY_RULE_END.len();
 
     // Build a new string with the legacy block replaced by the current block.
-    let mut result = String::with_capacity(text.len() + managed_rule_block().len());
+    let block = managed_rule_block(Profile::default());
+    let mut result = String::with_capacity(text.len() + block.len());
     result.push_str(&text[..start]);
-    result.push_str(&managed_rule_block());
+    result.push_str(&block);
     result.push_str(&text[block_end..]);
     Ok(result)
 }

@@ -363,6 +363,31 @@ Skip rule files if you only want MCP wiring:
 palace install --no-rule
 ```
 
+### Profiles (developer and non-developer use)
+
+Palace ships three usage profiles that shape the injected agent rule, the
+`palace_status` protocol text, and room auto-detection for the audience:
+
+| Profile | For | Rooms it favors |
+|---|---|---|
+| `coding` (default) | software projects | frontend, backend, testing, docs, config… |
+| `creative` | worldbuilding, D&D, fiction | characters, places, lore, factions, sessions, timeline |
+| `personal` | coaching, caregiving, household, client notes | people, health, finances, home, schedule, notes |
+
+```bash
+palace install --profile creative
+palace install --profile personal
+```
+
+The chosen profile persists to `~/.palace/config.json`, so the MCP server serves
+matching protocol wording afterward. Override it for a single process with the
+`PALACE_PROFILE` environment variable. `coding` is the default and preserves the
+original behavior, so existing installs are unaffected.
+
+Because Palace already ingests `.md` and `.txt`, the non-developer profiles make
+it usable straight from Claude Desktop's one-click MCPB install — no code
+required. See [MCP prompts](#mcp-prompts) for one-click session continuity.
+
 Inspect the current setup:
 
 ```bash
@@ -567,6 +592,21 @@ graph operations, graph tunnels, hook acknowledgements, and agent diaries:
 | `palace_upgrade_embeddings` | Re-embed drawers; refresh preference-span vectors |
 | `palace_prune` | Prune stale or low-value drawers |
 | `palace_hook_settings` | Return hook settings |
+| `palace_memory_report` | Human-readable inventory of what the palace remembers: profile, per-wing/room counts, recent activity — inspect memory without a UI |
+
+### MCP prompts
+
+For clients that can't run hooks (notably Claude Desktop), the server advertises
+MCP prompts so users get one-click session continuity from the prompt picker:
+
+| Prompt | What it does |
+|---|---|
+| `continue-session` | Loads warm-start context (`palace_status`, `palace_session_context`, `palace_diary_search`) so the agent picks up where you left off |
+| `save-session` | Saves the session to memory (`palace_diary_write`, `palace_kg_add`, `palace_remember`) so it carries over next time |
+
+The wording adapts to the active [profile](#profiles-developer-and-non-developer-use)
+(e.g. "this world or story" for `creative`, "this person or household" for
+`personal`).
 
 ---
 
