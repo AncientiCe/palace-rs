@@ -211,11 +211,15 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/palace-${version}.mcpb"
           sha="${{ needs.bundle.outputs.sha256 }}"
+          # Derive the namespace from the repo owner so its casing always matches
+          # the OIDC-granted namespace (io.github.<owner>/*), which is case-sensitive.
+          name="io.github.${GITHUB_REPOSITORY_OWNER}/palace-rs"
           jq \
+            --arg name "$name" \
             --arg v "$version" \
             --arg url "$url" \
             --arg sha "$sha" \
-            '.version = $v | .packages[0].version = $v | .packages[0].identifier = $url | .packages[0].fileSha256 = $sha' \
+            '.name = $name | .version = $v | .packages[0].version = $v | .packages[0].identifier = $url | .packages[0].fileSha256 = $sha' \
             server.json > server.tmp
           mv server.tmp server.json
           cat server.json
