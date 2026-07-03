@@ -4,7 +4,7 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
-## [Unreleased]
+## [0.10.0] - 2026-07-03
 
 ### Added
 
