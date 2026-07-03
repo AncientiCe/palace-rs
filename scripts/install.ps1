@@ -6,11 +6,19 @@ $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("palace-" + [System.Guid
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
 function Get-Target {
-    $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-    switch ($arch) {
-        "X64" { "x86_64-pc-windows-msvc" }
-        "Arm64" { "aarch64-pc-windows-msvc" }
-        default { throw "Unsupported architecture: $arch" }
+    # PowerShell 5.1's .NET Framework may not expose RuntimeInformation.OSArchitecture,
+    # so fall back to the PROCESSOR_ARCHITECTURE environment variable.
+    $arch = $null
+    try {
+        $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    } catch { }
+    if (-not $arch) {
+        $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    }
+    switch -Regex ($arch) {
+        "^(X64|AMD64)$" { return "x86_64-pc-windows-msvc" }
+        "^ARM64$" { return "aarch64-pc-windows-msvc" }
+        default { throw "Unsupported architecture: '$arch'" }
     }
 }
 
@@ -55,10 +63,17 @@ try {
     Copy-Item $Binary.FullName (Join-Path $InstallDir "palace.exe") -Force
 
 
-    $PathParts = ($env:PATH -split ";") | Where-Object { $_ }
-    if ($PathParts -notcontains $InstallDir) {
-        Write-Host "Add palace to PATH:"
-        Write-Host "  setx PATH `"$InstallDir;%PATH%`""
+    # Add the install dir to the *user* PATH in the registry (never use `setx PATH "...;%PATH%"`:
+    # PowerShell does not expand %PATH%, and setx would overwrite the user PATH with a literal string).
+    $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $UserParts = if ($UserPath) { ($UserPath -split ";") | Where-Object { $_ } } else { @() }
+    if ($UserParts -notcontains $InstallDir) {
+        $NewUserPath = if ($UserPath) { ($UserPath.TrimEnd(";") + ";" + $InstallDir) } else { $InstallDir }
+        [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
+        Write-Host "Added $InstallDir to your user PATH. Restart your terminal to pick it up."
+    }
+    if ((($env:PATH -split ";") | Where-Object { $_ }) -notcontains $InstallDir) {
+        $env:PATH = "$InstallDir;$env:PATH"
     }
 
     & (Join-Path $InstallDir "palace.exe") install --all
