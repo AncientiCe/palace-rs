@@ -4,6 +4,19 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [0.11.0] - 2026-07-07
+
+### Added
+
+- **Memory protocol via MCP `initialize` instructions** — the server now sends
+  the profile-aware Palace Memory Protocol in `InitializeResult.instructions`.
+  Clients that honor the field (Claude Desktop/Cowork, Claude Code, and others)
+  inject it into the agent's system prompt at session start, so memory use is
+  automatic in every project even on clients with no hook system and where
+  tools are deferred behind tool search (which also ignores
+  `anthropic/alwaysLoad`). The text includes a note telling tool-deferring
+  clients to batch-load the nine protocol tools in one tool-search call.
+
 ## [0.10.0] - 2026-07-03
 
 ### Added

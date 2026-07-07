@@ -1,6 +1,6 @@
 [package]
 name = "palace-rs"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 description = "Local memory palace for AI assistants — Rust edition"
 license = "MIT"
