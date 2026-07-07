@@ -92,6 +92,26 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+/// Build the MCP `initialize` result, including `instructions`.
+///
+/// Clients that honor `InitializeResult.instructions` (Claude Desktop/Cowork,
+/// Claude Code, and others) inject this text into the agent's system prompt at
+/// session start. This is the only channel that reaches every project on
+/// clients without hook support (Claude Desktop/Cowork), so the memory
+/// protocol is advertised here rather than relying solely on hooks, rule
+/// files, or per-project CLAUDE.md edits.
+fn initialize_result(protocol_version: &str, profile: crate::config::Profile) -> Value {
+    json!({
+        "protocolVersion": protocol_version,
+        "capabilities": {"tools": {}, "prompts": {}},
+        "serverInfo": {"name": "palace", "version": env!("CARGO_PKG_VERSION")},
+        "instructions": format!(
+            "{}\n\nNOTE FOR CLIENTS THAT DEFER MCP TOOLS (e.g. Claude Desktop/Cowork): the palace_* tools may need to be loaded via tool search before use. Load the protocol tools in ONE batch first: palace_status, palace_session_context, palace_diary_search, palace_project_status, palace_search, palace_kg_query, palace_preference_search, palace_diary_write, palace_kg_add.",
+            crate::dialect::palace_protocol(profile)
+        ),
+    })
+}
+
 fn handle_request(
     conn: &Connection,
     config: &PalaceConfig,
@@ -108,11 +128,7 @@ fn handle_request(
                 .get("protocolVersion")
                 .and_then(|value| value.as_str())
                 .unwrap_or("2024-11-05");
-            Some(json!({
-                "protocolVersion": protocol_version,
-                "capabilities": {"tools": {}, "prompts": {}},
-                "serverInfo": {"name": "palace", "version": env!("CARGO_PKG_VERSION")},
-            }))
+            Some(initialize_result(protocol_version, config.profile()))
         }
         "notifications/initialized" => return None,
         "tools/list" => Some(json!({"tools": tool_list()})),
@@ -2514,6 +2530,31 @@ fn compact_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialize_result_advertises_protocol_instructions() {
+        let result = initialize_result("2024-11-05", crate::config::Profile::default());
+        let instructions = result
+            .get("instructions")
+            .and_then(|v| v.as_str())
+            .expect("initialize result must carry instructions");
+        assert!(
+            instructions.contains("MANDATORY"),
+            "instructions must contain the memory protocol"
+        );
+        assert!(
+            instructions.contains("tool search"),
+            "instructions must tell deferring clients to batch-load protocol tools"
+        );
+        for tool in ALWAYS_LOAD_TOOLS {
+            assert!(
+                instructions.contains(tool),
+                "instructions must name protocol tool {tool}"
+            );
+        }
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["serverInfo"]["name"], "palace");
+    }
 
     #[test]
     fn protocol_tools_are_pinned_always_load() {
