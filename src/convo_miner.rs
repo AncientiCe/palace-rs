@@ -298,89 +298,118 @@ pub fn mine_convos(
     let mut files_skipped = 0usize;
     let mut room_counts: HashMap<String, usize> = HashMap::new();
 
-    for (i, filepath) in files.iter().enumerate() {
-        let source_file = filepath.to_string_lossy().to_string();
-
-        if !dry_run && file_already_mined(conn, &source_file)? {
-            files_skipped += 1;
-            continue;
-        }
-
-        let content = match normalize_file(filepath) {
-            Ok(c) => c,
-            Err(_) => continue,
+    // Batched into `MINE_BATCH_SIZE`-file transactions for the same reason as
+    // `miner::mine`: autocommitting per drawer (and per BM25 term) turns a
+    // modestly sized conversation export into hundreds of thousands of
+    // individual SQLite transactions, which is what made mining stall on
+    // larger-but-not-huge inputs.
+    for (batch_index, batch) in files.chunks(crate::miner::MINE_BATCH_SIZE).enumerate() {
+        let tx = if dry_run {
+            None
+        } else {
+            Some(
+                conn.transaction()
+                    .context("starting mine_convos transaction")?,
+            )
         };
 
-        if content.trim().len() < MIN_CHUNK_SIZE {
-            continue;
-        }
+        for (offset, filepath) in batch.iter().enumerate() {
+            let i = batch_index * crate::miner::MINE_BATCH_SIZE + offset;
+            let source_file = filepath.to_string_lossy().to_string();
 
-        let chunks_with_rooms: Vec<(String, String, usize)> = match extract_mode {
-            ExtractMode::General => {
-                let memories = extract_memories(&content, 0.3);
-                memories
-                    .into_iter()
-                    .map(|m| (m.content, m.memory_type, m.chunk_index))
-                    .collect()
+            if let Some(tx) = &tx {
+                if file_already_mined(tx, &source_file)? {
+                    files_skipped += 1;
+                    continue;
+                }
             }
-            ExtractMode::Exchange => {
-                let room = detect_convo_room(&content);
-                chunk_exchanges(&content)
-                    .into_iter()
-                    .map(|(c, idx)| (c, room.clone(), idx))
-                    .collect()
+
+            let content = match normalize_file(filepath) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            if content.trim().len() < MIN_CHUNK_SIZE {
+                continue;
             }
-        };
 
-        if chunks_with_rooms.is_empty() {
-            continue;
-        }
+            let chunks_with_rooms: Vec<(String, String, usize)> = match extract_mode {
+                ExtractMode::General => {
+                    let memories = extract_memories(&content, 0.3);
+                    memories
+                        .into_iter()
+                        .map(|m| (m.content, m.memory_type, m.chunk_index))
+                        .collect()
+                }
+                ExtractMode::Exchange => {
+                    let room = detect_convo_room(&content);
+                    chunk_exchanges(&content)
+                        .into_iter()
+                        .map(|(c, idx)| (c, room.clone(), idx))
+                        .collect()
+                }
+            };
 
-        if dry_run {
+            if chunks_with_rooms.is_empty() {
+                continue;
+            }
+
+            if dry_run {
+                println!(
+                    "    [DRY RUN] {} → {} chunks",
+                    filepath.file_name().unwrap_or_default().to_string_lossy(),
+                    chunks_with_rooms.len()
+                );
+                total_drawers += chunks_with_rooms.len();
+                for (_, room, _) in &chunks_with_rooms {
+                    *room_counts.entry(room.clone()).or_default() += 1;
+                }
+                continue;
+            }
+
+            // `dry_run` is false in every path that reaches here, so `tx` is
+            // always `Some` — but fall through as a no-op skip rather than
+            // panicking if that invariant ever changes.
+            let Some(tx) = &tx else { continue };
+
+            let mut drawers_added = 0usize;
+            let chunk_texts: Vec<&str> = chunks_with_rooms
+                .iter()
+                .map(|(t, _, _)| t.as_str())
+                .collect();
+            let embeddings = crate::embedder::embed_batch(&chunk_texts).unwrap_or_default();
+            for (idx, (chunk_text, chunk_room, chunk_index)) in chunks_with_rooms.iter().enumerate()
+            {
+                let embedding = embeddings.get(idx).map(|e| e.as_slice());
+                let (added, _) = add_drawer(
+                    tx,
+                    &wing,
+                    chunk_room,
+                    chunk_text,
+                    embedding,
+                    &source_file,
+                    *chunk_index,
+                    agent,
+                    3.0,
+                )?;
+                if added {
+                    drawers_added += 1;
+                    *room_counts.entry(chunk_room.clone()).or_default() += 1;
+                }
+            }
+
+            total_drawers += drawers_added;
             println!(
-                "    [DRY RUN] {} → {} chunks",
-                filepath.file_name().unwrap_or_default().to_string_lossy(),
-                chunks_with_rooms.len()
+                "  ✓ [{:4}/{}] {:50} +{drawers_added}",
+                i + 1,
+                files.len(),
+                filepath.file_name().unwrap_or_default().to_string_lossy()
             );
-            total_drawers += chunks_with_rooms.len();
-            for (_, room, _) in &chunks_with_rooms {
-                *room_counts.entry(room.clone()).or_default() += 1;
-            }
-            continue;
         }
 
-        let mut drawers_added = 0usize;
-        let chunk_texts: Vec<&str> = chunks_with_rooms
-            .iter()
-            .map(|(t, _, _)| t.as_str())
-            .collect();
-        let embeddings = crate::embedder::embed_batch(&chunk_texts).unwrap_or_default();
-        for (idx, (chunk_text, chunk_room, chunk_index)) in chunks_with_rooms.iter().enumerate() {
-            let embedding = embeddings.get(idx).map(|e| e.as_slice());
-            let (added, _) = add_drawer(
-                conn,
-                &wing,
-                chunk_room,
-                chunk_text,
-                embedding,
-                &source_file,
-                *chunk_index,
-                agent,
-                3.0,
-            )?;
-            if added {
-                drawers_added += 1;
-                *room_counts.entry(chunk_room.clone()).or_default() += 1;
-            }
+        if let Some(tx) = tx {
+            tx.commit().context("committing mine_convos batch")?;
         }
-
-        total_drawers += drawers_added;
-        println!(
-            "  ✓ [{:4}/{}] {:50} +{drawers_added}",
-            i + 1,
-            files.len(),
-            filepath.file_name().unwrap_or_default().to_string_lossy()
-        );
     }
 
     println!("\n{}", "=".repeat(55));

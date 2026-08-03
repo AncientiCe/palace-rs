@@ -1,7 +1,74 @@
-use palace::miner::{chunk_text, detect_room, CHUNK_SIZE};
-use palace::room_detector::Room;
+use palace::miner::{chunk_text, detect_room, mine, CHUNK_SIZE};
+use palace::room_detector::{save_config, Room};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tempfile::TempDir;
+
+/// A small vocabulary reused across files so each chunk has realistic BM25
+/// term overlap (and enough unique terms to make the old per-term-insert
+/// behaviour blow up the commit count if the batching regresses).
+const VOCAB: &[&str] = &[
+    "alpha",
+    "bravo",
+    "charlie",
+    "delta",
+    "echo",
+    "foxtrot",
+    "golf",
+    "hotel",
+    "india",
+    "juliet",
+    "kilo",
+    "lima",
+    "mike",
+    "november",
+    "oscar",
+    "papa",
+    "quebec",
+    "romeo",
+    "sierra",
+    "tango",
+    "uniform",
+    "victor",
+    "whiskey",
+    "xray",
+    "yankee",
+    "zulu",
+    "memory",
+    "palace",
+    "drawer",
+    "wing",
+    "room",
+    "search",
+    "embedding",
+    "vector",
+    "database",
+    "project",
+    "notes",
+];
+
+/// Write a minimal mineable project: a `palace.yaml` plus `file_count` small
+/// text files, each large enough to produce exactly one chunk with a good
+/// spread of unique terms.
+fn write_test_project(dir: &Path, file_count: usize) {
+    let rooms = vec![Room {
+        name: "general".into(),
+        description: "general project content".into(),
+        keywords: vec![],
+    }];
+    save_config(dir, "commit_batch_test", &rooms).unwrap();
+
+    for i in 0..file_count {
+        let mut content = String::new();
+        for j in 0..40 {
+            content.push_str(VOCAB[(i * 7 + j) % VOCAB.len()]);
+            content.push(' ');
+        }
+        content.push_str(&format!("file number {i} unique marker token{i}."));
+        std::fs::write(dir.join(format!("note_{i:03}.txt")), content).unwrap();
+    }
+}
 
 #[test]
 fn project_wing_status_unknown_for_fresh_dir() {
@@ -179,4 +246,212 @@ fn detect_room_defaults_to_general() {
     let path = Path::new("/project/data.csv");
     let room = detect_room(path, "some random content xyz", &rooms, project);
     assert_eq!(room, "general");
+}
+
+// ── Write batching (regression guard for the "mine hangs on bigger projects"
+// fix) ────────────────────────────────────────────────────────────────────
+//
+// Before the fix, every drawer insert plus every unique BM25 term insert was
+// its own autocommit transaction. A project with just a few dozen files could
+// trigger hundreds of individual commits. This test installs a commit
+// counter via `commit_hook` and asserts mining batches writes into a handful
+// of transactions regardless of how many drawers/terms are produced.
+#[test]
+fn mine_batches_writes_into_few_transactions() {
+    let project = TempDir::new().unwrap();
+    write_test_project(project.path(), 25);
+
+    let mut conn = palace::db::open_in_memory().unwrap();
+    let commits = Arc::new(AtomicUsize::new(0));
+    {
+        let counter = commits.clone();
+        conn.commit_hook(Some(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+    }
+
+    mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .expect("mine should succeed");
+
+    let total = commits.load(Ordering::SeqCst);
+    assert!(
+        total <= 5,
+        "mining 25 small files should commit in a handful of batched \
+         transactions, not one per drawer/term (saw {total} commits)"
+    );
+}
+
+#[test]
+fn mine_dry_run_does_not_write_to_db() {
+    let project = TempDir::new().unwrap();
+    write_test_project(project.path(), 5);
+    let mut conn = palace::db::open_in_memory().unwrap();
+
+    mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        true,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .expect("dry run should succeed");
+
+    assert_eq!(
+        palace::store::count_drawers(&conn).unwrap(),
+        0,
+        "dry run must not write any drawers"
+    );
+}
+
+#[test]
+fn mine_records_one_drawer_per_file_and_marks_wing_mined() {
+    let project = TempDir::new().unwrap();
+    write_test_project(project.path(), 12);
+    let mut conn = palace::db::open_in_memory().unwrap();
+
+    mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .expect("mine should succeed");
+
+    assert_eq!(palace::store::count_drawers(&conn).unwrap(), 12);
+    let rooms = palace::store::room_counts(&conn, Some("commit_batch_test")).unwrap();
+    assert_eq!(rooms.get("general").copied(), Some(12));
+
+    use palace::miner::{project_wing_status, ProjectWingStatus};
+    let status = project_wing_status(&conn, project.path()).unwrap();
+    match status {
+        ProjectWingStatus::Mined { drawers, .. } => assert_eq!(drawers, 12),
+        other => panic!("expected Mined, got {other:?}"),
+    }
+}
+
+#[test]
+fn mine_rerun_skips_already_mined_files() {
+    let project = TempDir::new().unwrap();
+    write_test_project(project.path(), 8);
+    let mut conn = palace::db::open_in_memory().unwrap();
+
+    mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    let first_count = palace::store::count_drawers(&conn).unwrap();
+    assert_eq!(first_count, 8);
+
+    mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    let second_count = palace::store::count_drawers(&conn).unwrap();
+    assert_eq!(
+        second_count, first_count,
+        "re-mining the same project should not duplicate drawers"
+    );
+}
+
+// ── Progress reporting (MCP liveness fix) ───────────────────────────────────
+//
+// `palace_mine` used to give zero feedback for the entire duration of a long
+// mine, which is exactly what made it look "stuck" to an MCP client. `mine`
+// now accepts an optional progress callback invoked as each file is written.
+#[test]
+fn mine_reports_progress_after_each_file() {
+    let project = TempDir::new().unwrap();
+    write_test_project(project.path(), 6);
+    let mut conn = palace::db::open_in_memory().unwrap();
+
+    let mut seen: Vec<(usize, usize)> = Vec::new();
+    {
+        let mut on_progress = |done: usize, total: usize| seen.push((done, total));
+        mine(
+            &mut conn,
+            project.path(),
+            None,
+            "test",
+            0,
+            false,
+            true,
+            &[],
+            true,
+            Some(&mut on_progress),
+        )
+        .expect("mine should succeed");
+    }
+
+    assert_eq!(
+        seen.len(),
+        6,
+        "expected one progress callback per file, got {seen:?}"
+    );
+    for (i, &(done, total)) in seen.iter().enumerate() {
+        assert_eq!(done, i + 1, "progress should increase monotonically");
+        assert_eq!(total, 6, "total should be the full file count");
+    }
+}
+
+#[test]
+fn mine_without_progress_callback_still_succeeds() {
+    let project = TempDir::new().unwrap();
+    write_test_project(project.path(), 3);
+    let mut conn = palace::db::open_in_memory().unwrap();
+
+    mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .expect("mine should succeed without a progress callback");
+    assert_eq!(palace::store::count_drawers(&conn).unwrap(), 3);
 }

@@ -35,7 +35,9 @@ serde_yaml = "0.9"
 toml_edit = "0.22"
 
 # Database — bundled SQLite, no system dep
-rusqlite = { version = "0.32", features = ["bundled"] }
+# `hooks` unlocks Connection::commit_hook, used in tests to assert that mining
+# batches writes into a small number of transactions instead of one per row.
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 
 # Embeddings — ONNX Runtime, all-MiniLM-L6-v2, lazy init
 ort = { version = "=2.0.0-rc.11", default-features = false, features = ["ndarray", "std", "download-binaries", "tls-native"] }

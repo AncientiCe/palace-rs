@@ -94,6 +94,17 @@ pub const CHUNK_SIZE: usize = 800;
 pub const CHUNK_OVERLAP: usize = 100;
 pub const MIN_CHUNK_SIZE: usize = 50;
 
+/// How many files' worth of drawers to commit per SQLite transaction during
+/// mining. Batching bounds both ends of the tradeoff: a single transaction
+/// for the whole run would be fastest but would lose all progress if the
+/// process is interrupted (e.g. an MCP client timing out mid-mine); one
+/// transaction per drawer (the old behaviour) is what made mining stall on
+/// larger projects in the first place. A few hundred files per batch keeps
+/// commit count low while still checkpointing regularly.
+///
+/// Shared with `convo_miner::mine_convos`, which has the same write pattern.
+pub(crate) const MINE_BATCH_SIZE: usize = 200;
+
 pub static READABLE_EXTENSIONS: &[&str] = &[
     "txt", "md", "py", "js", "ts", "jsx", "tsx", "json", "yaml", "yml", "html", "css", "java",
     "go", "rs", "rb", "sh", "csv", "sql", "toml",
@@ -171,6 +182,36 @@ pub fn chunk_text(content: &str) -> Vec<(String, usize)> {
     chunks
 }
 
+/// How many chunks to embed per ONNX inference call in phase 2. The embedder
+/// runs behind a single mutex-guarded session (see `embedder::embed_batch`),
+/// so per-file batches (often just 1-5 chunks) waste most of the session's
+/// intra-op thread pool on tiny amounts of work. Grouping chunks across many
+/// files into batches this size turns hundreds/thousands of tiny inference
+/// calls into a much smaller number of efficient ones.
+const EMBED_BATCH_SIZE: usize = 64;
+
+/// Group per-file chunk counts into batches capped at `batch_size`, returning
+/// `(file_index, chunk_index_within_file)` pairs in original file/chunk
+/// order. Never drops, duplicates, or reorders an entry; a `batch_size` of 0
+/// is treated as 1 rather than looping forever.
+fn group_into_batches(chunk_counts: &[usize], batch_size: usize) -> Vec<Vec<(usize, usize)>> {
+    let batch_size = batch_size.max(1);
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    for (file_index, &count) in chunk_counts.iter().enumerate() {
+        for chunk_index in 0..count {
+            current.push((file_index, chunk_index));
+            if current.len() == batch_size {
+                batches.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
 /// Route a file to the correct room based on path, filename, and keyword scoring.
 pub fn detect_room(filepath: &Path, content: &str, rooms: &[Room], project_path: &Path) -> String {
     let relative = filepath
@@ -239,6 +280,12 @@ pub fn detect_room(filepath: &Path, content: &str, rooms: &[Room], project_path:
 }
 
 /// Mine a project directory into the palace.
+///
+/// `on_progress`, when given, is invoked as `(files_done, files_total)` after
+/// each file is processed during the write phase. This lets long-running
+/// callers (notably the MCP server, which otherwise gives zero feedback for
+/// the whole duration of a mine) report visible progress instead of looking
+/// stuck.
 #[allow(clippy::too_many_arguments)]
 pub fn mine(
     conn: &mut Connection,
@@ -250,6 +297,7 @@ pub fn mine(
     respect_gitignore: bool,
     include_ignored: &[String],
     quiet: bool,
+    mut on_progress: Option<&mut dyn FnMut(usize, usize)>,
 ) -> Result<()> {
     let project_path = project_dir
         .canonicalize()
@@ -336,11 +384,15 @@ pub fn mine(
         })
         .collect();
 
-    // ── Phase 2: read + chunk + embed in parallel (Rayon) ──────────────────
-    // Each element: (filepath, room, chunks_with_embeddings)
+    // ── Phase 2a: read + chunk in parallel (Rayon) ──────────────────────────
+    // No embedding here: the ONNX session is a single mutex-guarded resource
+    // (see `embedder::embed_batch`), so embedding per file from multiple
+    // Rayon workers just serializes everyone behind that mutex anyway, while
+    // still paying per-call overhead once per file. Keep Rayon for the
+    // genuinely parallelizable read+chunk work and embed separately below.
     let file_count_total = files.len();
-    type ChunkEntry = (String, usize, Vec<f32>); // (text, chunk_index, embedding)
-    let prepared: Vec<(std::path::PathBuf, String, Vec<ChunkEntry>)> = pending
+    type RawChunks = (std::path::PathBuf, String, Vec<(String, usize)>);
+    let chunked: Vec<RawChunks> = pending
         .par_iter()
         .filter_map(|filepath| {
             let content = std::fs::read_to_string(filepath).ok()?;
@@ -353,25 +405,55 @@ pub fn mine(
             if chunks.is_empty() {
                 return None;
             }
-            let chunk_texts: Vec<&str> = chunks.iter().map(|(t, _)| t.as_str()).collect();
-            let embeddings = crate::embedder::embed_batch(&chunk_texts).unwrap_or_default();
-            let chunk_entries: Vec<ChunkEntry> = chunks
-                .into_iter()
-                .enumerate()
-                .map(|(idx, (text, ci))| {
-                    let emb = embeddings.get(idx).cloned().unwrap_or_default();
-                    (text, ci, emb)
-                })
-                .collect();
-            Some(((*filepath).clone(), room, chunk_entries))
+            Some(((*filepath).clone(), room, chunks))
         })
         .collect();
 
-    // ── Phase 3: write to DB (serial, SQLite requirement) ──────────────────
-    for (i, (filepath, room, chunk_entries)) in prepared.iter().enumerate() {
-        let source_file = filepath.to_string_lossy().to_string();
+    // ── Phase 2b: embed in capped cross-file batches (sequential) ──────────
+    type ChunkEntry = (String, usize, Vec<f32>); // (text, chunk_index, embedding)
+    let chunk_counts: Vec<usize> = chunked.iter().map(|(_, _, chunks)| chunks.len()).collect();
+    let mut embeddings_by_file: Vec<Vec<Vec<f32>>> = chunk_counts
+        .iter()
+        .map(|&count| vec![Vec::new(); count])
+        .collect();
 
-        if dry_run {
+    for batch in group_into_batches(&chunk_counts, EMBED_BATCH_SIZE) {
+        let texts: Vec<&str> = batch
+            .iter()
+            .map(|&(file_index, chunk_index)| chunked[file_index].2[chunk_index].0.as_str())
+            .collect();
+        let embeddings = crate::embedder::embed_batch(&texts).unwrap_or_default();
+        for (position, &(file_index, chunk_index)) in batch.iter().enumerate() {
+            if let Some(embedding) = embeddings.get(position) {
+                embeddings_by_file[file_index][chunk_index] = embedding.clone();
+            }
+        }
+    }
+
+    let prepared: Vec<(std::path::PathBuf, String, Vec<ChunkEntry>)> = chunked
+        .into_iter()
+        .zip(embeddings_by_file)
+        .map(|((filepath, room, chunks), embeddings)| {
+            let chunk_entries: Vec<ChunkEntry> = chunks
+                .into_iter()
+                .zip(embeddings)
+                .map(|((text, chunk_index), embedding)| (text, chunk_index, embedding))
+                .collect();
+            (filepath, room, chunk_entries)
+        })
+        .collect();
+
+    // ── Phase 3: write to DB, batched into chunked transactions ─────────────
+    // Autocommitting per drawer (and per BM25 term — see `index_bm25_terms`)
+    // turns a project with a few thousand chunks into hundreds of thousands
+    // of individual SQLite transactions, which is the dominant cause of
+    // `mine` stalling/timing out on larger-but-not-huge projects. Batching
+    // writes into `MINE_BATCH_SIZE`-file transactions cuts that to a handful
+    // of commits while still bounding how much progress a killed/timed-out
+    // run loses (the next run's `file_already_mined` dedup check picks up
+    // wherever the last committed batch left off).
+    if dry_run {
+        for (filepath, room, chunk_entries) in &prepared {
             if !quiet {
                 println!(
                     "    [DRY RUN] {} → room:{room} ({} drawers)",
@@ -381,43 +463,56 @@ pub fn mine(
             }
             total_drawers += chunk_entries.len();
             *room_counts.entry(room.clone()).or_default() += 1;
-            continue;
         }
+    } else {
+        let total_prepared = prepared.len();
+        for (batch_index, batch) in prepared.chunks(MINE_BATCH_SIZE).enumerate() {
+            let tx = conn.transaction().context("starting mine transaction")?;
+            for (offset, (filepath, room, chunk_entries)) in batch.iter().enumerate() {
+                let global_index = batch_index * MINE_BATCH_SIZE + offset;
+                let source_file = filepath.to_string_lossy().to_string();
 
-        let mut drawers_added = 0usize;
-        for (chunk_text, chunk_index, emb) in chunk_entries {
-            let embedding = if emb.is_empty() {
-                None
-            } else {
-                Some(emb.as_slice())
-            };
-            let (added, _) = add_drawer(
-                conn,
-                &wing,
-                room,
-                chunk_text,
-                embedding,
-                &source_file,
-                *chunk_index,
-                agent,
-                3.0,
-            )?;
-            if added {
-                drawers_added += 1;
-            }
-        }
+                let mut drawers_added = 0usize;
+                for (chunk_text, chunk_index, emb) in chunk_entries {
+                    let embedding = if emb.is_empty() {
+                        None
+                    } else {
+                        Some(emb.as_slice())
+                    };
+                    let (added, _) = add_drawer(
+                        &tx,
+                        &wing,
+                        room,
+                        chunk_text,
+                        embedding,
+                        &source_file,
+                        *chunk_index,
+                        agent,
+                        3.0,
+                    )?;
+                    if added {
+                        drawers_added += 1;
+                    }
+                }
 
-        if drawers_added > 0 {
-            *room_counts.entry(room.clone()).or_default() += 1;
-            total_drawers += drawers_added;
-            if !quiet {
-                println!(
-                    "  ✓ [{:4}/{}] {:50} +{drawers_added}",
-                    i + 1,
-                    file_count_total,
-                    filepath.file_name().unwrap_or_default().to_string_lossy()
-                );
+                if drawers_added > 0 {
+                    *room_counts.entry(room.clone()).or_default() += 1;
+                    total_drawers += drawers_added;
+                    if !quiet {
+                        println!(
+                            "  ✓ [{:4}/{}] {:50} +{drawers_added}",
+                            global_index + 1,
+                            file_count_total,
+                            filepath.file_name().unwrap_or_default().to_string_lossy()
+                        );
+                    }
+                }
+
+                if let Some(cb) = on_progress.as_mut() {
+                    cb(global_index + 1, total_prepared);
+                }
             }
+            tx.commit().context("committing mine batch")?;
         }
     }
 
@@ -528,4 +623,56 @@ pub fn status(conn: &Connection, palace_path: &Path) -> Result<()> {
     }
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_into_batches_caps_size_without_dropping_or_reordering() {
+        let counts = [3, 5, 2];
+        let batches = group_into_batches(&counts, 4);
+        assert_eq!(
+            batches,
+            vec![
+                vec![(0, 0), (0, 1), (0, 2), (1, 0)],
+                vec![(1, 1), (1, 2), (1, 3), (1, 4)],
+                vec![(2, 0), (2, 1)],
+            ]
+        );
+        let total: usize = batches.iter().map(|b| b.len()).sum();
+        assert_eq!(total, counts.iter().sum::<usize>());
+    }
+
+    #[test]
+    fn group_into_batches_skips_files_with_no_chunks() {
+        let counts = [0, 3, 0, 2];
+        let batches = group_into_batches(&counts, 10);
+        assert_eq!(batches, vec![vec![(1, 0), (1, 1), (1, 2), (3, 0), (3, 1)]]);
+    }
+
+    #[test]
+    fn group_into_batches_single_batch_when_everything_fits() {
+        let counts = [2, 2];
+        let batches = group_into_batches(&counts, 100);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 4);
+    }
+
+    #[test]
+    fn group_into_batches_handles_degenerate_batch_size_without_panicking() {
+        let counts = [2, 1];
+        let batches = group_into_batches(&counts, 0);
+        let total: usize = batches.iter().map(|b| b.len()).sum();
+        assert_eq!(
+            total, 3,
+            "every chunk must still be processed even with a zero batch size"
+        );
+    }
+
+    #[test]
+    fn group_into_batches_empty_input_produces_no_batches() {
+        assert!(group_into_batches(&[], 10).is_empty());
+    }
 }

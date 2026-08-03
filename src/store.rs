@@ -85,28 +85,29 @@ pub fn add_drawer(
         .unwrap_or_else(|_| "{}".to_string());
 
     let rows = conn
-        .execute(
+        .prepare_cached(
             "INSERT OR IGNORE INTO drawers
              (id, wing, room, content, embedding, source_file, chunk_index, added_by, filed_at,
               importance, created_at, entity_metadata, hall, metadata, pref_embedding)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?9, ?11, ?12, ?13, ?14)",
-            params![
-                id,
-                wing,
-                room,
-                content,
-                blob,
-                source_file,
-                chunk_index as i64,
-                added_by,
-                filed_at,
-                importance,
-                entity_metadata_text,
-                hall,
-                metadata_text,
-                pref_blob
-            ],
         )
+        .context("preparing drawer insert")?
+        .execute(params![
+            id,
+            wing,
+            room,
+            content,
+            blob,
+            source_file,
+            chunk_index as i64,
+            added_by,
+            filed_at,
+            importance,
+            entity_metadata_text,
+            hall,
+            metadata_text,
+            pref_blob
+        ])
         .context("inserting drawer")?;
     if rows > 0 {
         index_bm25_terms(conn, &id, content)?;
@@ -753,28 +754,33 @@ fn index_bm25_terms(conn: &Connection, drawer_id: &str, content: &str) -> Result
         *counts.entry(term).or_default() += 1;
     }
 
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO bm25_doc_stats (drawer_id, doc_len)
          VALUES (?1, ?2)
          ON CONFLICT(drawer_id) DO UPDATE SET
             doc_len = excluded.doc_len,
             updated_at = CURRENT_TIMESTAMP",
-        params![drawer_id, doc_len],
     )
+    .context("preparing BM25 doc stats upsert")?
+    .execute(params![drawer_id, doc_len])
     .context("upserting BM25 doc stats")?;
 
-    conn.execute(
-        "DELETE FROM bm25_terms WHERE drawer_id = ?1",
-        params![drawer_id],
-    )
-    .context("clearing old BM25 terms")?;
+    conn.prepare_cached("DELETE FROM bm25_terms WHERE drawer_id = ?1")
+        .context("preparing BM25 term clear")?
+        .execute(params![drawer_id])
+        .context("clearing old BM25 terms")?;
 
+    // Reused across every term in this (and every subsequent) document: this
+    // loop is the hottest path during a large `mine()` run — a single
+    // ~800-char chunk can have 50-150 unique terms — so avoiding re-parsing
+    // the same INSERT text on every iteration matters a lot in aggregate.
+    let mut insert_term = conn
+        .prepare_cached("INSERT INTO bm25_terms (drawer_id, term, tf) VALUES (?1, ?2, ?3)")
+        .context("preparing BM25 term insert")?;
     for (term, tf) in counts {
-        conn.execute(
-            "INSERT INTO bm25_terms (drawer_id, term, tf) VALUES (?1, ?2, ?3)",
-            params![drawer_id, term, tf],
-        )
-        .context("inserting BM25 term")?;
+        insert_term
+            .execute(params![drawer_id, term, tf])
+            .context("inserting BM25 term")?;
     }
 
     Ok(())

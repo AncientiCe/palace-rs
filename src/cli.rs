@@ -356,7 +356,18 @@ pub fn run() -> Result<()> {
             if auto_mine {
                 let db_path = config.palace_db_path();
                 let mut conn = crate::db::open(&db_path)?;
-                crate::miner::mine(&mut conn, &dir, None, "palace", 0, false, true, &[], false)?;
+                crate::miner::mine(
+                    &mut conn,
+                    &dir,
+                    None,
+                    "palace",
+                    0,
+                    false,
+                    true,
+                    &[],
+                    false,
+                    None,
+                )?;
             } else {
                 println!("\n  Next step:\n    palace mine {}\n", dir.display());
             }
@@ -389,6 +400,7 @@ pub fn run() -> Result<()> {
                 !no_gitignore,
                 &include,
                 false,
+                None,
             )?;
         }
 

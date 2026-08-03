@@ -4,6 +4,32 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Fixed
+
+- **`palace mine` hangs/timeouts on larger-but-not-huge projects** — mining
+  wrote every drawer, and every unique BM25 term within it, as its own
+  separate SQLite autocommit transaction with no cached prepared statements.
+  A project with a few thousand chunks turned into hundreds of thousands of
+  individual DB round-trips, which could stall for minutes and breach an MCP
+  client's timeout. Writes are now batched into chunked transactions (~200
+  files per commit) using `prepare_cached` statements for the hot insert
+  paths (`add_drawer`, `index_bm25_terms`); `convo_miner::mine_convos` got the
+  identical fix. Embedding was also reworked to keep file reading/chunking
+  parallel (Rayon) but embed sequentially in larger cross-file batches
+  instead of one tiny ONNX call per file, removing contention on the shared
+  embedding session.
+
+### Changed
+
+- **MCP `palace_mine` reports live progress** — `miner::mine` now accepts an
+  optional progress callback invoked after each file is written. When an MCP
+  client requests progress via `_meta.progressToken` on the `tools/call`
+  request, the stdio server streams `notifications/progress` messages as
+  mining proceeds instead of staying silent for the whole call, so a slow
+  mine no longer looks indistinguishable from a hung server.
+
 ## [0.11.0] - 2026-07-07
 
 ### Added

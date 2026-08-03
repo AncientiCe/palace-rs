@@ -152,7 +152,46 @@ fn handle_request(
         "tools/call" => {
             let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or_default();
-            let result = dispatch_tool_with_usage(conn, config, session, tool_name, &args);
+            let progress_token = params
+                .get("_meta")
+                .and_then(|meta| meta.get("progressToken"))
+                .cloned();
+
+            // `palace_mine` can run for a long time on larger projects, and
+            // the stdio loop below only writes the final response once the
+            // whole call returns — with no progress notifications, a slow
+            // mine looks indistinguishable from a hung server. When the
+            // client opts in via `_meta.progressToken`, stream
+            // `notifications/progress` lines to stdout as each file is
+            // mined instead of staying silent for the whole call.
+            let result = if tool_name == "palace_mine" {
+                if let Some(token) = progress_token {
+                    let start = Instant::now();
+                    let mut on_progress = |done: usize, total: usize| {
+                        let notification = progress_notification(&token, done, total);
+                        let mut out = io::stdout().lock();
+                        let _ = writeln!(out, "{notification}");
+                        let _ = out.flush();
+                    };
+                    let result = mine_with_progress(config, &args, &mut on_progress);
+                    if let Err(err) = crate::usage::record_event(
+                        conn,
+                        session,
+                        tool_name,
+                        &args,
+                        &result,
+                        start.elapsed(),
+                    ) {
+                        warn!(error = %err, "Palace MCP: failed to record usage event");
+                    }
+                    result
+                } else {
+                    dispatch_tool_with_usage(conn, config, session, tool_name, &args)
+                }
+            } else {
+                dispatch_tool_with_usage(conn, config, session, tool_name, &args)
+            };
+
             Some(json!({
                 "content": [{"type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default()}]
             }))
@@ -202,7 +241,7 @@ pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args:
         "palace_list_wings" => tool_list_wings(conn),
         "palace_create_wing" => tool_create_wing(conn, args),
         "palace_project_status" => tool_project_status(conn, args),
-        "palace_mine" => tool_mine(config, args),
+        "palace_mine" => tool_mine(config, args, None),
         "palace_list_rooms" => tool_list_rooms(conn, args),
         "palace_get_taxonomy" => tool_get_taxonomy(conn),
         "palace_get_aaak_spec" => json!({"aaak_spec": AAAK_SPEC}),
@@ -688,7 +727,16 @@ fn tool_project_status(conn: &Connection, args: &Value) -> Value {
 /// Mine a project directory into the palace on demand. Opens its own
 /// connection because the shared MCP connection is immutable and the miner
 /// needs a mutable handle. Auto-initialises `palace.yaml` for first-time repos.
-fn tool_mine(config: &PalaceConfig, args: &Value) -> Value {
+///
+/// `on_progress`, when given, is forwarded to `miner::mine` so long-running
+/// mines can report visible progress instead of giving zero feedback for the
+/// whole call (see `mine_with_progress`, used by the stdio server's
+/// `notifications/progress` bridge).
+fn tool_mine(
+    config: &PalaceConfig,
+    args: &Value,
+    on_progress: Option<&mut dyn FnMut(usize, usize)>,
+) -> Value {
     let project_path = match str_arg(args, "project_path") {
         Some(p) => p,
         None => return json!({"success": false, "error": "project_path is required"}),
@@ -728,6 +776,7 @@ fn tool_mine(config: &PalaceConfig, args: &Value) -> Value {
         true,
         &[],
         true,
+        on_progress,
     ) {
         Ok(()) => {
             let status = crate::miner::project_wing_status(&conn, dir)
@@ -742,6 +791,35 @@ fn tool_mine(config: &PalaceConfig, args: &Value) -> Value {
         }
         Err(e) => json!({"success": false, "error": e.to_string()}),
     }
+}
+
+/// Mine a project with progress reporting.
+///
+/// Additive alongside `dispatch_tool`'s plain `palace_mine` path (which keeps
+/// working exactly as before, with no progress callback, for any caller that
+/// doesn't need it): this is the entry point the stdio server uses to bridge
+/// `miner::mine`'s per-file progress into MCP `notifications/progress`
+/// messages when the client asked for them via `_meta.progressToken`.
+pub fn mine_with_progress(
+    config: &PalaceConfig,
+    args: &Value,
+    on_progress: &mut dyn FnMut(usize, usize),
+) -> Value {
+    tool_mine(config, args, Some(on_progress))
+}
+
+/// Build a `notifications/progress` JSON-RPC notification. Per the MCP spec,
+/// notifications carry no `id` and expect no response.
+fn progress_notification(token: &Value, progress: usize, total: usize) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+            "progressToken": token,
+            "progress": progress,
+            "total": total,
+        }
+    })
 }
 
 fn tool_list_rooms(conn: &Connection, args: &Value) -> Value {
@@ -2596,6 +2674,22 @@ mod tests {
                 "pinned tool {pinned} is not present in tool_list"
             );
         }
+    }
+
+    #[test]
+    fn progress_notification_has_no_id_and_carries_the_caller_token() {
+        let token = json!("abc-123");
+        let notification = progress_notification(&token, 3, 10);
+
+        assert_eq!(notification["jsonrpc"], "2.0");
+        assert!(
+            notification.get("id").is_none(),
+            "notifications must not carry an id per the JSON-RPC/MCP spec"
+        );
+        assert_eq!(notification["method"], "notifications/progress");
+        assert_eq!(notification["params"]["progressToken"], token);
+        assert_eq!(notification["params"]["progress"], 3);
+        assert_eq!(notification["params"]["total"], 10);
     }
 
     #[test]

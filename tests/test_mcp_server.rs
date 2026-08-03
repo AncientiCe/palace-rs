@@ -902,3 +902,68 @@ fn list_wings_returns_registry_records() {
         "registry should list topic_x: {result}"
     );
 }
+
+// ── palace_mine progress reporting (MCP liveness fix) ───────────────────────
+//
+// `tool_mine` opens its own connection via `config.palace_db_path()` (it
+// can't share the immutable `conn` handed to `dispatch_tool`), so these tests
+// isolate the palace directory via `with_config_dir` rather than touching the
+// real user's `~/.palace`.
+
+#[test]
+fn mine_with_progress_reports_each_file_and_returns_success() {
+    let config_dir = tempfile::TempDir::new().unwrap();
+    let config = palace::config::PalaceConfig::with_config_dir(Some(config_dir.path()));
+
+    let project = tempfile::TempDir::new().unwrap();
+    palace::room_detector::save_config(
+        project.path(),
+        "mcp_progress_test",
+        &[palace::room_detector::Room {
+            name: "general".into(),
+            description: "general".into(),
+            keywords: vec![],
+        }],
+    )
+    .unwrap();
+    for i in 0..4 {
+        std::fs::write(
+            project.path().join(format!("note_{i}.txt")),
+            format!(
+                "some unique content about topic number {i} for testing mine progress reporting."
+            ),
+        )
+        .unwrap();
+    }
+
+    let args = serde_json::json!({ "project_path": project.path().to_string_lossy() });
+    let mut seen: Vec<(usize, usize)> = Vec::new();
+    let mut on_progress = |done: usize, total: usize| seen.push((done, total));
+    let result = palace::mcp_server::mine_with_progress(&config, &args, &mut on_progress);
+
+    assert_eq!(result["success"], true, "{result}");
+    assert_eq!(
+        seen.len(),
+        4,
+        "expected one progress call per file: {seen:?}"
+    );
+    assert_eq!(seen.last(), Some(&(4, 4)));
+}
+
+#[test]
+fn dispatch_tool_mine_still_works_without_a_progress_callback() {
+    let conn = test_db();
+    let config_dir = tempfile::TempDir::new().unwrap();
+    let config = palace::config::PalaceConfig::with_config_dir(Some(config_dir.path()));
+
+    let project = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        project.path().join("note.txt"),
+        "some unique content for testing the plain palace_mine dispatch path.",
+    )
+    .unwrap();
+
+    let args = serde_json::json!({ "project_path": project.path().to_string_lossy() });
+    let result = palace::mcp_server::dispatch_tool(&conn, &config, "palace_mine", &args);
+    assert_eq!(result["success"], true, "{result}");
+}
