@@ -1,4 +1,4 @@
-//! AAAK dialect — compressed memory format for MemPalace.
+//! AAAK dialect — compressed memory format for Palace.
 //!
 //! Contains the AAAK spec and PALACE_PROTOCOL constants used in MCP status responses.
 //! Also provides token counting and basic compression stats. Port of dialect.py.
@@ -79,7 +79,7 @@ pub fn palace_protocol(profile: crate::config::Profile) -> &'static str {
 }
 
 /// The AAAK compressed memory dialect specification.
-pub const AAAK_SPEC: &str = "AAAK is a compressed memory dialect that MemPalace uses for efficient storage.
+pub const AAAK_SPEC: &str = "AAAK is a compressed memory dialect that Palace uses for efficient storage.
 It is designed to be readable by both humans and LLMs without decoding.
 
 FORMAT:

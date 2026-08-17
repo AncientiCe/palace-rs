@@ -344,7 +344,7 @@ pub fn mine(
 
     if !quiet {
         println!("\n{}", "=".repeat(55));
-        println!("  MemPalace Mine");
+        println!("  Palace Mine");
         println!("{}", "=".repeat(55));
         println!("  Wing:    {wing}");
         println!(

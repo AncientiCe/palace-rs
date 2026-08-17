@@ -284,7 +284,7 @@ pub fn mine_convos(
     }
 
     println!("\n{}", "=".repeat(55));
-    println!("  MemPalace Mine — Conversations");
+    println!("  Palace Mine — Conversations");
     println!("{}", "=".repeat(55));
     println!("  Wing:    {wing}");
     println!("  Source:  {}", convo_path.display());

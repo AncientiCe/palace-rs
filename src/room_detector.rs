@@ -401,7 +401,7 @@ pub fn detect_rooms_interactive(
     }
 
     println!("\n{}", "=".repeat(55));
-    println!("  MemPalace Init — Local setup");
+    println!("  Palace Init — Local setup");
     println!("{}", "=".repeat(55));
     println!(
         "\n  WING: {}",

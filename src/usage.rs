@@ -1,4 +1,4 @@
-//! Local usage telemetry for MemPalace MCP calls.
+//! Local usage telemetry for Palace MCP calls.
 //!
 //! The recorder is best-effort: failures never change MCP tool behavior.
 

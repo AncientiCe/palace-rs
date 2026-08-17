@@ -78,7 +78,7 @@ fn detect_entities_from_text(text: &str) -> (Vec<String>, Vec<String>) {
 /// Run the interactive onboarding wizard.
 pub fn run_onboarding(project_dir: &Path, config_dir: &Path) -> Result<()> {
     println!("\n{}", "=".repeat(55));
-    println!("  MemPalace Onboarding");
+    println!("  Palace Onboarding");
     println!("{}", "=".repeat(55));
     println!("\n  Scanning project for entities...\n");
 

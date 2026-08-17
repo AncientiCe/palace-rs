@@ -4,6 +4,17 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Fixed
+
+- **CLI and MCP text still said "MemPalace"** — the `init`, `mine`,
+  `mine-convos`, and onboarding banners, the AAAK dialect spec returned by
+  `palace_get_aaak_spec`/`palace_status`, and the usage-telemetry module doc
+  now use the current **Palace** branding. Legacy `mempalace` migration
+  handling in `install` (0.1.x config/rule cleanup) is intentionally
+  unchanged.
+
 ## [0.12.0] - 2026-08-03
 
 ### Fixed
