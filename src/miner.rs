@@ -16,7 +16,10 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::room_detector::{load_config, Room};
-use crate::store::{add_drawer, file_already_mined};
+use crate::store::{
+    content_hash, delete_drawers_for_file, file_already_mined, get_mined_file_hash,
+    mined_files_for_wing, replace_file_drawers,
+};
 
 /// Whether a project directory has been mined into the palace yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -279,13 +282,66 @@ pub fn detect_room(filepath: &Path, content: &str, rooms: &[Room], project_path:
     "general".to_string()
 }
 
-/// Mine a project directory into the palace.
+/// Outcome summary for a single `mine()` run.
+///
+/// `mine` is a sync, not a one-shot ingest: re-running it against the same
+/// project picks up edited files (`updated_files`) and drops drawers for
+/// files that no longer exist on disk (`removed_files`), instead of silently
+/// skipping every file that already has drawers forever.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MineSummary {
+    pub new_files: usize,
+    pub updated_files: usize,
+    pub unchanged_files: usize,
+    pub removed_files: usize,
+    pub drawers_added: usize,
+    pub drawers_removed: usize,
+}
+
+/// Whether a file being (re-)mined is new to the palace or was seen before
+/// under a different content hash.
+#[derive(Debug, Clone, Copy)]
+enum FileChange {
+    New,
+    Updated,
+}
+
+struct PendingFile {
+    filepath: std::path::PathBuf,
+    content: String,
+    hash: String,
+    change: FileChange,
+}
+
+struct ChunkedFile {
+    filepath: std::path::PathBuf,
+    hash: String,
+    change: FileChange,
+    room: String,
+    chunks: Vec<(String, usize)>,
+}
+
+struct PreparedFile {
+    filepath: std::path::PathBuf,
+    hash: String,
+    change: FileChange,
+    room: String,
+    chunk_entries: Vec<(String, usize, Vec<f32>)>, // (text, chunk_index, embedding)
+}
+
+/// Mine a project directory into the palace, syncing it with what's on disk.
+///
+/// Unlike a one-shot ingest, re-running `mine` against the same project:
+/// - re-mines files whose content hash changed since the last run, replacing
+///   their old drawers with fresh ones (so edits are actually picked up);
+/// - leaves files with an unchanged hash untouched;
+/// - removes drawers for previously-mined files that no longer exist on disk.
 ///
 /// `on_progress`, when given, is invoked as `(files_done, files_total)` after
-/// each file is processed during the write phase. This lets long-running
-/// callers (notably the MCP server, which otherwise gives zero feedback for
-/// the whole duration of a mine) report visible progress instead of looking
-/// stuck.
+/// each changed file is processed during the write phase. This lets
+/// long-running callers (notably the MCP server, which otherwise gives zero
+/// feedback for the whole duration of a mine) report visible progress
+/// instead of looking stuck.
 #[allow(clippy::too_many_arguments)]
 pub fn mine(
     conn: &mut Connection,
@@ -298,7 +354,7 @@ pub fn mine(
     include_ignored: &[String],
     quiet: bool,
     mut on_progress: Option<&mut dyn FnMut(usize, usize)>,
-) -> Result<()> {
+) -> Result<MineSummary> {
     let project_path = project_dir
         .canonicalize()
         .context("resolving project dir")?;
@@ -362,56 +418,73 @@ pub fn mine(
         println!("{}\n", "-".repeat(55));
     }
 
-    let mut total_drawers = 0usize;
-    let mut files_skipped = 0usize;
+    let mut summary = MineSummary::default();
     let mut room_counts: HashMap<String, usize> = HashMap::new();
 
-    // ── Phase 1: filter already-mined files (serial, DB read) ──────────────
-    let pending: Vec<_> = files
-        .iter()
-        .filter(|fp| {
-            if dry_run {
-                return true;
-            }
-            let source = fp.to_string_lossy();
-            match file_already_mined(conn, &source) {
-                Ok(true) => {
-                    files_skipped += 1;
-                    false
-                }
-                _ => true,
-            }
-        })
-        .collect();
-
-    // ── Phase 2a: read + chunk in parallel (Rayon) ──────────────────────────
-    // No embedding here: the ONNX session is a single mutex-guarded resource
-    // (see `embedder::embed_batch`), so embedding per file from multiple
-    // Rayon workers just serializes everyone behind that mutex anyway, while
-    // still paying per-call overhead once per file. Keep Rayon for the
-    // genuinely parallelizable read+chunk work and embed separately below.
-    let file_count_total = files.len();
-    type RawChunks = (std::path::PathBuf, String, Vec<(String, usize)>);
-    let chunked: Vec<RawChunks> = pending
+    // ── Phase 1: read + hash in parallel, classify serially (DB read) ──────
+    // A file is "unchanged" only when its content hash matches the hash
+    // recorded the last time it was synced; anything else — never seen,
+    // edited, or mined before `mined_files` existed — gets re-chunked and
+    // re-embedded below. This is what lets `mine` pick up edits instead of
+    // skipping any file that already has drawers forever.
+    let read: Vec<(std::path::PathBuf, String, String)> = files
         .par_iter()
         .filter_map(|filepath| {
             let content = std::fs::read_to_string(filepath).ok()?;
             let content = content.trim().to_string();
-            if content.len() < MIN_CHUNK_SIZE {
-                return None;
+            let hash = content_hash(&content);
+            Some(((*filepath).clone(), content, hash))
+        })
+        .collect();
+
+    let mut pending: Vec<PendingFile> = Vec::new();
+    for (filepath, content, hash) in read {
+        let source = filepath.to_string_lossy().to_string();
+        let previous_hash = get_mined_file_hash(conn, &source)?;
+        if previous_hash.as_deref() == Some(hash.as_str()) {
+            summary.unchanged_files += 1;
+            continue;
+        }
+        let change = if previous_hash.is_some() || file_already_mined(conn, &source)? {
+            FileChange::Updated
+        } else {
+            FileChange::New
+        };
+        pending.push(PendingFile {
+            filepath,
+            content,
+            hash,
+            change,
+        });
+    }
+
+    // ── Phase 2a: chunk in parallel (Rayon) ─────────────────────────────────
+    // No embedding here: the ONNX session is a single mutex-guarded resource
+    // (see `embedder::embed_batch`), so embedding per file from multiple
+    // Rayon workers just serializes everyone behind that mutex anyway, while
+    // still paying per-call overhead once per file. Keep Rayon for the
+    // genuinely parallelizable chunk work and embed separately below.
+    //
+    // Files whose content shrank below the minimum chunk size still go
+    // through with an empty chunk list rather than being dropped, so phase 3
+    // clears their now-stale drawers instead of leaving orphans behind.
+    let chunked: Vec<ChunkedFile> = pending
+        .par_iter()
+        .map(|p| {
+            let room = detect_room(&p.filepath, &p.content, &rooms, &project_path);
+            let chunks = chunk_text(&p.content);
+            ChunkedFile {
+                filepath: p.filepath.clone(),
+                hash: p.hash.clone(),
+                change: p.change,
+                room,
+                chunks,
             }
-            let room = detect_room(filepath, &content, &rooms, &project_path);
-            let chunks = chunk_text(&content);
-            if chunks.is_empty() {
-                return None;
-            }
-            Some(((*filepath).clone(), room, chunks))
         })
         .collect();
 
     // ── Phase 2b: embed in capped cross-file batches (sequential) ──────────
-    type ChunkEntry = (String, usize, Vec<f32>); // (text, chunk_index, embedding)
-    let chunk_counts: Vec<usize> = chunked.iter().map(|(_, _, chunks)| chunks.len()).collect();
+    let chunk_counts: Vec<usize> = chunked.iter().map(|f| f.chunks.len()).collect();
     let mut embeddings_by_file: Vec<Vec<Vec<f32>>> = chunk_counts
         .iter()
         .map(|&count| vec![Vec::new(); count])
@@ -420,7 +493,7 @@ pub fn mine(
     for batch in group_into_batches(&chunk_counts, EMBED_BATCH_SIZE) {
         let texts: Vec<&str> = batch
             .iter()
-            .map(|&(file_index, chunk_index)| chunked[file_index].2[chunk_index].0.as_str())
+            .map(|&(file_index, chunk_index)| chunked[file_index].chunks[chunk_index].0.as_str())
             .collect();
         let embeddings = crate::embedder::embed_batch(&texts).unwrap_or_default();
         for (position, &(file_index, chunk_index)) in batch.iter().enumerate() {
@@ -430,16 +503,23 @@ pub fn mine(
         }
     }
 
-    let prepared: Vec<(std::path::PathBuf, String, Vec<ChunkEntry>)> = chunked
+    let prepared: Vec<PreparedFile> = chunked
         .into_iter()
         .zip(embeddings_by_file)
-        .map(|((filepath, room, chunks), embeddings)| {
-            let chunk_entries: Vec<ChunkEntry> = chunks
+        .map(|(f, embeddings)| {
+            let chunk_entries = f
+                .chunks
                 .into_iter()
                 .zip(embeddings)
                 .map(|((text, chunk_index), embedding)| (text, chunk_index, embedding))
                 .collect();
-            (filepath, room, chunk_entries)
+            PreparedFile {
+                filepath: f.filepath,
+                hash: f.hash,
+                change: f.change,
+                room: f.room,
+                chunk_entries,
+            }
         })
         .collect();
 
@@ -450,60 +530,65 @@ pub fn mine(
     // `mine` stalling/timing out on larger-but-not-huge projects. Batching
     // writes into `MINE_BATCH_SIZE`-file transactions cuts that to a handful
     // of commits while still bounding how much progress a killed/timed-out
-    // run loses (the next run's `file_already_mined` dedup check picks up
-    // wherever the last committed batch left off).
+    // run loses (the next run's content-hash check picks up wherever the
+    // last committed batch left off).
     if dry_run {
-        for (filepath, room, chunk_entries) in &prepared {
-            if !quiet {
-                println!(
-                    "    [DRY RUN] {} → room:{room} ({} drawers)",
-                    filepath.file_name().unwrap_or_default().to_string_lossy(),
-                    chunk_entries.len()
-                );
+        for file in &prepared {
+            match file.change {
+                FileChange::New => summary.new_files += 1,
+                FileChange::Updated => summary.updated_files += 1,
             }
-            total_drawers += chunk_entries.len();
-            *room_counts.entry(room.clone()).or_default() += 1;
+            if !file.chunk_entries.is_empty() {
+                if !quiet {
+                    println!(
+                        "    [DRY RUN] {} → room:{} ({} drawers)",
+                        file.filepath
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy(),
+                        file.room,
+                        file.chunk_entries.len()
+                    );
+                }
+                summary.drawers_added += file.chunk_entries.len();
+                *room_counts.entry(file.room.clone()).or_default() += 1;
+            }
         }
     } else {
         let total_prepared = prepared.len();
         for (batch_index, batch) in prepared.chunks(MINE_BATCH_SIZE).enumerate() {
             let tx = conn.transaction().context("starting mine transaction")?;
-            for (offset, (filepath, room, chunk_entries)) in batch.iter().enumerate() {
+            for (offset, file) in batch.iter().enumerate() {
                 let global_index = batch_index * MINE_BATCH_SIZE + offset;
-                let source_file = filepath.to_string_lossy().to_string();
+                let source_file = file.filepath.to_string_lossy().to_string();
 
-                let mut drawers_added = 0usize;
-                for (chunk_text, chunk_index, emb) in chunk_entries {
-                    let embedding = if emb.is_empty() {
-                        None
-                    } else {
-                        Some(emb.as_slice())
-                    };
-                    let (added, _) = add_drawer(
-                        &tx,
-                        &wing,
-                        room,
-                        chunk_text,
-                        embedding,
-                        &source_file,
-                        *chunk_index,
-                        agent,
-                        3.0,
-                    )?;
-                    if added {
-                        drawers_added += 1;
-                    }
+                let drawers_added = replace_file_drawers(
+                    &tx,
+                    &wing,
+                    &file.room,
+                    &source_file,
+                    &file.hash,
+                    &file.chunk_entries,
+                    agent,
+                    3.0,
+                )?;
+
+                match file.change {
+                    FileChange::New => summary.new_files += 1,
+                    FileChange::Updated => summary.updated_files += 1,
                 }
-
+                summary.drawers_added += drawers_added;
                 if drawers_added > 0 {
-                    *room_counts.entry(room.clone()).or_default() += 1;
-                    total_drawers += drawers_added;
+                    *room_counts.entry(file.room.clone()).or_default() += 1;
                     if !quiet {
                         println!(
                             "  ✓ [{:4}/{}] {:50} +{drawers_added}",
                             global_index + 1,
-                            file_count_total,
-                            filepath.file_name().unwrap_or_default().to_string_lossy()
+                            total_prepared,
+                            file.filepath
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
                         );
                     }
                 }
@@ -521,12 +606,41 @@ pub fn mine(
             .context("recording wing mine status")?;
     }
 
+    // ── Phase 4: prune drawers for files that no longer exist on disk ──────
+    // Scoped to files still on disk, not to this run's (possibly limited or
+    // gitignore-filtered) walk, so `--limit` or a widened `.gitignore` can
+    // never be mistaken for mass deletion.
+    for source in mined_files_for_wing(conn, &wing)? {
+        if Path::new(&source).exists() {
+            continue;
+        }
+        if dry_run {
+            summary.removed_files += 1;
+            if !quiet {
+                println!("    [DRY RUN] {source} → would remove (file no longer exists)");
+            }
+            continue;
+        }
+        let removed = delete_drawers_for_file(conn, &source)?;
+        summary.removed_files += 1;
+        summary.drawers_removed += removed;
+        if !quiet {
+            println!("  ✗ removed {source} ({removed} drawer(s), file no longer exists)");
+        }
+    }
+
     if !quiet {
         println!("\n{}", "=".repeat(55));
         println!("  Done.");
-        println!("  Files processed: {}", files.len() - files_skipped);
-        println!("  Files skipped (already filed): {files_skipped}");
-        println!("  Drawers filed: {total_drawers}");
+        println!("  Files scanned:   {}", files.len());
+        println!("  New:             {}", summary.new_files);
+        println!("  Updated:         {}", summary.updated_files);
+        println!("  Unchanged:       {}", summary.unchanged_files);
+        println!("  Removed:         {}", summary.removed_files);
+        println!("  Drawers filed:   {}", summary.drawers_added);
+        if summary.drawers_removed > 0 {
+            println!("  Drawers removed: {}", summary.drawers_removed);
+        }
         println!("\n  By room:");
         let mut sorted: Vec<(&String, &usize)> = room_counts.iter().collect();
         sorted.sort_by(|a, b| b.1.cmp(a.1));
@@ -537,7 +651,7 @@ pub fn mine(
         println!("{}", "=".repeat(55));
     }
 
-    Ok(())
+    Ok(summary)
 }
 
 /// Re-embed all drawers that are missing embeddings.

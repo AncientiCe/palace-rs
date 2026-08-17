@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -228,6 +228,135 @@ pub fn file_already_mined(conn: &Connection, source_file: &str) -> Result<bool> 
         )
         .unwrap_or(0);
     Ok(count > 0)
+}
+
+/// Deterministic content hash used to detect whether a mined file changed
+/// since it was last synced. Hashed over the same (trimmed) text that gets
+/// chunked, so a hash match means the chunks would come out identical.
+pub fn content_hash(content: &str) -> String {
+    blake3::hash(content.as_bytes()).to_hex().to_string()
+}
+
+/// The content hash recorded the last time `source_file` was synced via
+/// `replace_file_drawers`, or `None` if it has never gone through the
+/// `mined_files` tracking table (including files mined before that table
+/// existed).
+pub fn get_mined_file_hash(conn: &Connection, source_file: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT content_hash FROM mined_files WHERE source_file = ?1",
+        params![source_file],
+        |r| r.get(0),
+    )
+    .optional()
+    .context("reading mined_files hash")
+}
+
+/// Record (or refresh) that `source_file` was synced with `content_hash`,
+/// producing `chunk_count` drawers.
+pub fn upsert_mined_file(
+    conn: &Connection,
+    source_file: &str,
+    wing: &str,
+    content_hash: &str,
+    chunk_count: usize,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.prepare_cached(
+        "INSERT INTO mined_files (source_file, wing, content_hash, mined_at, chunk_count)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(source_file) DO UPDATE SET
+             wing = excluded.wing,
+             content_hash = excluded.content_hash,
+             mined_at = excluded.mined_at,
+             chunk_count = excluded.chunk_count",
+    )
+    .context("preparing mined_files upsert")?
+    .execute(params![
+        source_file,
+        wing,
+        content_hash,
+        now,
+        chunk_count as i64
+    ])
+    .context("upserting mined_files row")?;
+    Ok(())
+}
+
+/// All source files currently tracked as mined for `wing`. Used to find
+/// files that have since been deleted from disk so their drawers can be
+/// pruned.
+pub fn mined_files_for_wing(conn: &Connection, wing: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT source_file FROM mined_files WHERE wing = ?1")?;
+    let rows = stmt.query_map(params![wing], |r| r.get::<_, String>(0))?;
+    rows.map(|r| r.context("mined_files row")).collect()
+}
+
+/// Delete every drawer for `source_file` (BM25 index rows cascade via
+/// `ON DELETE CASCADE`) along with its `mined_files` tracking row. Returns
+/// the number of drawers removed.
+pub fn delete_drawers_for_file(conn: &Connection, source_file: &str) -> Result<usize> {
+    let deleted = conn
+        .execute(
+            "DELETE FROM drawers WHERE source_file = ?1",
+            params![source_file],
+        )
+        .context("deleting drawers for file")?;
+    conn.execute(
+        "DELETE FROM mined_files WHERE source_file = ?1",
+        params![source_file],
+    )
+    .context("deleting mined_files row")?;
+    Ok(deleted)
+}
+
+/// Replace all drawers for `source_file` with freshly mined `chunks`, then
+/// record `content_hash` in `mined_files`. Used for both new and changed
+/// files: unlike the plain `INSERT OR IGNORE` in `add_drawer`, this makes a
+/// re-mine actually pick up edited content instead of leaving the stale
+/// drawer in place. Also correctly drops now-stale high-index chunks when a
+/// file shrinks (e.g. 5 chunks down to 2 removes the old chunks 2-4).
+#[allow(clippy::too_many_arguments)]
+pub fn replace_file_drawers(
+    conn: &Connection,
+    wing: &str,
+    room: &str,
+    source_file: &str,
+    content_hash: &str,
+    chunks: &[(String, usize, Vec<f32>)],
+    added_by: &str,
+    importance: f64,
+) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM drawers WHERE source_file = ?1",
+        params![source_file],
+    )
+    .context("clearing stale drawers before re-mine")?;
+
+    let mut added = 0usize;
+    for (text, chunk_index, embedding) in chunks {
+        let emb = if embedding.is_empty() {
+            None
+        } else {
+            Some(embedding.as_slice())
+        };
+        let (inserted, _) = add_drawer(
+            conn,
+            wing,
+            room,
+            text,
+            emb,
+            source_file,
+            *chunk_index,
+            added_by,
+            importance,
+        )?;
+        if inserted {
+            added += 1;
+        }
+    }
+
+    upsert_mined_file(conn, source_file, wing, content_hash, chunks.len())?;
+    Ok(added)
 }
 
 /// Total number of drawers in the palace.

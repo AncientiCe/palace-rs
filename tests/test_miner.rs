@@ -434,6 +434,302 @@ fn mine_reports_progress_after_each_file() {
     }
 }
 
+// ── Incremental re-mining ("mine as sync") ──────────────────────────────────
+
+#[test]
+fn mine_rerun_updates_content_when_file_changes() {
+    let project = TempDir::new().unwrap();
+    write_test_project(project.path(), 3);
+    let mut conn = palace::db::open_in_memory().unwrap();
+
+    let summary = mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(summary.new_files, 3);
+    assert_eq!(summary.updated_files, 0);
+
+    let edited_path = project.path().join("note_000.txt");
+    let edited_canonical = edited_path
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    std::fs::write(
+        &edited_path,
+        "completely different content for the regression test on edits, unique marker replaced.",
+    )
+    .unwrap();
+
+    let summary2 = mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        summary2.updated_files, 1,
+        "the edited file should be classified as updated"
+    );
+    assert_eq!(
+        summary2.unchanged_files, 2,
+        "untouched files should be reported as unchanged"
+    );
+    assert_eq!(summary2.new_files, 0);
+
+    let drawers =
+        palace::store::list_drawers(&conn, &palace::store::DrawerFilter::default(), 100).unwrap();
+    let edited_drawer = drawers
+        .iter()
+        .find(|d| d.source_file == edited_canonical)
+        .expect("edited file should still have a drawer");
+    assert!(
+        edited_drawer
+            .content
+            .contains("completely different content"),
+        "drawer content should reflect the edit, not the stale original"
+    );
+}
+
+#[test]
+fn mine_rerun_removes_drawers_for_deleted_file() {
+    let project = TempDir::new().unwrap();
+    write_test_project(project.path(), 3);
+    let mut conn = palace::db::open_in_memory().unwrap();
+
+    mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(palace::store::count_drawers(&conn).unwrap(), 3);
+
+    let removed_path = project.path().join("note_001.txt");
+    let removed_canonical = removed_path
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    std::fs::remove_file(&removed_path).unwrap();
+
+    let summary = mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(summary.removed_files, 1);
+    assert_eq!(summary.unchanged_files, 2);
+    assert_eq!(palace::store::count_drawers(&conn).unwrap(), 2);
+    assert!(
+        palace::store::get_mined_file_hash(&conn, &removed_canonical)
+            .unwrap()
+            .is_none()
+    );
+
+    let bm25_doc_stats: i64 = conn
+        .query_row("SELECT COUNT(*) FROM bm25_doc_stats", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        bm25_doc_stats,
+        palace::store::count_drawers(&conn).unwrap(),
+        "bm25 doc stats should track exactly the surviving drawers"
+    );
+}
+
+#[test]
+fn mine_rerun_removes_stale_chunks_when_file_shrinks() {
+    let project = TempDir::new().unwrap();
+    let rooms = vec![Room {
+        name: "general".into(),
+        description: "general project content".into(),
+        keywords: vec![],
+    }];
+    save_config(project.path(), "shrink_test", &rooms).unwrap();
+
+    let big_content = "alpha bravo charlie delta echo foxtrot golf hotel india juliet ".repeat(60);
+    let file_path = project.path().join("big.txt");
+    std::fs::write(&file_path, &big_content).unwrap();
+
+    let mut conn = palace::db::open_in_memory().unwrap();
+    mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    let before = palace::store::count_drawers(&conn).unwrap();
+    assert!(before >= 2, "a big file should chunk into multiple drawers");
+
+    std::fs::write(
+        &file_path,
+        "alpha bravo charlie delta echo unique marker only one small chunk remains.",
+    )
+    .unwrap();
+
+    let summary = mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(summary.updated_files, 1);
+    let after = palace::store::count_drawers(&conn).unwrap();
+    assert_eq!(
+        after, 1,
+        "shrinking the file should drop the now-stale extra chunks"
+    );
+}
+
+#[test]
+fn mine_rerun_with_no_changes_does_not_rewrite_drawers() {
+    let project = TempDir::new().unwrap();
+    write_test_project(project.path(), 5);
+    let mut conn = palace::db::open_in_memory().unwrap();
+
+    mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+
+    let commits = Arc::new(AtomicUsize::new(0));
+    {
+        let counter = commits.clone();
+        conn.commit_hook(Some(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+    }
+
+    let summary = mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(summary.new_files, 0);
+    assert_eq!(summary.updated_files, 0);
+    assert_eq!(summary.unchanged_files, 5);
+    assert_eq!(summary.drawers_added, 0);
+
+    let total_commits = commits.load(Ordering::SeqCst);
+    assert!(
+        total_commits <= 1,
+        "re-mining with zero content changes must not open a per-file write \
+         transaction (saw {total_commits} commits, only the wing-mined \
+         bookkeeping write is expected)"
+    );
+}
+
+#[test]
+fn mine_does_not_delete_drawers_for_files_still_on_disk_when_limited() {
+    let project = TempDir::new().unwrap();
+    write_test_project(project.path(), 6);
+    let mut conn = palace::db::open_in_memory().unwrap();
+
+    // First mine everything.
+    mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(palace::store::count_drawers(&conn).unwrap(), 6);
+
+    // Re-mine with a limit that only walks a subset of files. Files outside
+    // the limited walk still exist on disk, so their drawers must survive.
+    let summary = mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        2,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        summary.removed_files, 0,
+        "--limit must never be mistaken for mass deletion of files still on disk"
+    );
+    assert_eq!(
+        palace::store::count_drawers(&conn).unwrap(),
+        6,
+        "drawers for files outside the limited walk must be untouched"
+    );
+}
+
 #[test]
 fn mine_without_progress_callback_still_succeeds() {
     let project = TempDir::new().unwrap();

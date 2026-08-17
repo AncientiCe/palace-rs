@@ -778,7 +778,7 @@ fn tool_mine(
         true,
         on_progress,
     ) {
-        Ok(()) => {
+        Ok(summary) => {
             let status = crate::miner::project_wing_status(&conn, dir)
                 .ok()
                 .and_then(|s| serde_json::to_value(s).ok());
@@ -787,6 +787,7 @@ fn tool_mine(
                 "project_path": project_path,
                 "dry_run": dry_run,
                 "status": status,
+                "summary": summary,
             })
         }
         Err(e) => json!({"success": false, "error": e.to_string()}),
@@ -2063,7 +2064,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_mine",
-            "description": "Mine a CODE REPOSITORY directory into the palace (only after the user agrees). Repos only — chats or non-repo topics have no folder to mine, use palace_create_wing for those. Accepting this implicitly initialises palace.yaml for first-time repos and then ingests files into the project's wing in one step.",
+            "description": "Mine (or re-sync) a CODE REPOSITORY directory into the palace (only after the user agrees). Repos only — chats or non-repo topics have no folder to mine, use palace_create_wing for those. Accepting this implicitly initialises palace.yaml for first-time repos and then syncs files into the project's wing: new files are added, edited files are re-mined so their drawers reflect the latest content, unchanged files are left alone, and drawers for files deleted from disk are removed. The result's `summary` field reports new/updated/unchanged/removed file counts.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

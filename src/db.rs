@@ -112,6 +112,20 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_wings_kind ON wings(kind);
         CREATE INDEX IF NOT EXISTS idx_wings_path ON wings(project_path);
 
+        -- ── Mined files tracking ─────────────────────────────────────────────
+        -- Content-hash checkpoint per mined source file, so `mine` can tell
+        -- new/changed/unchanged apart on re-runs instead of skipping any file
+        -- that already has drawers forever. Also the basis for pruning
+        -- drawers of files that have since been deleted from disk.
+        CREATE TABLE IF NOT EXISTS mined_files (
+            source_file  TEXT PRIMARY KEY,
+            wing         TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            mined_at     TEXT NOT NULL,
+            chunk_count  INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mined_files_wing ON mined_files(wing);
+
         -- ── BM25 index ───────────────────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS bm25_terms (
             drawer_id   TEXT NOT NULL REFERENCES drawers(id) ON DELETE CASCADE,

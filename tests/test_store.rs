@@ -319,6 +319,182 @@ fn file_already_mined_check() {
     assert!(file_already_mined(&conn, "unique_file.txt").unwrap());
 }
 
+// ── Incremental re-mining tracking (`mined_files`) ──────────────────────────
+
+#[test]
+fn upsert_mined_file_tracks_hash_and_is_queryable() {
+    let conn = open_test_db();
+    assert!(get_mined_file_hash(&conn, "a.txt").unwrap().is_none());
+
+    upsert_mined_file(&conn, "a.txt", "wing_a", "hash1", 2).unwrap();
+    assert_eq!(
+        get_mined_file_hash(&conn, "a.txt").unwrap().as_deref(),
+        Some("hash1")
+    );
+
+    upsert_mined_file(&conn, "a.txt", "wing_a", "hash2", 3).unwrap();
+    assert_eq!(
+        get_mined_file_hash(&conn, "a.txt").unwrap().as_deref(),
+        Some("hash2"),
+        "re-upserting the same file should refresh its hash, not duplicate it"
+    );
+}
+
+#[test]
+fn mined_files_for_wing_lists_only_that_wing() {
+    let conn = open_test_db();
+    upsert_mined_file(&conn, "a.txt", "wing_a", "h1", 1).unwrap();
+    upsert_mined_file(&conn, "b.txt", "wing_b", "h2", 1).unwrap();
+
+    let files = mined_files_for_wing(&conn, "wing_a").unwrap();
+    assert_eq!(files, vec!["a.txt".to_string()]);
+}
+
+#[test]
+fn delete_drawers_for_file_removes_chunks_bm25_rows_and_tracking() {
+    let conn = open_test_db();
+    for idx in 0..3 {
+        add_drawer(
+            &conn,
+            "wing_x",
+            "room_x",
+            &format!("chunk {idx} unique content marker delete-target"),
+            None,
+            "multi.txt",
+            idx,
+            "test",
+            3.0,
+        )
+        .unwrap();
+    }
+    upsert_mined_file(&conn, "multi.txt", "wing_x", "somehash", 3).unwrap();
+
+    let removed = delete_drawers_for_file(&conn, "multi.txt").unwrap();
+    assert_eq!(removed, 3);
+
+    let remaining_drawers: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM drawers WHERE source_file = 'multi.txt'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining_drawers, 0);
+
+    let bm25_terms: i64 = conn
+        .query_row("SELECT COUNT(*) FROM bm25_terms", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        bm25_terms, 0,
+        "bm25 terms should cascade-delete with their drawers"
+    );
+
+    assert!(get_mined_file_hash(&conn, "multi.txt").unwrap().is_none());
+}
+
+#[test]
+fn replace_file_drawers_updates_content_instead_of_appending() {
+    let conn = open_test_db();
+    let chunks_v1 = vec![(
+        "first version content unique marker one".to_string(),
+        0usize,
+        vec![],
+    )];
+    replace_file_drawers(
+        &conn, "wing_a", "room_a", "note.txt", "hash1", &chunks_v1, "test", 3.0,
+    )
+    .unwrap();
+
+    let drawers_v1 = list_drawers(&conn, &DrawerFilter::default(), 10).unwrap();
+    assert_eq!(drawers_v1.len(), 1);
+    assert!(drawers_v1[0].content.contains("first version"));
+
+    let chunks_v2 = vec![(
+        "second version content unique marker two".to_string(),
+        0usize,
+        vec![],
+    )];
+    replace_file_drawers(
+        &conn, "wing_a", "room_a", "note.txt", "hash2", &chunks_v2, "test", 3.0,
+    )
+    .unwrap();
+
+    let drawers_v2 = list_drawers(&conn, &DrawerFilter::default(), 10).unwrap();
+    assert_eq!(
+        drawers_v2.len(),
+        1,
+        "the old chunk should be replaced, not appended alongside the new one"
+    );
+    assert!(drawers_v2[0].content.contains("second version"));
+    assert_eq!(
+        get_mined_file_hash(&conn, "note.txt").unwrap().as_deref(),
+        Some("hash2")
+    );
+}
+
+#[test]
+fn replace_file_drawers_drops_stale_high_index_chunks_when_shrinking() {
+    let conn = open_test_db();
+    let chunks_v1 = vec![
+        (
+            "chunk zero content unique marker zero".to_string(),
+            0usize,
+            vec![],
+        ),
+        (
+            "chunk one content unique marker one".to_string(),
+            1usize,
+            vec![],
+        ),
+        (
+            "chunk two content unique marker two".to_string(),
+            2usize,
+            vec![],
+        ),
+    ];
+    replace_file_drawers(
+        &conn,
+        "wing_a",
+        "room_a",
+        "shrinking.txt",
+        "hash1",
+        &chunks_v1,
+        "test",
+        3.0,
+    )
+    .unwrap();
+    assert_eq!(
+        list_drawers(&conn, &DrawerFilter::default(), 10)
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let chunks_v2 = vec![(
+        "just one chunk now unique marker solo".to_string(),
+        0usize,
+        vec![],
+    )];
+    replace_file_drawers(
+        &conn,
+        "wing_a",
+        "room_a",
+        "shrinking.txt",
+        "hash2",
+        &chunks_v2,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let remaining = list_drawers(&conn, &DrawerFilter::default(), 10).unwrap();
+    assert_eq!(
+        remaining.len(),
+        1,
+        "stale high-index chunks must be dropped, not left behind"
+    );
+}
+
 #[test]
 fn vector_search_returns_results() {
     let conn = open_test_db();

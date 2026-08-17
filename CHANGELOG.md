@@ -4,7 +4,26 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
-## [Unreleased]
+## [0.13.0] - 2026-08-17
+
+### Added
+
+- **`mine` is now a sync, not a one-shot ingest** — re-running `palace mine`
+  (or the MCP `palace_mine` tool) against a project you already mined used to
+  skip every file that already had drawers, forever, even after you edited
+  it. `mine` now content-hashes each file (tracked in a new `mined_files`
+  table) and: re-mines files whose hash changed, replacing their old drawers
+  with fresh ones instead of leaving stale content in place; leaves
+  unchanged files untouched; and removes drawers for previously-mined files
+  that no longer exist on disk (bounded by an on-disk existence check, so
+  `--limit` or a widened `.gitignore` can never be mistaken for mass
+  deletion). `palace watch`'s file watcher got the same fix — editing a
+  watched file now updates its drawer content instead of being silently
+  ignored by the old insert-only behaviour, and deleting a watched file now
+  removes its drawers. `mine()`'s return value changed from `()` to a
+  `MineSummary` (new/updated/unchanged/removed file counts, drawers
+  added/removed), surfaced in the CLI's mine report and in the MCP
+  `palace_mine` result's new `summary` field.
 
 ### Fixed
 
