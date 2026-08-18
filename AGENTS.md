@@ -39,12 +39,16 @@ Fix any failure before marking the task complete.
 
 ---
 
-## 4. Library-First Design
+## 4. Internal API Discipline
 
-- This crate is **consumed as a library** by Rust applications. Every public API change can break consumers.
-- Before changing public types, functions, or module structure, consider: downstream callers, the `Palace` facade, SQLite schema migrations, and embedding model compatibility.
-- Keep the public API surface minimal and ergonomic. The `Palace` struct in `src/palace.rs` is the primary facade for library consumers.
-- The CLI (`src/cli.rs`) is behind the `cli` feature flag and is secondary to the library API.
+- palace-rs is a **CLI/MCP tool**: it ships to users as compiled binaries via the Homebrew
+  tap, the install script, and the MCP registry `.mcpb` bundle.
+- Internally, the crate is split into a `[lib]` (the `Palace` facade in `src/palace.rs`)
+  and a `[[bin]]` (`src/cli.rs`, behind the `cli` feature flag). The CLI and the MCP
+  server (`src/mcp_server.rs`) both build on that internal API, so keep it clean and
+  minimal for maintainability.
+- Before changing public types, functions, or module structure, consider: the CLI and MCP
+  server call sites, SQLite schema migrations, and embedding model compatibility.
 
 ---
 
@@ -105,7 +109,7 @@ Fix any failure before marking the task complete.
 | TDD | Tests first → see fail → implement → see pass |
 | Quality | `cargo fmt` \| `cargo clippy --all-targets --all-features -- -D warnings` \| `cargo audit` \| `cargo test --all-features` |
 | No plan files | No `.md` for plans; only real documentation |
-| Library-first | Protect public API; consider downstream consumers |
+| Internal API discipline | CLI/MCP tool; keep internal `Palace` API clean for the CLI/MCP server |
 | No dead code | No unused variables, dead code, or `#[allow(dead_code)]` |
 | No mocks | No mocks; use real impls, integration tests, or explicit test doubles |
 | No placeholders | No placeholders ever; only real implementations |
