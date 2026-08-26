@@ -6,19 +6,27 @@
 //!
 //! File reading and embedding are parallelised with Rayon; SQLite writes remain
 //! single-threaded (rusqlite Connection is not Send).
+//!
+//! `mine()` processes candidate files in windows of `MINE_BATCH_SIZE` rather
+//! than materializing the whole repo (read → chunk → embed → write) before
+//! writing anything. This bounds peak memory to one window's worth of data
+//! and gets the first commit on disk in seconds instead of minutes, so a
+//! killed/timed-out run keeps whatever it already committed instead of
+//! losing everything.
 
 use anyhow::{Context, Result};
-use ignore::WalkBuilder;
+use ignore::{DirEntry, WalkBuilder};
 use rayon::prelude::*;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::room_detector::{load_config, Room};
 use crate::store::{
-    content_hash, delete_drawers_for_file, file_already_mined, get_mined_file_hash,
-    mined_files_for_wing, replace_file_drawers,
+    content_hash, delete_drawers_for_file, mined_files_for_wing, replace_file_drawers,
 };
 
 /// Whether a project directory has been mined into the palace yet.
@@ -98,12 +106,15 @@ pub const CHUNK_OVERLAP: usize = 100;
 pub const MIN_CHUNK_SIZE: usize = 50;
 
 /// How many files' worth of drawers to commit per SQLite transaction during
-/// mining. Batching bounds both ends of the tradeoff: a single transaction
-/// for the whole run would be fastest but would lose all progress if the
-/// process is interrupted (e.g. an MCP client timing out mid-mine); one
-/// transaction per drawer (the old behaviour) is what made mining stall on
-/// larger projects in the first place. A few hundred files per batch keeps
-/// commit count low while still checkpointing regularly.
+/// mining, and (since the windowed rewrite) how many candidate files are
+/// read/chunked/embedded/written together as one unit before moving to the
+/// next window. Batching bounds both ends of the tradeoff: a single
+/// transaction for the whole run would be fastest but would lose all
+/// progress if the process is interrupted (e.g. an MCP client timing out
+/// mid-mine); one transaction per drawer (the old behaviour) is what made
+/// mining stall on larger projects in the first place. A few hundred files
+/// per window keeps commit count low while still checkpointing regularly and
+/// bounding peak memory.
 ///
 /// Shared with `convo_miner::mine_convos`, which has the same write pattern.
 pub(crate) const MINE_BATCH_SIZE: usize = 200;
@@ -119,6 +130,99 @@ pub static SKIP_FILENAMES: &[&str] = &[
     ".gitignore",
     "package-lock.json",
 ];
+
+/// Directories skipped outright during the walk, independent of
+/// `.gitignore`. `.git` in particular can hold 100k-1M+ loose objects and
+/// pack index entries on a long-lived repo, every one of which would
+/// otherwise be stat'd and extension-checked only to be filtered out
+/// afterward; the rest are generated/vendored trees that are never useful to
+/// mine.
+const DENYLISTED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "Pods",
+    "DerivedData",
+    "build",
+    "dist",
+    ".next",
+    "target",
+    "vendor",
+    ".gradle",
+    "coverage",
+];
+
+/// Files larger than this are skipped during the walk rather than read and
+/// filtered out afterward — mined content is chunked prose/code, not the
+/// kind of thing that comes in single files this large.
+const MAX_WALK_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
+/// A large-enough first-ever mine of a wing that it's worth paying to drop
+/// and rebuild the (palace-wide) BM25 term index around the run rather than
+/// maintaining it incrementally. Gated on "first-ever" (see `mine`'s use of
+/// `known_hashes.is_empty()`) because the index covers every wing in the
+/// palace, not just this one — rebuilding it on every ordinary incremental
+/// re-mine of an already-large palace would be a net loss, not a win.
+const BULK_MINE_THRESHOLD: usize = 1000;
+
+fn is_denylisted_dir(entry: &DirEntry) -> bool {
+    entry.file_type().is_some_and(|ft| ft.is_dir())
+        && entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| DENYLISTED_DIRS.contains(&name))
+}
+
+/// Walk `project_path` for readable candidate files, in parallel, pruning
+/// denylisted directories and oversized files before they're ever stat'd for
+/// gitignore/extension filtering.
+fn walk_project(
+    project_path: &Path,
+    respect_gitignore: bool,
+    include_ignored: &[String],
+) -> Vec<std::path::PathBuf> {
+    let mut builder = WalkBuilder::new(project_path);
+    builder
+        .hidden(false)
+        .git_ignore(respect_gitignore)
+        .git_global(respect_gitignore)
+        .git_exclude(respect_gitignore)
+        .max_filesize(Some(MAX_WALK_FILE_SIZE))
+        .filter_entry(|entry| !is_denylisted_dir(entry));
+
+    // Force-include paths that are normally ignored.
+    for path in include_ignored {
+        builder.add(project_path.join(path));
+    }
+
+    let files: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
+    builder.build_parallel().run(|| {
+        Box::new(|entry| {
+            let Ok(entry) = entry else {
+                return ignore::WalkState::Continue;
+            };
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                return ignore::WalkState::Continue;
+            }
+            let path = entry.into_path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if SKIP_FILENAMES.contains(&name.as_ref()) {
+                return ignore::WalkState::Continue;
+            }
+            let ext = path
+                .extension()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase();
+            if !READABLE_EXTENSIONS.contains(&ext.as_str()) {
+                return ignore::WalkState::Continue;
+            }
+            files.lock().unwrap_or_else(|e| e.into_inner()).push(path);
+            ignore::WalkState::Continue
+        })
+    });
+
+    files.into_inner().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Walk `index` back to the nearest UTF-8 char boundary at or below it.
 ///
@@ -185,9 +289,9 @@ pub fn chunk_text(content: &str) -> Vec<(String, usize)> {
     chunks
 }
 
-/// How many chunks to embed per ONNX inference call in phase 2. The embedder
-/// runs behind a single mutex-guarded session (see `embedder::embed_batch`),
-/// so per-file batches (often just 1-5 chunks) waste most of the session's
+/// How many chunks to embed per ONNX inference call. The embedder runs
+/// behind a single mutex-guarded session (see `embedder::embed_batch`), so
+/// per-file batches (often just 1-5 chunks) waste most of the session's
 /// intra-op thread pool on tiny amounts of work. Grouping chunks across many
 /// files into batches this size turns hundreds/thousands of tiny inference
 /// calls into a much smaller number of efficient ones.
@@ -329,6 +433,84 @@ struct PreparedFile {
     chunk_entries: Vec<(String, usize, Vec<f32>)>, // (text, chunk_index, embedding)
 }
 
+/// A phase `mine()` is currently in, reported through `on_progress` so a
+/// long-running mine looks like it's working the whole time instead of only
+/// during the final write. `label()` is what gets sent to MCP clients as the
+/// `notifications/progress` message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MinePhase {
+    /// Waiting on the embedding model to finish loading — only reported if a
+    /// mine call arrives before the background warm-up started at MCP server
+    /// startup (`embedder::warm_up_in_background`) has completed.
+    LoadingModel,
+    Walking,
+    Hashing,
+    Chunking,
+    Embedding,
+    Writing,
+    Pruning,
+}
+
+impl MinePhase {
+    pub fn label(&self) -> &'static str {
+        match self {
+            MinePhase::LoadingModel => "loading_model",
+            MinePhase::Walking => "walking",
+            MinePhase::Hashing => "hashing",
+            MinePhase::Chunking => "chunking",
+            MinePhase::Embedding => "embedding",
+            MinePhase::Writing => "writing",
+            MinePhase::Pruning => "pruning",
+        }
+    }
+}
+
+/// Per-phase timing/counts, enabled by setting `PALACE_MINE_TRACE=1`. Exists
+/// to turn a hypothesis about where a mine spends its time into a measured
+/// one — see the phased performance plan this implements.
+struct MineTrace {
+    enabled: bool,
+    walk: Duration,
+    hash: Duration,
+    chunk: Duration,
+    embed: Duration,
+    write: Duration,
+    prune: Duration,
+    chunks_total: usize,
+}
+
+impl MineTrace {
+    fn new() -> Self {
+        Self {
+            enabled: std::env::var("PALACE_MINE_TRACE").as_deref() == Ok("1"),
+            walk: Duration::ZERO,
+            hash: Duration::ZERO,
+            chunk: Duration::ZERO,
+            embed: Duration::ZERO,
+            write: Duration::ZERO,
+            prune: Duration::ZERO,
+            chunks_total: 0,
+        }
+    }
+
+    fn print(&self, summary: &MineSummary, files_walked: usize) {
+        if !self.enabled {
+            return;
+        }
+        println!("\n  PALACE_MINE_TRACE — phase breakdown");
+        println!("    walk    {:>10.2?}", self.walk);
+        println!("    hash    {:>10.2?}", self.hash);
+        println!("    chunk   {:>10.2?}", self.chunk);
+        println!("    embed   {:>10.2?}", self.embed);
+        println!("    write   {:>10.2?}", self.write);
+        println!("    prune   {:>10.2?}", self.prune);
+        println!(
+            "    files walked={files_walked} new={} updated={} unchanged={} chunks={}",
+            summary.new_files, summary.updated_files, summary.unchanged_files, self.chunks_total
+        );
+    }
+}
+
 /// Mine a project directory into the palace, syncing it with what's on disk.
 ///
 /// Unlike a one-shot ingest, re-running `mine` against the same project:
@@ -337,8 +519,17 @@ struct PreparedFile {
 /// - leaves files with an unchanged hash untouched;
 /// - removes drawers for previously-mined files that no longer exist on disk.
 ///
-/// `on_progress`, when given, is invoked as `(files_done, files_total)` after
-/// each changed file is processed during the write phase. This lets
+/// Candidates are processed in windows of `MINE_BATCH_SIZE` files, each
+/// carried all the way through read → chunk → embed → write → commit before
+/// the next window starts, rather than materializing the whole repo before
+/// writing anything. Combined with `limit` now bounding *processed* (new or
+/// updated) files rather than raw walk order, a `--limit`-ed call is
+/// naturally resumable: whatever got committed this call is reflected in
+/// `mined_files`, so the next call's hash check skips straight past it.
+///
+/// `on_progress`, when given, is invoked as `(phase, done, total)` from every
+/// phase — including the walk and, if the embedder hasn't finished loading
+/// yet, a distinct `LoadingModel` phase — not just while writing. This lets
 /// long-running callers (notably the MCP server, which otherwise gives zero
 /// feedback for the whole duration of a mine) report visible progress
 /// instead of looking stuck.
@@ -353,8 +544,9 @@ pub fn mine(
     respect_gitignore: bool,
     include_ignored: &[String],
     quiet: bool,
-    mut on_progress: Option<&mut dyn FnMut(usize, usize)>,
+    mut on_progress: Option<&mut dyn FnMut(MinePhase, usize, usize)>,
 ) -> Result<MineSummary> {
+    let mut trace = MineTrace::new();
     let project_path = project_dir
         .canonicalize()
         .context("resolving project dir")?;
@@ -362,40 +554,12 @@ pub fn mine(
     let wing = wing_override.unwrap_or(&config.wing).to_string();
     let rooms = config.rooms;
 
-    // Collect files using `ignore` crate (gitignore-aware)
-    let mut walker = WalkBuilder::new(&project_path);
-    walker
-        .hidden(false)
-        .git_ignore(respect_gitignore)
-        .git_global(respect_gitignore)
-        .git_exclude(respect_gitignore);
-
-    // Force-include paths that are normally ignored
-    for path in include_ignored {
-        walker.add(project_path.join(path));
-    }
-
-    let mut files: Vec<std::path::PathBuf> = walker
-        .build()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
-        .map(|e| e.path().to_path_buf())
-        .filter(|p| {
-            let name = p.file_name().unwrap_or_default().to_string_lossy();
-            if SKIP_FILENAMES.contains(&name.as_ref()) {
-                return false;
-            }
-            let ext = p
-                .extension()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_lowercase();
-            READABLE_EXTENSIONS.contains(&ext.as_str())
-        })
-        .collect();
-
-    if limit > 0 {
-        files.truncate(limit);
+    // ── Walk: parallel, deny-listed, size-capped ────────────────────────────
+    let walk_start = Instant::now();
+    let files = walk_project(&project_path, respect_gitignore, include_ignored);
+    trace.walk += walk_start.elapsed();
+    if let Some(cb) = on_progress.as_mut() {
+        cb(MinePhase::Walking, files.len(), files.len());
     }
 
     if !quiet {
@@ -420,146 +584,189 @@ pub fn mine(
 
     let mut summary = MineSummary::default();
     let mut room_counts: HashMap<String, usize> = HashMap::new();
+    let total_candidates = files.len();
+    let mut processed_candidates = 0usize;
+    // Toward `limit`: only new/updated files count, so unchanged files never
+    // eat into the budget and a `--limit`-ed call always makes forward
+    // progress on files that actually need work.
+    let mut changed_processed = 0usize;
 
-    // ── Phase 1: read + hash in parallel, classify serially (DB read) ──────
-    // A file is "unchanged" only when its content hash matches the hash
-    // recorded the last time it was synced; anything else — never seen,
-    // edited, or mined before `mined_files` existed — gets re-chunked and
-    // re-embedded below. This is what lets `mine` pick up edits instead of
-    // skipping any file that already has drawers forever.
-    let read: Vec<(std::path::PathBuf, String, String)> = files
-        .par_iter()
-        .filter_map(|filepath| {
-            let content = std::fs::read_to_string(filepath).ok()?;
-            let content = content.trim().to_string();
-            let hash = content_hash(&content);
-            Some(((*filepath).clone(), content, hash))
-        })
-        .collect();
+    // ── Bulk-load previously-mined hashes for this wing once ────────────────
+    let mut known_hashes = crate::store::mined_file_hashes_for_wing(conn, &wing)?;
+    let is_bulk_first_mine =
+        !dry_run && known_hashes.is_empty() && total_candidates > BULK_MINE_THRESHOLD;
 
-    let mut pending: Vec<PendingFile> = Vec::new();
-    for (filepath, content, hash) in read {
-        let source = filepath.to_string_lossy().to_string();
-        let previous_hash = get_mined_file_hash(conn, &source)?;
-        if previous_hash.as_deref() == Some(hash.as_str()) {
-            summary.unchanged_files += 1;
+    crate::store::apply_mine_pragmas(conn)?;
+    if is_bulk_first_mine {
+        crate::store::drop_bm25_term_index(conn)?;
+    }
+
+    'windows: for window in files.chunks(MINE_BATCH_SIZE) {
+        if limit > 0 && changed_processed >= limit {
+            break 'windows;
+        }
+
+        // ── Hashing: read + blake3 in parallel, then classify against the
+        // bulk-loaded hash map (no per-file DB query). ───────────────────────
+        let hash_start = Instant::now();
+        let read: Vec<(std::path::PathBuf, String, String)> = window
+            .par_iter()
+            .filter_map(|filepath| {
+                let content = std::fs::read_to_string(filepath).ok()?;
+                let content = content.trim().to_string();
+                let hash = content_hash(&content);
+                Some((filepath.clone(), content, hash))
+            })
+            .collect();
+
+        let mut pending: Vec<PendingFile> = Vec::new();
+        for (filepath, content, hash) in read {
+            let source = filepath.to_string_lossy().to_string();
+            let previous_hash = known_hashes.get(&source).cloned();
+            if previous_hash.as_deref() == Some(hash.as_str()) {
+                summary.unchanged_files += 1;
+                continue;
+            }
+            let change = if previous_hash.is_some() {
+                FileChange::Updated
+            } else {
+                FileChange::New
+            };
+            pending.push(PendingFile {
+                filepath,
+                content,
+                hash,
+                change,
+            });
+        }
+        trace.hash += hash_start.elapsed();
+        processed_candidates += window.len();
+        if let Some(cb) = on_progress.as_mut() {
+            cb(MinePhase::Hashing, processed_candidates, total_candidates);
+        }
+
+        // Bound work to `limit` at file granularity, not just between
+        // windows — a repo whose changed-file count fits in a single
+        // `MINE_BATCH_SIZE` window would otherwise ignore `limit` entirely.
+        if limit > 0 {
+            let remaining = limit.saturating_sub(changed_processed);
+            pending.truncate(remaining);
+        }
+
+        if pending.is_empty() {
             continue;
         }
-        let change = if previous_hash.is_some() || file_already_mined(conn, &source)? {
-            FileChange::Updated
-        } else {
-            FileChange::New
-        };
-        pending.push(PendingFile {
-            filepath,
-            content,
-            hash,
-            change,
-        });
-    }
 
-    // ── Phase 2a: chunk in parallel (Rayon) ─────────────────────────────────
-    // No embedding here: the ONNX session is a single mutex-guarded resource
-    // (see `embedder::embed_batch`), so embedding per file from multiple
-    // Rayon workers just serializes everyone behind that mutex anyway, while
-    // still paying per-call overhead once per file. Keep Rayon for the
-    // genuinely parallelizable chunk work and embed separately below.
-    //
-    // Files whose content shrank below the minimum chunk size still go
-    // through with an empty chunk list rather than being dropped, so phase 3
-    // clears their now-stale drawers instead of leaving orphans behind.
-    let chunked: Vec<ChunkedFile> = pending
-        .par_iter()
-        .map(|p| {
-            let room = detect_room(&p.filepath, &p.content, &rooms, &project_path);
-            let chunks = chunk_text(&p.content);
-            ChunkedFile {
-                filepath: p.filepath.clone(),
-                hash: p.hash.clone(),
-                change: p.change,
-                room,
-                chunks,
-            }
-        })
-        .collect();
-
-    // ── Phase 2b: embed in capped cross-file batches (sequential) ──────────
-    let chunk_counts: Vec<usize> = chunked.iter().map(|f| f.chunks.len()).collect();
-    let mut embeddings_by_file: Vec<Vec<Vec<f32>>> = chunk_counts
-        .iter()
-        .map(|&count| vec![Vec::new(); count])
-        .collect();
-
-    for batch in group_into_batches(&chunk_counts, EMBED_BATCH_SIZE) {
-        let texts: Vec<&str> = batch
-            .iter()
-            .map(|&(file_index, chunk_index)| chunked[file_index].chunks[chunk_index].0.as_str())
-            .collect();
-        let embeddings = crate::embedder::embed_batch(&texts).unwrap_or_default();
-        for (position, &(file_index, chunk_index)) in batch.iter().enumerate() {
-            if let Some(embedding) = embeddings.get(position) {
-                embeddings_by_file[file_index][chunk_index] = embedding.clone();
-            }
-        }
-    }
-
-    let prepared: Vec<PreparedFile> = chunked
-        .into_iter()
-        .zip(embeddings_by_file)
-        .map(|(f, embeddings)| {
-            let chunk_entries = f
-                .chunks
-                .into_iter()
-                .zip(embeddings)
-                .map(|((text, chunk_index), embedding)| (text, chunk_index, embedding))
-                .collect();
-            PreparedFile {
-                filepath: f.filepath,
-                hash: f.hash,
-                change: f.change,
-                room: f.room,
-                chunk_entries,
-            }
-        })
-        .collect();
-
-    // ── Phase 3: write to DB, batched into chunked transactions ─────────────
-    // Autocommitting per drawer (and per BM25 term — see `index_bm25_terms`)
-    // turns a project with a few thousand chunks into hundreds of thousands
-    // of individual SQLite transactions, which is the dominant cause of
-    // `mine` stalling/timing out on larger-but-not-huge projects. Batching
-    // writes into `MINE_BATCH_SIZE`-file transactions cuts that to a handful
-    // of commits while still bounding how much progress a killed/timed-out
-    // run loses (the next run's content-hash check picks up wherever the
-    // last committed batch left off).
-    if dry_run {
-        for file in &prepared {
-            match file.change {
-                FileChange::New => summary.new_files += 1,
-                FileChange::Updated => summary.updated_files += 1,
-            }
-            if !file.chunk_entries.is_empty() {
-                if !quiet {
-                    println!(
-                        "    [DRY RUN] {} → room:{} ({} drawers)",
-                        file.filepath
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy(),
-                        file.room,
-                        file.chunk_entries.len()
-                    );
+        // ── Chunking (Rayon). No embedding here: the ONNX session is a single
+        // mutex-guarded resource, so per-file parallel embedding just queues
+        // everyone behind that mutex anyway. Files whose content shrank below
+        // the minimum chunk size still go through with an empty chunk list
+        // rather than being dropped, so the write phase clears their now-stale
+        // drawers instead of leaving orphans behind. ───────────────────────
+        let chunk_start = Instant::now();
+        let chunked: Vec<ChunkedFile> = pending
+            .par_iter()
+            .map(|p| {
+                let room = detect_room(&p.filepath, &p.content, &rooms, &project_path);
+                let chunks = chunk_text(&p.content);
+                ChunkedFile {
+                    filepath: p.filepath.clone(),
+                    hash: p.hash.clone(),
+                    change: p.change,
+                    room,
+                    chunks,
                 }
-                summary.drawers_added += file.chunk_entries.len();
-                *room_counts.entry(file.room.clone()).or_default() += 1;
+            })
+            .collect();
+        trace.chunk += chunk_start.elapsed();
+        trace.chunks_total += chunked.iter().map(|f| f.chunks.len()).sum::<usize>();
+        if let Some(cb) = on_progress.as_mut() {
+            cb(MinePhase::Chunking, processed_candidates, total_candidates);
+        }
+
+        // ── Embedding, in capped cross-file batches — skipped entirely under
+        // dry_run, which only ever needs chunk counts, not actual vectors. ──
+        let embed_start = Instant::now();
+        let chunk_counts: Vec<usize> = chunked.iter().map(|f| f.chunks.len()).collect();
+        let mut embeddings_by_file: Vec<Vec<Vec<f32>>> = chunk_counts
+            .iter()
+            .map(|&count| vec![Vec::new(); count])
+            .collect();
+
+        if !dry_run {
+            if !crate::embedder::is_ready() {
+                if let Some(cb) = on_progress.as_mut() {
+                    cb(MinePhase::LoadingModel, 0, 1);
+                }
+            }
+            for batch in group_into_batches(&chunk_counts, EMBED_BATCH_SIZE) {
+                let texts: Vec<&str> = batch
+                    .iter()
+                    .map(|&(file_index, chunk_index)| {
+                        chunked[file_index].chunks[chunk_index].0.as_str()
+                    })
+                    .collect();
+                let embeddings = crate::embedder::embed_batch(&texts).unwrap_or_default();
+                for (position, &(file_index, chunk_index)) in batch.iter().enumerate() {
+                    if let Some(embedding) = embeddings.get(position) {
+                        embeddings_by_file[file_index][chunk_index] = embedding.clone();
+                    }
+                }
             }
         }
-    } else {
-        let total_prepared = prepared.len();
-        for (batch_index, batch) in prepared.chunks(MINE_BATCH_SIZE).enumerate() {
+        trace.embed += embed_start.elapsed();
+        if let Some(cb) = on_progress.as_mut() {
+            cb(MinePhase::Embedding, processed_candidates, total_candidates);
+        }
+
+        let prepared: Vec<PreparedFile> = chunked
+            .into_iter()
+            .zip(embeddings_by_file)
+            .map(|(f, embeddings)| {
+                let chunk_entries = f
+                    .chunks
+                    .into_iter()
+                    .zip(embeddings)
+                    .map(|((text, chunk_index), embedding)| (text, chunk_index, embedding))
+                    .collect();
+                PreparedFile {
+                    filepath: f.filepath,
+                    hash: f.hash,
+                    change: f.change,
+                    room: f.room,
+                    chunk_entries,
+                }
+            })
+            .collect();
+
+        // ── Writing: one transaction per window. ────────────────────────────
+        let write_start = Instant::now();
+        if dry_run {
+            for file in &prepared {
+                match file.change {
+                    FileChange::New => summary.new_files += 1,
+                    FileChange::Updated => summary.updated_files += 1,
+                }
+                if !file.chunk_entries.is_empty() {
+                    if !quiet {
+                        println!(
+                            "    [DRY RUN] {} → room:{} ({} drawers)",
+                            file.filepath
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy(),
+                            file.room,
+                            file.chunk_entries.len()
+                        );
+                    }
+                    summary.drawers_added += file.chunk_entries.len();
+                    *room_counts.entry(file.room.clone()).or_default() += 1;
+                }
+                changed_processed += 1;
+            }
+        } else {
             let tx = conn.transaction().context("starting mine transaction")?;
-            for (offset, file) in batch.iter().enumerate() {
-                let global_index = batch_index * MINE_BATCH_SIZE + offset;
+            for file in &prepared {
                 let source_file = file.filepath.to_string_lossy().to_string();
 
                 let drawers_added = replace_file_drawers(
@@ -572,19 +779,19 @@ pub fn mine(
                     agent,
                     3.0,
                 )?;
+                known_hashes.insert(source_file, file.hash.clone());
 
                 match file.change {
                     FileChange::New => summary.new_files += 1,
                     FileChange::Updated => summary.updated_files += 1,
                 }
                 summary.drawers_added += drawers_added;
+                changed_processed += 1;
                 if drawers_added > 0 {
                     *room_counts.entry(file.room.clone()).or_default() += 1;
                     if !quiet {
                         println!(
-                            "  ✓ [{:4}/{}] {:50} +{drawers_added}",
-                            global_index + 1,
-                            total_prepared,
+                            "  ✓ [{changed_processed:4}] {:50} +{drawers_added}",
                             file.filepath
                                 .file_name()
                                 .unwrap_or_default()
@@ -592,13 +799,21 @@ pub fn mine(
                         );
                     }
                 }
-
                 if let Some(cb) = on_progress.as_mut() {
-                    cb(global_index + 1, total_prepared);
+                    cb(
+                        MinePhase::Writing,
+                        changed_processed,
+                        total_candidates.max(1),
+                    );
                 }
             }
             tx.commit().context("committing mine batch")?;
         }
+        trace.write += write_start.elapsed();
+    }
+
+    if is_bulk_first_mine {
+        crate::store::rebuild_bm25_term_index(conn)?;
     }
 
     if !dry_run {
@@ -606,28 +821,44 @@ pub fn mine(
             .context("recording wing mine status")?;
     }
 
-    // ── Phase 4: prune drawers for files that no longer exist on disk ──────
+    // ── Prune drawers for files that no longer exist on disk ────────────────
     // Scoped to files still on disk, not to this run's (possibly limited or
     // gitignore-filtered) walk, so `--limit` or a widened `.gitignore` can
     // never be mistaken for mass deletion.
-    for source in mined_files_for_wing(conn, &wing)? {
-        if Path::new(&source).exists() {
-            continue;
-        }
-        if dry_run {
+    let prune_start = Instant::now();
+    let stale_sources = mined_files_for_wing(conn, &wing)?
+        .into_iter()
+        .filter(|source| !Path::new(source).exists())
+        .collect::<Vec<_>>();
+    if dry_run {
+        for source in &stale_sources {
             summary.removed_files += 1;
             if !quiet {
                 println!("    [DRY RUN] {source} → would remove (file no longer exists)");
             }
-            continue;
         }
-        let removed = delete_drawers_for_file(conn, &source)?;
-        summary.removed_files += 1;
-        summary.drawers_removed += removed;
-        if !quiet {
-            println!("  ✗ removed {source} ({removed} drawer(s), file no longer exists)");
+    } else if !stale_sources.is_empty() {
+        let tx = conn.transaction().context("starting prune transaction")?;
+        for source in &stale_sources {
+            let removed = delete_drawers_for_file(&tx, source)?;
+            summary.removed_files += 1;
+            summary.drawers_removed += removed;
+            if !quiet {
+                println!("  ✗ removed {source} ({removed} drawer(s), file no longer exists)");
+            }
         }
+        tx.commit().context("committing prune batch")?;
     }
+    trace.prune += prune_start.elapsed();
+    if let Some(cb) = on_progress.as_mut() {
+        cb(
+            MinePhase::Pruning,
+            summary.removed_files,
+            summary.removed_files.max(1),
+        );
+    }
+
+    trace.print(&summary, total_candidates);
 
     if !quiet {
         println!("\n{}", "=".repeat(55));

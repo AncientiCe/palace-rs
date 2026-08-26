@@ -569,9 +569,45 @@ fn source_context_returns_adjacent_chunks() {
         .unwrap();
     }
 
-    let context = source_context(&conn, "shared.txt", 2, 1).unwrap();
+    let context = source_context(&conn, "wing", "room", "shared.txt", 2, 1).unwrap();
     let chunks: Vec<_> = context.iter().map(|drawer| drawer.chunk_index).collect();
     assert_eq!(chunks, vec![1, 2, 3]);
+}
+
+#[test]
+fn source_context_does_not_leak_across_wings() {
+    let conn = open_test_db();
+    // Hand-filed drawers commonly share an empty source_file and chunk_index 0
+    // (palace_add_drawer / palace_remember both default this way). Without
+    // wing/room scoping, a neighbor lookup for one would match the other.
+    add_drawer(
+        &conn,
+        "wing_a",
+        "room",
+        "fact from wing a",
+        None,
+        "",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+    add_drawer(
+        &conn,
+        "wing_b",
+        "room",
+        "fact from wing b",
+        None,
+        "",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let context = source_context(&conn, "wing_a", "room", "", 0, 1).unwrap();
+    assert_eq!(context.len(), 1);
+    assert_eq!(context[0].wing, "wing_a");
 }
 
 #[test]

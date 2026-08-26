@@ -46,10 +46,15 @@ static PREFERENCE_PATTERNS: &[&str] = &[
     "it is important to me",
 ];
 
+fn has_preference_pattern(lowercased_text: &str) -> bool {
+    PREFERENCE_PATTERNS
+        .iter()
+        .any(|p| lowercased_text.contains(p))
+}
+
 /// Return true if `text` contains a preference or personal convention signal.
 pub fn is_preference(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    PREFERENCE_PATTERNS.iter().any(|p| lower.contains(p))
+    has_preference_pattern(&text.to_lowercase())
 }
 
 /// Return the first sentence-like span that contains a preference signal.
@@ -57,16 +62,26 @@ pub fn is_preference(text: &str) -> bool {
 /// The stored drawer can contain a long conversation or file chunk; indexing the
 /// local preference sentence separately gives preference-shaped queries a
 /// tighter embedding target while preserving verbatim storage.
+///
+/// Lowercases `text` once upfront rather than once per sentence: `.`, `!`,
+/// `?`, and `\n` are all case-invariant, so splitting the lowercased text on
+/// the same delimiters yields the same segments (by position) as splitting
+/// the original — letting the two be walked in lockstep instead of
+/// re-lowercasing every sentence just to check it against 44 patterns.
 pub fn preference_span(text: &str) -> Option<String> {
-    for sentence in text.split_inclusive(['.', '!', '?', '\n']) {
-        let trimmed = sentence.trim();
-        if !trimmed.is_empty() && is_preference(trimmed) {
+    let lower = text.to_lowercase();
+    for (original, lowered) in text
+        .split_inclusive(['.', '!', '?', '\n'])
+        .zip(lower.split_inclusive(['.', '!', '?', '\n']))
+    {
+        let trimmed = original.trim();
+        if !trimmed.is_empty() && has_preference_pattern(lowered.trim()) {
             return Some(trimmed.to_string());
         }
     }
 
     let trimmed = text.trim();
-    if !trimmed.is_empty() && is_preference(trimmed) {
+    if !trimmed.is_empty() && has_preference_pattern(lower.trim()) {
         Some(trimmed.to_string())
     } else {
         None

@@ -362,6 +362,26 @@ fn get_embedder() -> Result<&'static Embedder> {
     EMBEDDER.get_or_try_init(|| init_embedder().context("initializing embedder (all-MiniLM-L6-v2)"))
 }
 
+/// Warm the embedder in a background thread so the model download (~90MB on
+/// a cold HuggingFace cache) and ONNX session build don't happen inside a
+/// client's first `palace_mine` tool call, where they can exceed the
+/// client's timeout on their own. Idempotent — `get_or_try_init` inside
+/// `get_embedder` makes a redundant call a no-op.
+pub fn warm_up_in_background() {
+    std::thread::spawn(|| {
+        if let Err(e) = get_embedder() {
+            tracing::warn!(error = %e, "Palace: background embedder warm-up failed");
+        }
+    });
+}
+
+/// Whether the embedder has finished initializing. `mine()` uses this to
+/// report a distinct "loading embedding model" progress phase instead of
+/// going silent if a call arrives before warm-up completes.
+pub fn is_ready() -> bool {
+    EMBEDDER.get().is_some()
+}
+
 fn run_inference(embedder: &Embedder, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(vec![]);
@@ -445,33 +465,53 @@ fn run_inference(embedder: &Embedder, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
             })
             .collect(),
         3 => {
-            let dim = shape[2];
-            (0..batch_size)
-                .map(|i| {
-                    let mut result = vec![0.0f32; dim];
-                    let mut mask_sum = vec![0.0f32; dim];
-                    let offset = i * max_len;
-                    for j in 0..max_len {
-                        let m = mask_flat[offset + j] as f32;
-                        for k in 0..dim {
-                            let val = output_array[[i, j, k]];
-                            result[k] += val * m;
-                            mask_sum[k] += m;
-                        }
-                    }
-                    for k in 0..dim {
-                        if mask_sum[k] > 0.0 {
-                            result[k] /= mask_sum[k];
-                        }
-                    }
-                    l2_normalize(&result)
-                })
-                .collect()
+            let output_3d = output_array
+                .into_dimensionality::<ndarray::Ix3>()
+                .context("expected a 3-D output tensor")?;
+            mean_pool(output_3d.view(), &mask_flat, max_len)
         }
         _ => return Err(anyhow::anyhow!("unexpected output tensor shape: {shape:?}")),
     };
 
     Ok(embeddings)
+}
+
+/// Mean-pool token embeddings over the sequence dimension, masking out
+/// padding, then L2-normalize each pooled vector. `mask_flat` is the
+/// flattened `(batch_size, max_len)` attention mask used to build the model
+/// input, indexed here the same way it was built.
+///
+/// Walks row slices (`sequence.outer_iter()`) rather than per-element
+/// `output[[i, j, k]]` indexing — dynamic strided lookups, up to ~12.6M of
+/// them for a full batch — and accumulates a single scalar `mask_sum` rather
+/// than a `dim`-length vector recomputing the identical value (the mask
+/// doesn't vary with the embedding dimension `k`) for every `k`.
+fn mean_pool(output: ndarray::ArrayView3<f32>, mask_flat: &[i64], max_len: usize) -> Vec<Vec<f32>> {
+    let batch_size = output.shape()[0];
+    let dim = output.shape()[2];
+    (0..batch_size)
+        .map(|i| {
+            let mut result = vec![0.0f32; dim];
+            let mut mask_sum = 0.0f32;
+            let sequence = output.index_axis(ndarray::Axis(0), i);
+            for (j, row) in sequence.outer_iter().enumerate() {
+                let m = mask_flat[i * max_len + j] as f32;
+                if m == 0.0 {
+                    continue;
+                }
+                mask_sum += m;
+                for (acc, val) in result.iter_mut().zip(row.iter()) {
+                    *acc += val * m;
+                }
+            }
+            if mask_sum > 0.0 {
+                for v in &mut result {
+                    *v /= mask_sum;
+                }
+            }
+            l2_normalize(&result)
+        })
+        .collect()
 }
 
 fn l2_normalize(v: &[f32]) -> Vec<f32> {
@@ -559,5 +599,93 @@ mod tests {
         });
         assert!(result.is_err(), "should surface the failure after retries");
         assert_eq!(calls.get(), 3, "should attempt exactly `attempts` times");
+    }
+
+    /// Reference implementation of mean-pooling via the original
+    /// per-element `output[[i, j, k]]` indexing, kept only in this test to
+    /// cross-check `mean_pool`'s row-slice rewrite produces identical
+    /// results.
+    fn mean_pool_naive(
+        output: &ndarray::Array3<f32>,
+        mask_flat: &[i64],
+        max_len: usize,
+    ) -> Vec<Vec<f32>> {
+        let batch_size = output.shape()[0];
+        let dim = output.shape()[2];
+        (0..batch_size)
+            .map(|i| {
+                let mut result = vec![0.0f32; dim];
+                let mut mask_sum = vec![0.0f32; dim];
+                let offset = i * max_len;
+                for j in 0..max_len {
+                    let m = mask_flat[offset + j] as f32;
+                    for k in 0..dim {
+                        let val = output[[i, j, k]];
+                        result[k] += val * m;
+                        mask_sum[k] += m;
+                    }
+                }
+                for k in 0..dim {
+                    if mask_sum[k] > 0.0 {
+                        result[k] /= mask_sum[k];
+                    }
+                }
+                l2_normalize(&result)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mean_pool_ignores_padding_and_matches_hand_computed_result() {
+        // batch=1, seq=3, dim=2. Position 2 is padding (mask=0) with
+        // deliberately out-of-range values that must not affect the result.
+        let output =
+            ndarray::Array3::from_shape_vec((1, 3, 2), vec![1.0, 3.0, 2.0, 4.0, 99.0, 99.0])
+                .unwrap();
+        let mask_flat = [1i64, 1, 0];
+
+        let pooled = mean_pool(output.view(), &mask_flat, 3);
+
+        assert_eq!(pooled.len(), 1);
+        // mean = [(1+2)/2, (3+4)/2] = [1.5, 3.5], ignoring the padded [99, 99].
+        let expected = l2_normalize(&[1.5, 3.5]);
+        for (actual, expected) in pooled[0].iter().zip(expected.iter()) {
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "pooled={:?} expected={:?}",
+                pooled[0],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn mean_pool_matches_naive_per_element_reference_on_random_input() {
+        // A fixed pseudo-random-looking tensor (no external RNG dependency)
+        // across a batch/seq/dim shape and mask pattern large enough to
+        // exercise multiple rows and a mix of masked/unmasked positions.
+        let (batch, seq, dim) = (3, 5, 4);
+        let mut values = Vec::with_capacity(batch * seq * dim);
+        for i in 0..(batch * seq * dim) {
+            let x = (i as f32) * 0.137 - 3.0;
+            values.push(x.sin() * 2.0 + (i % 7) as f32 * 0.1);
+        }
+        let output = ndarray::Array3::from_shape_vec((batch, seq, dim), values).unwrap();
+        let mask_flat: Vec<i64> = (0..batch * seq)
+            .map(|i| if i % 4 == 3 { 0 } else { 1 })
+            .collect();
+
+        let fast = mean_pool(output.view(), &mask_flat, seq);
+        let naive = mean_pool_naive(&output, &mask_flat, seq);
+
+        assert_eq!(fast.len(), naive.len());
+        for (row_fast, row_naive) in fast.iter().zip(naive.iter()) {
+            for (a, b) in row_fast.iter().zip(row_naive.iter()) {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "fast={row_fast:?} naive={row_naive:?}"
+                );
+            }
+        }
     }
 }

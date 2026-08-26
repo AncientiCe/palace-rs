@@ -216,6 +216,39 @@ fn remember_inserts_high_importance_drawer() {
 }
 
 #[test]
+fn remember_does_not_collide_distinct_facts_in_same_wing_room() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    let first = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &serde_json::json!({"text": "The user prefers tabs over spaces", "wing": "w", "room": "r"}),
+    );
+    assert_eq!(first["success"], true);
+    assert_eq!(first["inserted"], true);
+    let first_id = first["id"].as_str().unwrap().to_string();
+
+    let second = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &serde_json::json!({"text": "The user prefers rebase over merge", "wing": "w", "room": "r"}),
+    );
+    assert_eq!(second["success"], true);
+    assert_eq!(second["inserted"], true);
+    let second_id = second["id"].as_str().unwrap().to_string();
+
+    assert_ne!(
+        first_id, second_id,
+        "distinct remembered facts in the same wing/room must not collide onto the same drawer id"
+    );
+    assert!(store::get_drawer(&conn, &first_id).unwrap().is_some());
+    assert!(store::get_drawer(&conn, &second_id).unwrap().is_some());
+}
+
+#[test]
 fn forget_deletes_a_drawer() {
     let conn = test_db();
     let config = palace::config::PalaceConfig::new();
@@ -937,17 +970,24 @@ fn mine_with_progress_reports_each_file_and_returns_success() {
     }
 
     let args = serde_json::json!({ "project_path": project.path().to_string_lossy() });
-    let mut seen: Vec<(usize, usize)> = Vec::new();
-    let mut on_progress = |done: usize, total: usize| seen.push((done, total));
+    let mut seen: Vec<(palace::miner::MinePhase, usize, usize)> = Vec::new();
+    let mut on_progress = |phase: palace::miner::MinePhase, done: usize, total: usize| {
+        seen.push((phase, done, total))
+    };
     let result = palace::mcp_server::mine_with_progress(&config, &args, &mut on_progress);
 
     assert_eq!(result["success"], true, "{result}");
+    let writes: Vec<(usize, usize)> = seen
+        .iter()
+        .filter(|(p, _, _)| *p == palace::miner::MinePhase::Writing)
+        .map(|(_, done, total)| (*done, *total))
+        .collect();
     assert_eq!(
-        seen.len(),
+        writes.len(),
         4,
-        "expected one progress call per file: {seen:?}"
+        "expected one Writing progress call per file: {writes:?}"
     );
-    assert_eq!(seen.last(), Some(&(4, 4)));
+    assert_eq!(writes.last(), Some(&(4, 4)));
 }
 
 #[test]

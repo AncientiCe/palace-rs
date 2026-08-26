@@ -52,6 +52,13 @@ pub fn run() -> Result<()> {
     };
 
     info!(palace = %db_path.display(), "Palace MCP server starting");
+
+    // Start loading the embedding model now, off the request path — otherwise
+    // the ~90MB HuggingFace download (on a cold cache) plus ONNX session
+    // build happens inside whichever tool call touches embeddings first,
+    // which can exceed that call's timeout on its own.
+    crate::embedder::warm_up_in_background();
+
     let session = crate::usage::UsageSession::new();
 
     let stdin = io::stdin();
@@ -167,12 +174,13 @@ fn handle_request(
             let result = if tool_name == "palace_mine" {
                 if let Some(token) = progress_token {
                     let start = Instant::now();
-                    let mut on_progress = |done: usize, total: usize| {
-                        let notification = progress_notification(&token, done, total);
-                        let mut out = io::stdout().lock();
-                        let _ = writeln!(out, "{notification}");
-                        let _ = out.flush();
-                    };
+                    let mut on_progress =
+                        |phase: crate::miner::MinePhase, done: usize, total: usize| {
+                            let notification = progress_notification(&token, phase, done, total);
+                            let mut out = io::stdout().lock();
+                            let _ = writeln!(out, "{notification}");
+                            let _ = out.flush();
+                        };
                     let result = mine_with_progress(config, &args, &mut on_progress);
                     if let Err(err) = crate::usage::record_event(
                         conn,
@@ -735,7 +743,7 @@ fn tool_project_status(conn: &Connection, args: &Value) -> Value {
 fn tool_mine(
     config: &PalaceConfig,
     args: &Value,
-    on_progress: Option<&mut dyn FnMut(usize, usize)>,
+    on_progress: Option<&mut dyn FnMut(crate::miner::MinePhase, usize, usize)>,
 ) -> Value {
     let project_path = match str_arg(args, "project_path") {
         Some(p) => p,
@@ -804,14 +812,23 @@ fn tool_mine(
 pub fn mine_with_progress(
     config: &PalaceConfig,
     args: &Value,
-    on_progress: &mut dyn FnMut(usize, usize),
+    on_progress: &mut dyn FnMut(crate::miner::MinePhase, usize, usize),
 ) -> Value {
     tool_mine(config, args, Some(on_progress))
 }
 
 /// Build a `notifications/progress` JSON-RPC notification. Per the MCP spec,
-/// notifications carry no `id` and expect no response.
-fn progress_notification(token: &Value, progress: usize, total: usize) -> Value {
+/// notifications carry no `id` and expect no response; `message` is an
+/// optional spec field we use to carry which phase (walking, hashing,
+/// chunking, embedding, writing, pruning, or loading_model) this update is
+/// from, since without it every phase's `progress`/`total` pair looks the
+/// same to the client.
+fn progress_notification(
+    token: &Value,
+    phase: crate::miner::MinePhase,
+    progress: usize,
+    total: usize,
+) -> Value {
     json!({
         "jsonrpc": "2.0",
         "method": "notifications/progress",
@@ -819,6 +836,7 @@ fn progress_notification(token: &Value, progress: usize, total: usize) -> Value 
             "progressToken": token,
             "progress": progress,
             "total": total,
+            "message": phase.label(),
         }
     })
 }
@@ -1604,13 +1622,20 @@ fn tool_remember(conn: &Connection, args: &Value) -> Value {
     let embedding = crate::embedder::embed_one(&text).ok();
     let emb_ref = embedding.as_deref();
 
+    // `add_drawer`'s id is derived from (wing, room, source_file, chunk_index),
+    // not content — a fixed source_file here would collide every remembered
+    // fact in the same wing/room onto one id and silently drop the rest via
+    // INSERT OR IGNORE. Hash the text into source_file so distinct facts get
+    // distinct ids while identical text still naturally dedups.
+    let source_file = format!("palace_remember/{}", blake3::hash(text.as_bytes()).to_hex());
+
     match crate::store::add_drawer(
         conn,
         &wing,
         &room,
         &text,
         emb_ref,
-        "palace_remember",
+        &source_file,
         0,
         "mcp",
         5.0,
@@ -2680,7 +2705,7 @@ mod tests {
     #[test]
     fn progress_notification_has_no_id_and_carries_the_caller_token() {
         let token = json!("abc-123");
-        let notification = progress_notification(&token, 3, 10);
+        let notification = progress_notification(&token, crate::miner::MinePhase::Writing, 3, 10);
 
         assert_eq!(notification["jsonrpc"], "2.0");
         assert!(
@@ -2691,6 +2716,7 @@ mod tests {
         assert_eq!(notification["params"]["progressToken"], token);
         assert_eq!(notification["params"]["progress"], 3);
         assert_eq!(notification["params"]["total"], 10);
+        assert_eq!(notification["params"]["message"], "writing");
     }
 
     #[test]

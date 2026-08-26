@@ -1,4 +1,4 @@
-use palace::miner::{chunk_text, detect_room, mine, CHUNK_SIZE};
+use palace::miner::{chunk_text, detect_room, mine, MinePhase, CHUNK_SIZE};
 use palace::room_detector::{save_config, Room};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -398,16 +398,19 @@ fn mine_rerun_skips_already_mined_files() {
 //
 // `palace_mine` used to give zero feedback for the entire duration of a long
 // mine, which is exactly what made it look "stuck" to an MCP client. `mine`
-// now accepts an optional progress callback invoked as each file is written.
+// now accepts an optional progress callback invoked from every phase — not
+// just once per file while writing — so a long walk/hash/chunk/embed no
+// longer goes silent either.
 #[test]
-fn mine_reports_progress_after_each_file() {
+fn mine_reports_progress_from_every_phase() {
     let project = TempDir::new().unwrap();
     write_test_project(project.path(), 6);
     let mut conn = palace::db::open_in_memory().unwrap();
 
-    let mut seen: Vec<(usize, usize)> = Vec::new();
+    let mut seen: Vec<(MinePhase, usize, usize)> = Vec::new();
     {
-        let mut on_progress = |done: usize, total: usize| seen.push((done, total));
+        let mut on_progress =
+            |phase: MinePhase, done: usize, total: usize| seen.push((phase, done, total));
         mine(
             &mut conn,
             project.path(),
@@ -423,14 +426,33 @@ fn mine_reports_progress_after_each_file() {
         .expect("mine should succeed");
     }
 
+    for phase in [
+        MinePhase::Walking,
+        MinePhase::Hashing,
+        MinePhase::Chunking,
+        MinePhase::Embedding,
+        MinePhase::Writing,
+        MinePhase::Pruning,
+    ] {
+        assert!(
+            seen.iter().any(|(p, _, _)| *p == phase),
+            "expected at least one progress callback for {phase:?}, got {seen:?}"
+        );
+    }
+
+    let writes: Vec<(usize, usize)> = seen
+        .iter()
+        .filter(|(p, _, _)| *p == MinePhase::Writing)
+        .map(|(_, done, total)| (*done, *total))
+        .collect();
     assert_eq!(
-        seen.len(),
+        writes.len(),
         6,
-        "expected one progress callback per file, got {seen:?}"
+        "expected one Writing callback per file, got {writes:?}"
     );
-    for (i, &(done, total)) in seen.iter().enumerate() {
-        assert_eq!(done, i + 1, "progress should increase monotonically");
-        assert_eq!(total, 6, "total should be the full file count");
+    for (i, &(done, total)) in writes.iter().enumerate() {
+        assert_eq!(done, i + 1, "write progress should increase monotonically");
+        assert_eq!(total, 6, "total should be the full candidate count");
     }
 }
 
@@ -728,6 +750,75 @@ fn mine_does_not_delete_drawers_for_files_still_on_disk_when_limited() {
         6,
         "drawers for files outside the limited walk must be untouched"
     );
+}
+
+// `limit` must bound actual *processed* (new/updated) files, not just cap how
+// many windows run — a repo whose changed-file count fits inside a single
+// `MINE_BATCH_SIZE` window would otherwise ignore `limit` entirely, since the
+// old per-window check only fired *between* windows.
+#[test]
+fn mine_limit_bounds_new_files_within_a_single_window_and_is_resumable() {
+    let project = TempDir::new().unwrap();
+    write_test_project(project.path(), 10);
+    let mut conn = palace::db::open_in_memory().unwrap();
+
+    let first = mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        3,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        first.new_files, 3,
+        "limit=3 should process exactly 3 new files, not the whole 10-file window"
+    );
+
+    // A second limited call should make forward progress on the *remaining*
+    // files rather than reprocessing the same first 3 forever.
+    let second = mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        3,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        second.new_files, 3,
+        "second limited call should progress past the first batch"
+    );
+    assert_eq!(
+        second.unchanged_files, 3,
+        "the first 3 files should now read as unchanged"
+    );
+
+    // Finish with an unlimited call and confirm everything eventually lands.
+    mine(
+        &mut conn,
+        project.path(),
+        None,
+        "test",
+        0,
+        false,
+        true,
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(palace::store::count_drawers(&conn).unwrap(), 10);
 }
 
 #[test]

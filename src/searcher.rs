@@ -151,8 +151,17 @@ pub fn search_memories_with_options(
             let source_context = crate::store::get_drawer(conn, &r.drawer.id)
                 .ok()
                 .flatten()
+                .filter(|drawer| !drawer.source_file.is_empty())
                 .and_then(|drawer| {
-                    source_context(conn, &drawer.source_file, drawer.chunk_index, 1).ok()
+                    source_context(
+                        conn,
+                        &drawer.wing,
+                        &drawer.room,
+                        &drawer.source_file,
+                        drawer.chunk_index,
+                        1,
+                    )
+                    .ok()
                 })
                 .unwrap_or_default()
                 .into_iter()

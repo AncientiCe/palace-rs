@@ -279,6 +279,8 @@ impl Palace {
         };
         store::source_context(
             &self.conn,
+            &drawer.wing,
+            &drawer.room,
             &drawer.source_file,
             drawer.chunk_index,
             context_radius,
