@@ -4,6 +4,56 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Fixed
+
+- **`palace_mine` timed out on larger active repos even with `dry_run` or
+  `--limit`** — the file walk was single-threaded and descended into `.git`
+  (100k-1M+ objects on a long-lived repo) before any filtering happened;
+  `dry_run` still ran the full embedding pass and only skipped the DB write;
+  and `--limit` truncated the walk result *before* checking which files had
+  actually changed, so it bounded nothing and reprocessed the same first N
+  files on every call. The walk is now parallel (`ignore::WalkBuilder::build_parallel`)
+  with an explicit directory deny-list (`.git`, `node_modules`, `target`,
+  `build`, `dist`, `vendor`, etc.) and a max file size; `dry_run` skips
+  embedding entirely; and `mine()` now processes candidates in
+  `MINE_BATCH_SIZE`-file windows (read → hash → chunk → embed → write →
+  commit) with `--limit` bounding actual new/updated files processed, making
+  limited calls resumable — a later call picks up exactly where the last one
+  left off instead of reprocessing the same files.
+- **`palace_remember` silently dropped every fact after the first per
+  wing/room** — the drawer id was derived from a hardcoded `source_file`
+  ("palace_remember") and `chunk_index` (0), so distinct remembered facts in
+  the same wing/room collided onto the same id and `INSERT OR IGNORE`
+  dropped everything but the first, with no error surfaced. `source_file` is
+  now derived from the fact's content hash.
+- **`palace_search` could return far more than `limit`'s worth of data** —
+  `source_context` (fetches neighboring chunks for a hit) had no wing/room
+  scope and no row limit. Hand-filed drawers (`palace_add_drawer`,
+  `palace_remember`) commonly share an empty `source_file` and `chunk_index`
+  0, and a hit like that matched every such drawer across the *entire*
+  palace rather than just its neighbors — observed inflating a `limit: 5`
+  search to ~500KB. Now scoped to the hit's wing/room with a hard `LIMIT`,
+  and skipped entirely when `source_file` is empty.
+
+### Changed
+
+- **MCP `palace_mine` progress now reports from every phase**, not just
+  while writing — walking, hashing, chunking, embedding, writing, and
+  pruning each send their own `notifications/progress` update (with a
+  `message` field naming the phase), so a slow mine no longer goes silent
+  during the parts that used to take the longest.
+- **The embedding model now warms up in the background at MCP server
+  start** instead of loading lazily inside the first tool call that needs
+  it, so a cold HuggingFace download no longer risks exceeding that call's
+  timeout.
+- Mining's write path bulk-loads previously-mined file hashes once per run
+  instead of one query per file, widens SQLite's page cache/temp store for
+  the duration of a mine, batches BM25 term inserts into a single statement
+  per drawer instead of one per term, and skips a redundant `DELETE` on the
+  fresh-insert path.
+
 ## [0.13.0] - 2026-08-17
 
 ### Added
