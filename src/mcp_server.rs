@@ -2382,7 +2382,7 @@ fn tool_list() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "agent_name": {"type": "string"},
+                    "agent_name": {"type": "string", "description": "Your agent name (required)"},
                     "last_n": {"type": "integer", "description": "Number of recent entries (default: 10)"}
                 },
                 "required": ["agent_name"]
@@ -2394,7 +2394,7 @@ fn tool_list() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "agent_name": {"type": "string"},
+                    "agent_name": {"type": "string", "description": "Your agent name (required)"},
                     "query": {"type": "string", "description": "Search query"},
                     "limit": {"type": "integer", "description": "Max results (default: 5)"},
                     "tag": {"type": "string", "description": "Optional tag filter"},
@@ -2410,7 +2410,7 @@ fn tool_list() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "agent_name": {"type": "string"},
+                    "agent_name": {"type": "string", "description": "Your agent name (required)"},
                     "project_path": {"type": "string", "description": "Restrict and scope fallback recall to this project path"}
                 },
                 "required": ["agent_name"]
