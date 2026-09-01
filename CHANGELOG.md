@@ -4,6 +4,16 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [0.14.1] - 2026-09-01
+
+### Fixed
+
+- **`palace_diary_read`, `palace_diary_search`, and `palace_recall_check` MCP
+  tool schemas didn't document `agent_name` as required**, even though the
+  server enforces it — a client generating calls from the schema alone had
+  no signal to include it. Added a `"Your agent name (required)"`
+  description to each.
+
 ## [0.14.0] - 2026-08-26
 
 ### Fixed
