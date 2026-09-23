@@ -4,6 +4,23 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [0.14.2] - 2026-09-23
+
+### Security
+
+- **Bumped `rustls` to 0.23.45** for RUSTSEC-2026-0285 (TLS 1.3 handshake
+  messages accepted across encryption level boundaries).
+- **Bumped `anyhow` to 1.0.104** for RUSTSEC-2026-0190 (unsoundness in
+  `Error::downcast_mut()`).
+- **Bumped `der` to 0.8.2**, replacing a yanked version.
+- **Bumped `notify` to 8**, which drops the unmaintained `instant` crate
+  (RUSTSEC-2024-0384).
+
+### Changed
+
+- **CI now runs `cargo audit --deny warnings`**, so unmaintained, unsound,
+  and yanked advisories fail the build instead of passing silently.
+
 ## [0.14.1] - 2026-09-01
 
 ### Fixed
