@@ -2,7 +2,10 @@
 //! memory-in (recall on investigation) and memory-out (save on stop).
 
 use chrono::Utc;
-use palace::hooks::{post_tool_use_response, session_start_response, stop_response, HookClient};
+use palace::hooks::{
+    post_tool_use_response, session_start_response, stop_response, user_prompt_submit_response,
+    HookClient,
+};
 use palace::usage::{insert_event, UsageEvent};
 use serde_json::{json, Value};
 
@@ -186,6 +189,75 @@ fn post_tool_use_drops_diary_recorded_for_another_project() {
 
     let out = post_tool_use_response(&conn, &grep_tokio("/work/otherproj"), HookClient::Claude);
     assert!(out.get("hookSpecificOutput").is_some(), "{out}");
+}
+
+// ── user-prompt-submit (recall on the question itself) ────────────────────
+
+fn prompt(text: &str) -> Value {
+    json!({ "prompt": text, "cwd": "/work/proj", "session_id": "abc" })
+}
+
+#[test]
+fn user_prompt_submit_injects_recall_for_the_question() {
+    let conn = test_db();
+    remember(&conn, TOKIO_DECISION, "decisions");
+
+    let out = user_prompt_submit_response(
+        &conn,
+        &prompt("why did we pick tokio over async-std for the http server?"),
+        HookClient::Claude,
+    );
+    assert_eq!(
+        out["hookSpecificOutput"]["hookEventName"],
+        "UserPromptSubmit"
+    );
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        ctx.contains("tokio"),
+        "the prior decision must surface: {out}"
+    );
+    assert!(ctx.contains("(drawer_"), "{out}");
+}
+
+#[test]
+fn user_prompt_submit_nudges_history_questions_without_hits() {
+    let conn = test_db();
+    let out = user_prompt_submit_response(
+        &conn,
+        &prompt("what happened last time we touched the release pipeline?"),
+        HookClient::Codex,
+    );
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(ctx.contains("palace_search"), "{out}");
+}
+
+#[test]
+fn user_prompt_submit_silent_for_plain_or_trivial_prompts() {
+    let conn = test_db();
+    for text in [
+        "go ahead",
+        "/code-review high",
+        "add a flag to print the version string",
+    ] {
+        let out = user_prompt_submit_response(&conn, &prompt(text), HookClient::Claude);
+        assert_eq!(out, json!({}), "{text:?} must not inject anything");
+    }
+}
+
+#[test]
+fn user_prompt_submit_is_empty_for_cursor() {
+    let conn = test_db();
+    remember(&conn, TOKIO_DECISION, "decisions");
+    let out = user_prompt_submit_response(
+        &conn,
+        &prompt("why did we pick tokio over async-std for the http server?"),
+        HookClient::Cursor,
+    );
+    assert_eq!(out, json!({}), "cursor cannot inject prompt context");
 }
 
 // ── stop (auto-save enforcement) ──────────────────────────────────────────

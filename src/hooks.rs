@@ -3,6 +3,8 @@
 //! These power three globally-installed Cursor hooks (see [`crate::install`]):
 //!
 //! - `sessionStart` — inject the protocol and export the session id.
+//! - `userPromptSubmit` (Claude Code / Codex) — recall memory relevant to the
+//!   user's question before the agent answers it.
 //! - `postToolUse` — recall relevant memory right when the agent investigates
 //!   (e.g. before/while it greps), so prior decisions surface automatically.
 //! - `stop` — when a session engaged Palace but never recorded anything, return
@@ -120,6 +122,74 @@ pub fn post_tool_use_response(conn: &Connection, input: &Value, client: HookClie
     }
 }
 
+/// Prompts shorter than this many words ("go ahead", "yes") are not searched.
+const PROMPT_MIN_WORDS: usize = 3;
+
+/// Phrases that mark a prompt as asking about remembered history, so a miss
+/// still earns a nudge to search Palace before answering.
+const MEMORY_INTENT_TERMS: &[&str] = &[
+    "last time",
+    "previous",
+    "remember",
+    "why did",
+    "why do we",
+    "decided",
+    "decision",
+    "we chose",
+    "convention",
+    "prefer",
+    "history",
+    "what happened",
+];
+
+/// The nudge injected when a history question found nothing in auto-recall.
+const PROMPT_SEARCH_NUDGE: &str = "Palace memory: this question looks like it depends on prior \
+    decisions or history, and auto-recall found nothing close. Call palace_search (and \
+    palace_kg_query for stable facts) before answering from the code or from training data.";
+
+/// Build the user-prompt-submit response: recall memory relevant to the user's
+/// question *before* the agent starts answering, so Palace is consulted even
+/// when the agent would otherwise go straight to the code or its own knowledge.
+/// A history-style question with no hits gets a one-line search nudge instead.
+/// Cursor's `beforeSubmitPrompt` cannot inject context, so it always gets `{}`.
+pub fn user_prompt_submit_response(conn: &Connection, input: &Value, client: HookClient) -> Value {
+    if !client.claude_style() {
+        return json!({});
+    }
+    let Some(context) = prompt_context(conn, input) else {
+        return json!({});
+    };
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": context,
+        }
+    })
+}
+
+/// Recall block (or search nudge) for a submitted prompt, or `None` when the
+/// prompt is trivial, a slash command, or unrelated to anything remembered.
+fn prompt_context(conn: &Connection, input: &Value) -> Option<String> {
+    let prompt = input.get("prompt").and_then(Value::as_str)?.trim();
+    if prompt.starts_with('/') || prompt.split_whitespace().count() < PROMPT_MIN_WORDS {
+        return None;
+    }
+    let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
+    let lines = recall_lines(conn, prompt, cwd);
+    if !lines.is_empty() {
+        return Some(format!(
+            "Palace memory relevant to this request (check it before answering; cite the drawer \
+             id if you rely on it):\n{}",
+            lines.join("\n")
+        ));
+    }
+    let lower = prompt.to_lowercase();
+    MEMORY_INTENT_TERMS
+        .iter()
+        .any(|term| lower.contains(term))
+        .then(|| PROMPT_SEARCH_NUDGE.to_string())
+}
+
 /// Compute the recall context string for an investigation tool, or `None` when
 /// the tool is not an investigation or Palace has nothing pertinent.
 fn recall_context(conn: &Connection, input: &Value) -> Option<String> {
@@ -218,14 +288,10 @@ impl ProjectScope {
                 d.metadata
                     .get("project_path")
                     .and_then(Value::as_str)
-                    .map(String::from)
+                    .filter(|p| !p.trim().is_empty())
+                    .map(|p| crate::miner::wing_slug_from_dir(std::path::Path::new(p)))
             });
-        match project {
-            Some(path) if !path.trim().is_empty() => {
-                &crate::miner::wing_slug_from_dir(std::path::Path::new(&path)) == current
-            }
-            _ => true,
-        }
+        project.is_none_or(|slug| &slug == current)
     }
 }
 
@@ -380,6 +446,11 @@ pub fn run(event: &str, client: HookClient) -> Result<()> {
         "post-tool-use" | "postToolUse" | "PostToolUse" => {
             serde_json::to_string(&with_db(|conn| {
                 post_tool_use_response(conn, &input, client)
+            }))?
+        }
+        "user-prompt-submit" | "userPromptSubmit" | "UserPromptSubmit" => {
+            serde_json::to_string(&with_db(|conn| {
+                user_prompt_submit_response(conn, &input, client)
             }))?
         }
         "stop" | "Stop" => {
