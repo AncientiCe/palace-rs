@@ -1460,6 +1460,11 @@ fn claude_hooks() -> &'static [NestedHook] {
             matcher: None,
         },
         NestedHook {
+            event: "UserPromptSubmit",
+            cli_event: "user-prompt-submit",
+            matcher: None,
+        },
+        NestedHook {
             event: "PostToolUse",
             cli_event: "post-tool-use",
             matcher: Some("Grep|Read|Glob"),
@@ -1478,6 +1483,11 @@ fn codex_hooks() -> &'static [NestedHook] {
         NestedHook {
             event: "SessionStart",
             cli_event: "session-start",
+            matcher: None,
+        },
+        NestedHook {
+            event: "UserPromptSubmit",
+            cli_event: "user-prompt-submit",
             matcher: None,
         },
         NestedHook {

@@ -989,7 +989,7 @@ fn install_clients_claude_installs_nested_hooks() {
     assert!(settings.exists(), "Claude settings.json should be created");
     let val: Value = read_json(&settings);
 
-    for event in ["SessionStart", "PostToolUse", "Stop"] {
+    for event in ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"] {
         let groups = val["hooks"][event]
             .as_array()
             .unwrap_or_else(|| panic!("missing event {event}: {val}"));
@@ -1030,6 +1030,15 @@ fn install_clients_codex_installs_nested_hooks() {
     );
     // Codex investigates through the shell, so PostToolUse matches Bash.
     assert_eq!(val["hooks"]["PostToolUse"][0]["matcher"], "Bash", "{val}");
+    // Prompt-time recall fires for every prompt, so it carries no matcher.
+    let prompt = &val["hooks"]["UserPromptSubmit"][0];
+    assert!(prompt["matcher"].is_null(), "{val}");
+    assert!(
+        prompt["hooks"][0]["command"]
+            .as_str()
+            .is_some_and(|c| c.contains("hook user-prompt-submit")),
+        "{val}"
+    );
 }
 
 #[test]
