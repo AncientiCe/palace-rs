@@ -1007,9 +1007,9 @@ fn install_clients_claude_installs_nested_hooks() {
         );
     }
 
-    // PostToolUse should target the file-investigation tools.
+    // PostToolUse should target the file-investigation and shell tools.
     let post = &val["hooks"]["PostToolUse"][0];
-    assert_eq!(post["matcher"], "Grep|Read|Glob", "{val}");
+    assert_eq!(post["matcher"], "Grep|Read|Glob|Bash|PowerShell", "{val}");
 }
 
 #[test]

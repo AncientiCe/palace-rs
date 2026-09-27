@@ -1451,7 +1451,8 @@ struct NestedHook {
     matcher: Option<&'static str>,
 }
 
-/// Claude Code hooks: investigations surface through the Grep/Read/Glob tools.
+/// Claude Code hooks: investigations surface through the Grep/Read/Glob tools,
+/// or through the shell (Bash, or PowerShell on Windows).
 fn claude_hooks() -> &'static [NestedHook] {
     &[
         NestedHook {
@@ -1467,7 +1468,7 @@ fn claude_hooks() -> &'static [NestedHook] {
         NestedHook {
             event: "PostToolUse",
             cli_event: "post-tool-use",
-            matcher: Some("Grep|Read|Glob"),
+            matcher: Some("Grep|Read|Glob|Bash|PowerShell"),
         },
         NestedHook {
             event: "Stop",
