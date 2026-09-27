@@ -22,8 +22,6 @@ This Rust implementation uses its own `0.x` version track.
   project (by `project_path` metadata or the AAAK `PROJ:` tag). Topic wings
   still surface. The relevance threshold rose from 0.3 to 0.4, and each
   recalled line now cites its drawer id.
-- **The Claude Code `PostToolUse` hook also fires after `Bash` and
-  `PowerShell`**, so agents that investigate through the shell still get recall.
 
 ## [0.14.2] - 2026-09-23
 
