@@ -109,6 +109,85 @@ fn post_tool_use_is_silent_without_relevant_memory() {
     );
 }
 
+fn remember(conn: &rusqlite::Connection, text: &str, wing: &str) {
+    let config = palace::config::PalaceConfig::new();
+    palace::mcp_server::dispatch_tool(
+        conn,
+        &config,
+        "palace_remember",
+        &json!({ "text": text, "wing": wing, "room": "decisions" }),
+    );
+}
+
+const TOKIO_DECISION: &str =
+    "We chose tokio over async-std for the HTTP server because of ecosystem maturity.";
+
+fn grep_tokio(cwd: &str) -> Value {
+    json!({
+        "tool_name": "Grep",
+        "tool_input": {"pattern": "tokio async-std http server runtime choice"},
+        "cwd": cwd
+    })
+}
+
+#[test]
+fn post_tool_use_drops_other_projects_drawers() {
+    let conn = test_db();
+    remember(&conn, TOKIO_DECISION, "otherproj");
+    palace::store::set_wing_mined(&conn, "otherproj", "/work/otherproj").unwrap();
+
+    let out = post_tool_use_response(&conn, &grep_tokio("/work/proj"), HookClient::Claude);
+    assert!(
+        out.get("hookSpecificOutput").is_none(),
+        "another mined project's drawer must not leak into this project: {out}"
+    );
+
+    // The same drawer is relevant inside its own project.
+    let out = post_tool_use_response(&conn, &grep_tokio("/work/otherproj"), HookClient::Claude);
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(ctx.contains("tokio"), "{out}");
+}
+
+#[test]
+fn post_tool_use_keeps_topic_wings_and_tags_drawer_id() {
+    let conn = test_db();
+    remember(&conn, TOKIO_DECISION, "decisions");
+
+    let out = post_tool_use_response(&conn, &grep_tokio("/work/proj"), HookClient::Claude);
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(ctx.contains("tokio"), "topic wings stay in scope: {out}");
+    assert!(
+        ctx.contains("(drawer_"),
+        "recall must cite the drawer id: {out}"
+    );
+}
+
+#[test]
+fn post_tool_use_drops_diary_recorded_for_another_project() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_write",
+        &json!({
+            "agent_name": "claude",
+            "entry": TOKIO_DECISION,
+            "project_path": "/work/otherproj",
+        }),
+    );
+
+    let out = post_tool_use_response(&conn, &grep_tokio("/work/proj"), HookClient::Claude);
+    assert!(out.get("hookSpecificOutput").is_none(), "{out}");
+
+    let out = post_tool_use_response(&conn, &grep_tokio("/work/otherproj"), HookClient::Claude);
+    assert!(out.get("hookSpecificOutput").is_some(), "{out}");
+}
+
 // ── stop (auto-save enforcement) ──────────────────────────────────────────
 
 #[test]

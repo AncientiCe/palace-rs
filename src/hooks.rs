@@ -46,9 +46,11 @@ impl HookClient {
 }
 
 /// Minimum combined similarity for a recalled memory to be worth injecting.
-const RECALL_RELEVANCE_THRESHOLD: f64 = 0.3;
+const RECALL_RELEVANCE_THRESHOLD: f64 = 0.4;
 /// How many memories to surface in an auto-recall injection.
 const RECALL_LIMIT: usize = 3;
+/// How many candidates to fetch before dropping other projects' drawers.
+const RECALL_CANDIDATES: usize = 12;
 /// Window the `stop` hook inspects to decide whether the session saved its work.
 const SAVE_WINDOW_MINUTES: i64 = 360;
 
@@ -122,11 +124,34 @@ pub fn post_tool_use_response(conn: &Connection, input: &Value, client: HookClie
 /// the tool is not an investigation or Palace has nothing pertinent.
 fn recall_context(conn: &Connection, input: &Value) -> Option<String> {
     let query = investigation_query(input)?;
-    let results = crate::searcher::search_memories(conn, &query, None, None, RECALL_LIMIT);
-    let hits = results.get("results").and_then(Value::as_array)?;
+    let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
+    let lines = recall_lines(conn, &query, cwd);
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Palace memory (recall before re-investigating or re-deciding — a prior agent may have \
+         already done this):\n{}",
+        lines.join("\n")
+    ))
+}
+
+/// Search Palace for `query` and format the relevant hits as provenance-tagged
+/// lines, scoped to the session's project: drawers from other mined projects
+/// (and diary entries recorded for them) are dropped as noise, while this
+/// project's wing, topic wings, and unscoped diaries are kept.
+fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
+    let results = crate::searcher::search_memories(conn, query, None, None, RECALL_CANDIDATES);
+    let Some(hits) = results.get("results").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let scope = ProjectScope::new(conn, cwd);
 
     let mut lines: Vec<String> = Vec::new();
     for hit in hits {
+        if lines.len() >= RECALL_LIMIT {
+            break;
+        }
         let similarity = hit
             .get("similarity")
             .and_then(Value::as_f64)
@@ -139,19 +164,83 @@ fn recall_context(conn: &Connection, input: &Value) -> Option<String> {
         if text.is_empty() {
             continue;
         }
+        let id = hit.get("id").and_then(Value::as_str).unwrap_or("");
         let wing = hit.get("wing").and_then(Value::as_str).unwrap_or("");
         let room = hit.get("room").and_then(Value::as_str).unwrap_or("");
-        lines.push(format!("- [{wing}/{room}] {}", compact(text, 240)));
+        if !scope.allows(conn, id, wing, room) {
+            continue;
+        }
+        lines.push(format!("- [{wing}/{room}] {} ({id})", compact(text, 240)));
+    }
+    lines
+}
+
+/// The session's project, used to keep auto-recall from surfacing drawers that
+/// belong to a different mined project.
+struct ProjectScope {
+    /// The wing the session's cwd maps to; `None` without a cwd (no scoping).
+    wing: Option<String>,
+    /// Wings registered as *other* mined projects.
+    foreign: std::collections::HashSet<String>,
+}
+
+impl ProjectScope {
+    fn new(conn: &Connection, cwd: &str) -> Self {
+        let wing = project_wing(conn, cwd);
+        let foreign = match &wing {
+            Some(current) => crate::store::list_wings_registry(conn)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|w| w.kind == "project" && &w.name != current)
+                .map(|w| w.name)
+                .collect(),
+            None => Default::default(),
+        };
+        Self { wing, foreign }
     }
 
-    if lines.is_empty() {
+    fn allows(&self, conn: &Connection, id: &str, wing: &str, room: &str) -> bool {
+        let Some(current) = &self.wing else {
+            return true;
+        };
+        if self.foreign.contains(wing) {
+            return false;
+        }
+        if room != "diary" {
+            return true;
+        }
+        // Diaries live in per-agent wings; scope them by the project they
+        // were recorded for, keeping entries that name no project.
+        let project = crate::store::get_drawer(conn, id)
+            .ok()
+            .flatten()
+            .and_then(|d| {
+                d.metadata
+                    .get("project_path")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+            });
+        match project {
+            Some(path) if !path.trim().is_empty() => {
+                &crate::miner::wing_slug_from_dir(std::path::Path::new(&path)) == current
+            }
+            _ => true,
+        }
+    }
+}
+
+/// The wing the session's cwd maps to (registry, `palace.yaml`, or directory
+/// slug), or `None` when the hook input carries no cwd.
+fn project_wing(conn: &Connection, cwd: &str) -> Option<String> {
+    if cwd.trim().is_empty() {
         return None;
     }
-    Some(format!(
-        "Palace memory (recall before re-investigating or re-deciding — a prior agent may have \
-         already done this):\n{}",
-        lines.join("\n")
-    ))
+    use crate::miner::ProjectWingStatus;
+    match crate::miner::project_wing_status(conn, std::path::Path::new(cwd)).ok()? {
+        ProjectWingStatus::Mined { wing, .. }
+        | ProjectWingStatus::RegisteredNotMined { wing, .. } => Some(wing),
+        ProjectWingStatus::Unknown { suggested_wing, .. } => Some(suggested_wing),
+    }
 }
 
 /// How many recent diary entries / project drawers to surface at session start.
