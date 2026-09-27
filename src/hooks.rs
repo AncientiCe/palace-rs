@@ -237,7 +237,7 @@ fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
         let id = hit.get("id").and_then(Value::as_str).unwrap_or("");
         let wing = hit.get("wing").and_then(Value::as_str).unwrap_or("");
         let room = hit.get("room").and_then(Value::as_str).unwrap_or("");
-        if !scope.allows(conn, id, wing, room) {
+        if !scope.allows(conn, id, wing, room, text) {
             continue;
         }
         lines.push(format!("- [{wing}/{room}] {} ({id})", compact(text, 240)));
@@ -269,7 +269,7 @@ impl ProjectScope {
         Self { wing, foreign }
     }
 
-    fn allows(&self, conn: &Connection, id: &str, wing: &str, room: &str) -> bool {
+    fn allows(&self, conn: &Connection, id: &str, wing: &str, room: &str, text: &str) -> bool {
         let Some(current) = &self.wing else {
             return true;
         };
@@ -280,7 +280,8 @@ impl ProjectScope {
             return true;
         }
         // Diaries live in per-agent wings; scope them by the project they
-        // were recorded for, keeping entries that name no project.
+        // were recorded for (`project_path` metadata, else the AAAK `PROJ:`
+        // tag), keeping entries that name no project.
         let project = crate::store::get_drawer(conn, id)
             .ok()
             .flatten()
@@ -290,9 +291,21 @@ impl ProjectScope {
                     .and_then(Value::as_str)
                     .filter(|p| !p.trim().is_empty())
                     .map(|p| crate::miner::wing_slug_from_dir(std::path::Path::new(p)))
-            });
+            })
+            .or_else(|| diary_project_tag(text));
         project.is_none_or(|slug| &slug == current)
     }
+}
+
+/// The wing slug named by a diary entry's AAAK `PROJ:<name>` tag, if any.
+fn diary_project_tag(text: &str) -> Option<String> {
+    let start = text.find("PROJ:")? + "PROJ:".len();
+    let name: String = text[start..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .collect();
+    (!name.is_empty()).then(|| name.to_lowercase().replace([' ', '-'], "_"))
 }
 
 /// The wing the session's cwd maps to (registry, `palace.yaml`, or directory
@@ -538,6 +551,20 @@ mod tests {
             q(json!({"file_path": "/proj/src/dlq_consumer.rs"})).as_deref(),
             Some("/proj/src/dlq_consumer.rs")
         );
+    }
+
+    #[test]
+    fn diary_project_tag_reads_aaak_proj_marker() {
+        assert_eq!(
+            diary_project_tag("2026-08-05 | PROJ:palace-server-license | User rejected…")
+                .as_deref(),
+            Some("palace_server_license")
+        );
+        assert_eq!(
+            diary_project_tag("PROJ:mempalace_rs | fixed").as_deref(),
+            Some("mempalace_rs")
+        );
+        assert_eq!(diary_project_tag("no project named here"), None);
     }
 
     #[test]
