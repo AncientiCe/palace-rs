@@ -4,6 +4,27 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Added
+
+- **Prompt-time recall hook.** `palace install` now registers a
+  `UserPromptSubmit` hook for Claude Code and Codex that searches Palace with
+  the submitted question and injects the relevant drawers before the agent
+  answers. A history-style question with no hits gets a one-line nudge to call
+  `palace_search`. Trivial prompts and slash commands stay silent. Re-run
+  `palace install` to pick it up.
+
+### Changed
+
+- **Auto-recall is scoped to the current project.** Hook recall drops drawers
+  from other mined project wings, plus diary entries recorded for another
+  project (by `project_path` metadata or the AAAK `PROJ:` tag). Topic wings
+  still surface. The relevance threshold rose from 0.3 to 0.4, and each
+  recalled line now cites its drawer id.
+- **The Claude Code `PostToolUse` hook also fires after `Bash` and
+  `PowerShell`**, so agents that investigate through the shell still get recall.
+
 ## [0.14.2] - 2026-09-23
 
 ### Security

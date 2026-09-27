@@ -38,6 +38,10 @@ user preferences across sessions without running a separate vector database.
   memory protocol doesn't depend on tool-search deferral (Claude Code >= 2.1.121).
 - Injects real recalled memory — recent diary entries plus top drawers for the
   session's project — directly into `SessionStart`, not just protocol text.
+- Recalls memory for the user's actual question on `UserPromptSubmit` (Claude
+  Code and Codex), before the agent answers, and nudges it to search when a
+  history question finds nothing. Auto-recall is scoped to the session's
+  project, so other mined projects' drawers and diaries stay out.
 
 ## Agent Memory Reliability
 
