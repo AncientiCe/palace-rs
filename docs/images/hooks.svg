@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 440" width="1280" height="440" role="img" aria-labelledby="title desc">
+  <title id="title">How Palace recalls without being asked</title>
+  <desc id="desc">Four hooks run during an agent session. Session start loads recent diary entries and top drawers for the project. Prompt submit searches with your question and injects matching memory. Post tool use recalls related memory while the agent greps and reads. Stop asks the agent to save a diary entry and decisions. The first three read from palace.db; the last one writes to it.</desc>
+  <style>
+    .bg { fill: #f6f8fa; }
+    .ink { fill: #1f2328; }
+    .muted { fill: #57606a; }
+    .line { stroke: #8c959f; }
+    .head { fill: #8c959f; }
+    .card { fill: #ffffff; stroke: #d0d7de; }
+    .accent { fill: #8250df; }
+    .accent-text { fill: #8250df; }
+    .accent-soft { fill: #fbefff; }
+    .accent-stroke { stroke: #8250df; }
+    .save { stroke: #1a7f37; }
+    .save-fill { fill: #1a7f37; }
+    .num { fill: #ffffff; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .ink { fill: #e6edf3; }
+      .muted { fill: #9198a1; }
+      .line { stroke: #6e7681; }
+      .head { fill: #6e7681; }
+      .card { fill: #161b22; stroke: #30363d; }
+      .accent { fill: #a371f7; }
+      .accent-text { fill: #d2a8ff; }
+      .accent-soft { fill: #271052; }
+      .accent-stroke { stroke: #a371f7; }
+      .save { stroke: #3fb950; }
+      .save-fill { fill: #3fb950; }
+      .num { fill: #0d1117; }
+    }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+  </style>
+
+  <rect class="bg" width="1280" height="440" rx="16"/>
+  <text class="ink" x="64" y="44" font-size="20" font-weight="700">One agent session, four hooks</text>
+  <text class="muted" x="380" y="44" font-size="15">installed once by <tspan class="mono">palace install</tspan>, active in every project</text>
+
+  <!-- Card 1 -->
+  <g transform="translate(64 68)">
+    <rect class="card" width="252" height="146" rx="12" stroke-width="1.5"/>
+    <circle class="accent" cx="30" cy="32" r="14"/>
+    <text class="num" x="30" y="38" font-size="15" font-weight="700" text-anchor="middle">1</text>
+    <text class="ink" x="54" y="38" font-size="18" font-weight="600">Session starts</text>
+    <text class="accent-text mono" x="20" y="72" font-size="14">SessionStart</text>
+    <text class="muted" x="20" y="102" font-size="15">Loads recent diary entries</text>
+    <text class="muted" x="20" y="124" font-size="15">and top drawers for this project</text>
+  </g>
+
+  <!-- Card 2 -->
+  <g transform="translate(364 68)">
+    <rect class="card" width="252" height="146" rx="12" stroke-width="1.5"/>
+    <circle class="accent" cx="30" cy="32" r="14"/>
+    <text class="num" x="30" y="38" font-size="15" font-weight="700" text-anchor="middle">2</text>
+    <text class="ink" x="54" y="38" font-size="18" font-weight="600">You ask a question</text>
+    <text class="accent-text mono" x="20" y="72" font-size="14">UserPromptSubmit</text>
+    <text class="muted" x="20" y="102" font-size="15">Searches with your question,</text>
+    <text class="muted" x="20" y="124" font-size="15">injects matching memory</text>
+  </g>
+
+  <!-- Card 3 -->
+  <g transform="translate(664 68)">
+    <rect class="card" width="252" height="146" rx="12" stroke-width="1.5"/>
+    <circle class="accent" cx="30" cy="32" r="14"/>
+    <text class="num" x="30" y="38" font-size="15" font-weight="700" text-anchor="middle">3</text>
+    <text class="ink" x="54" y="38" font-size="18" font-weight="600">Agent investigates</text>
+    <text class="accent-text mono" x="20" y="72" font-size="14">PostToolUse</text>
+    <text class="muted" x="20" y="102" font-size="15">Recalls related memory</text>
+    <text class="muted" x="20" y="124" font-size="15">while it greps and reads files</text>
+  </g>
+
+  <!-- Card 4 -->
+  <g transform="translate(964 68)">
+    <rect class="card" width="252" height="146" rx="12" stroke-width="1.5"/>
+    <circle class="save-fill" cx="30" cy="32" r="14"/>
+    <text class="num" x="30" y="38" font-size="15" font-weight="700" text-anchor="middle">4</text>
+    <text class="ink" x="54" y="38" font-size="18" font-weight="600">Session ends</text>
+    <text class="accent-text mono" x="20" y="72" font-size="14">Stop</text>
+    <text class="muted" x="20" y="102" font-size="15">If nothing was saved, asks</text>
+    <text class="muted" x="20" y="124" font-size="15">for a diary entry + decisions</text>
+  </g>
+
+  <!-- Arrows between cards -->
+  <g class="line" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M324 141 L 354 141"/><path d="M347 135 L 355 141 L 347 147"/>
+    <path d="M624 141 L 654 141"/><path d="M647 135 L 655 141 L 647 147"/>
+    <path d="M924 141 L 954 141"/><path d="M947 135 L 955 141 L 947 147"/>
+  </g>
+
+  <!-- Recall arrows (db -> card) -->
+  <g class="accent-stroke" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="6 6">
+    <path d="M190 300 L 190 224"/>
+    <path d="M490 300 L 490 224"/>
+    <path d="M790 300 L 790 224"/>
+  </g>
+  <g class="accent-stroke" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M183 231 L 190 222 L 197 231"/>
+    <path d="M483 231 L 490 222 L 497 231"/>
+    <path d="M783 231 L 790 222 L 797 231"/>
+  </g>
+  <text class="accent-text" x="202" y="267" font-size="14">recall</text>
+  <text class="accent-text" x="502" y="267" font-size="14">recall</text>
+  <text class="accent-text" x="802" y="267" font-size="14">recall</text>
+
+  <!-- Save arrow (card -> db) -->
+  <path class="save" d="M1090 222 L 1090 296" stroke-width="2" fill="none" stroke-linecap="round" stroke-dasharray="6 6"/>
+  <path class="save" d="M1083 289 L 1090 298 L 1097 289" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <text class="save-fill" x="1102" y="267" font-size="14">save</text>
+
+  <!-- palace.db bar -->
+  <g transform="translate(64 304)">
+    <rect class="accent-soft accent-stroke" width="1152" height="92" rx="12" stroke-width="1.5"/>
+    <g transform="translate(32 18) scale(0.36)">
+      <polygon class="accent" points="0,40 76,0 152,40"/>
+      <rect class="accent" x="0" y="44" width="152" height="12" rx="2"/>
+      <rect class="accent" x="14" y="62" width="18" height="62" rx="2"/>
+      <rect class="accent" x="49" y="62" width="18" height="62" rx="2"/>
+      <rect class="accent" x="85" y="62" width="18" height="62" rx="2"/>
+      <rect class="accent" x="120" y="62" width="18" height="62" rx="2"/>
+      <rect class="accent" x="0" y="128" width="152" height="10" rx="2"/>
+      <rect class="accent" x="-10" y="142" width="172" height="8" rx="2"/>
+    </g>
+    <text class="ink mono" x="110" y="42" font-size="20" font-weight="700">palace.db</text>
+    <text class="muted" x="110" y="68" font-size="15">one local SQLite file · verbatim text · local embeddings · knowledge graph · diaries · scoped to the current project</text>
+  </g>
+</svg>
