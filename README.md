@@ -1,14 +1,38 @@
-# palace-rs
+<p align="center">
+  <img src="docs/images/banner.svg" alt="palace banner: decisions, commands, and preferences from today's session go into a local palace, so the agent's next session remembers them" width="100%">
+</p>
 
-[![CI](https://github.com/AncientiCe/palace-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/AncientiCe/palace-rs/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust 1.82+](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org)
+<p align="center">
+  <a href="https://github.com/AncientiCe/palace-rs/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/AncientiCe/palace-rs/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/AncientiCe/palace-rs/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AncientiCe/palace-rs?sort=semver"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <img alt="Platforms: Linux, macOS, Windows" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-informational">
+  <img alt="Rust 1.82+" src="https://img.shields.io/badge/rust-1.82%2B-orange?logo=rust">
+  <a href="https://registry.modelcontextprotocol.io"><img alt="Listed in the MCP registry" src="https://img.shields.io/badge/MCP-registry-8250df"></a>
+  <img alt="Works with Claude Code, Codex, Cursor and Claude Desktop" src="https://img.shields.io/badge/works%20with-Claude%20Code%20%7C%20Codex%20%7C%20Cursor%20%7C%20Claude%20Desktop-8A2BE2">
+</p>
 
-**Local-first memory for coding agents.** Palace gives Claude Code, Codex,
-Cursor, and Claude Desktop a memory that lasts between sessions: the decisions
-you made, the bugs you already fixed, the commands that worked, and how you
-like things done. It runs on your machine, in one SQLite file, with no API
-keys and no cloud.
+<p align="center">
+  <b>Local-first memory for coding agents.</b><br>
+  Your agent remembers decisions, fixes, commands, and preferences between sessions.<br>
+  One binary, one SQLite file, no API keys, no cloud.
+</p>
+
+<p align="center">
+  <a href="#-quick-start">Quick start</a> ·
+  <a href="#-install">Install</a> ·
+  <a href="#-how-it-works">How it works</a> ·
+  <a href="#-supported-clients">Clients</a> ·
+  <a href="#-cli-reference">CLI</a> ·
+  <a href="#-mcp-tools">MCP tools</a> ·
+  <a href="#-faq">FAQ</a>
+</p>
+
+---
+
+Palace gives Claude Code, Codex, Cursor, and Claude Desktop a memory that
+lasts between sessions. It stores what happened verbatim, recalls it
+automatically when it's relevant, and cites where each answer came from.
 
 ```text
 You:    why did we switch the queue to SQLite last month?
@@ -17,24 +41,9 @@ Agent:  [palace_search → wing my_api, room decisions, filed 2026-09-03]
         The benchmark you ran is in the same drawer.
 ```
 
-- [Why Palace](#why-palace)
-- [Install](#install)
-- [Quick start](#quick-start)
-- [How it works](#how-it-works)
-- [Supported clients](#supported-clients)
-- [CLI reference](#cli-reference)
-- [MCP tools](#mcp-tools)
-- [Configuration](#configuration)
-- [Benchmarks](#benchmarks)
-- [Privacy and data](#privacy-and-data)
-- [Troubleshooting](#troubleshooting)
-- [Using Palace as a library](#using-palace-as-a-library)
-- [Development](#development)
-- [Migrating from older versions](#migrating-from-older-versions)
-
 ---
 
-## Why Palace
+## 🧭 Why Palace
 
 Every new agent session starts with no memory. You explain the architecture
 again. The agent repeats a fix you rejected last week. It greps the whole repo
@@ -61,7 +70,7 @@ household notes.
 
 ---
 
-## Install
+## 📦 Install
 
 Pick one. Each method installs the `palace` binary. Run `palace install`
 afterwards to connect your agents.
@@ -113,7 +122,7 @@ mine or search, then stays cached in `~/.cache/huggingface`.
 
 ---
 
-## Quick start
+## ⚡ Quick start
 
 ```bash
 palace install            # connect Claude Code, Codex, Cursor, and Claude Desktop
@@ -138,11 +147,17 @@ up where today's left off.
 
 ---
 
-## How it works
+## 🔍 How it works
 
 ### The palace
 
 Memory is organised like a building, which keeps search focused:
+
+<p align="center">
+  <img src="docs/images/structure.svg" alt="Inside a palace: a project wing my_api with rooms backend, decisions, and testing full of drawers; a topic wing sales_notes; a knowledge graph fact my_api uses_queue SQLite; and agent diaries from claude and codex" width="100%">
+</p>
+
+<sub><i>Figure 1. One palace holds many wings. Rooms group drawers, and the knowledge graph and diaries sit alongside them.</i></sub>
 
 | Concept | What it is | Example |
 |---|---|---|
@@ -158,6 +173,19 @@ or **topic** wings (no folder, such as chat history or meeting notes, created
 with `palace_create_wing`).
 
 ### Retrieval
+
+```mermaid
+flowchart LR
+    Q["💬 Question<br/>from you or the agent"] --> S["Sanitize<br/>strip pasted dumps"]
+    S --> I["Classify intent<br/>decision · how_to · preference …"]
+    I --> H["Hybrid search<br/>BM25 + cosine"]
+    H --> B["Coding boosts<br/>+ preference pass"]
+    B --> R{"Rerank?<br/>optional"}
+    R --> OUT["📎 Results<br/>scores + source + neighbours"]
+    DB[("palace.db<br/>local embeddings")] -.-> H
+```
+
+<sub><i>Figure 2. What happens to a query. Everything runs locally on your CPU.</i></sub>
 
 Search fuses BM25 keyword scoring with cosine similarity over local
 embeddings. It then applies intent boosts for coding questions. Each query is
@@ -175,6 +203,12 @@ the same source file.
 
 `palace install` registers user-level hooks, so memory works in every project
 without editing per-project files:
+
+<p align="center">
+  <img src="docs/images/hooks.svg" alt="One agent session, four hooks: session start, prompt submit, and post tool use recall from palace.db; stop asks the agent to save a diary entry and decisions" width="100%">
+</p>
+
+<sub><i>Figure 3. Three hooks read memory into the session. The fourth makes sure the session's lessons get written back.</i></sub>
 
 | Hook | What it does |
 |---|---|
@@ -220,7 +254,7 @@ behind tool search.
 
 ---
 
-## Supported clients
+## 🔌 Supported clients
 
 `palace install` configures every supported client by default
 (`--client all`). Use `--client <name>` to configure one.
@@ -228,7 +262,7 @@ behind tool search.
 | Client | `--client` | MCP config | Rule file | Hooks |
 |---|---|---|---|---|
 | Claude Code | `claude` | `~/.claude.json` | `~/.claude/CLAUDE.md` | `~/.claude/settings.json` |
-| Codex | `codex` | `~/.codex/config.toml` | `~/.codex/AGENTS.md` | `~/.codex/hooks.json` (run `/hooks` once to trust them) |
+| Codex | `codex` | `~/.codex/config.toml` | `~/.codex/AGENTS.md` | `~/.codex/hooks.json` (run `/hooks` once in the Codex CLI to trust them) |
 | Cursor | `cursor` | `~/.cursor/mcp.json` | `~/.cursor/rules/palace.mdc` | `~/.cursor/hooks.json` |
 | Claude Desktop | `claude-desktop` | `claude_desktop_config.json` | `~/.claude/CLAUDE.md` | None. Use the [MCP prompts](#mcp-prompts) instead. |
 
@@ -321,7 +355,7 @@ palace local            # back to the local palace
 
 ---
 
-## CLI reference
+## 🧰 CLI reference
 
 Run `palace <command> --help` for every flag.
 
@@ -377,6 +411,18 @@ Run `palace <command> --help` for every flag.
 
 ### Mining a project
 
+```mermaid
+flowchart LR
+    DIR["📁 Your repo"] --> F["Filter<br/>.gitignore + skip build dirs"]
+    F --> C{"Changed since<br/>last mine?"}
+    C -- no --> SKIP["Skip"]
+    C -- yes --> CH["Chunk + pick room<br/>using palace.yaml"]
+    CH --> E["Embed locally<br/>all-MiniLM-L6-v2"]
+    E --> DB[("palace.db")]
+```
+
+<sub><i>Figure 4. Mining only touches files that changed, so re-running it is cheap.</i></sub>
+
 `palace mine` respects `.gitignore` and skips `.git`, `node_modules`,
 `target`, `build`, `dist`, `vendor`, and other build output. It reads common
 text and source formats: `md`, `txt`, `rs`, `py`, `js`, `ts`, `tsx`, `go`,
@@ -424,7 +470,7 @@ to turn recording off.
 
 ---
 
-## MCP tools
+## 🧩 MCP tools
 
 <details>
 <summary>All 49 tools</summary>
@@ -517,7 +563,7 @@ to turn recording off.
 
 ---
 
-## Configuration
+## 🔧 Configuration
 
 Settings load in this order: environment variables, then
 `~/.palace/config.json`, then defaults.
@@ -562,7 +608,7 @@ rooms:
 
 ---
 
-## Benchmarks
+## 📊 Benchmarks
 
 ### Coding-agent memory eval
 
@@ -623,7 +669,7 @@ dedicated preference pass added since this run targets that gap.
 
 ---
 
-## Privacy and data
+## 🔒 Privacy and data
 
 - **Everything is local by default.** One SQLite file at
   `~/.palace/palace/palace.db`. Embeddings are computed on your CPU.
@@ -640,11 +686,11 @@ mine a repository.
 
 ---
 
-## Troubleshooting
+## 🩺 Troubleshooting
 
 | Problem | Fix |
 |---|---|
-| The agent never calls Palace | Run `palace doctor`, then fully restart the agent app. In Codex, run `/hooks` once to trust the hooks. |
+| The agent never calls Palace | Run `palace doctor`, then fully restart the agent app. In the Codex CLI, run `/hooks` once to trust the hooks. |
 | `palace: command not found` | Open a new terminal so `PATH` picks up the install directory, or run `palace doctor` with the full path. |
 | No search results | Check `palace status`. If the project has no drawers, run `palace init <dir> --yes --auto-mine`. |
 | Results are out of date | Run `palace mine <dir>` again (only changed files are processed), or keep `palace watch <dir>` running. |
@@ -654,7 +700,79 @@ mine a repository.
 
 ---
 
-## Using Palace as a library
+## ❓ FAQ
+
+<details>
+<summary><b>Do I have to tell my agent to use it?</b></summary>
+
+No. After `palace install`, hooks inject relevant memory at session start, when
+you send a prompt, and while the agent reads code. The installed rule tells the
+agent to search memory before answering history questions and to save what it
+learned afterwards.
+
+</details>
+
+<details>
+<summary><b>How is this different from CLAUDE.md or AGENTS.md?</b></summary>
+
+Those files are instructions you write and maintain by hand, and every line is
+loaded into every session. Palace is searchable memory that grows as you work:
+only the parts relevant to the current question are recalled, and the same
+memory is shared by Claude Code, Codex, Cursor, and Claude Desktop. Keep using
+instruction files for rules; use Palace for history.
+
+</details>
+
+<details>
+<summary><b>Does it send my data anywhere?</b></summary>
+
+No. Storage, embeddings, and search all run locally. The only network calls
+are the one-time model download from Hugging Face and, if you turn it on,
+your own Palace Server in remote mode. See [Privacy and data](#-privacy-and-data).
+
+</details>
+
+<details>
+<summary><b>Will it slow my agent down?</b></summary>
+
+Searches typically take tens of milliseconds (`palace gain` shows your real
+p50 and p95). The first call in a session loads the embedding model. Hooks fail
+open, so a missing or broken palace never blocks the agent.
+
+</details>
+
+<details>
+<summary><b>What happens when a memory goes out of date?</b></summary>
+
+Re-running `palace mine` updates changed files. For facts, agents call
+`palace_kg_invalidate` and add the new fact, so the timeline keeps both.
+`palace_conflicts` flags facts that look stale or contradictory, and
+`palace_forget` or `palace prune` removes drawers you no longer want.
+
+</details>
+
+<details>
+<summary><b>Can my whole team share one memory?</b></summary>
+
+Different agents on one machine already share it: a Codex session can pick up
+a Claude Code session's diary. For a team, [remote mode](#remote-mode-shared-team-memory)
+points every `palace mcp` at a shared, self-hosted Palace Server.
+
+</details>
+
+<details>
+<summary><b>Is it only for code?</b></summary>
+
+No. The `creative` and `personal` [profiles](#profiles) tune Palace for
+worldbuilding, fiction, coaching, caregiving, and household notes. Palace
+reads Markdown and text files, so Claude Desktop users can install the MCPB
+bundle and start without writing code.
+
+</details>
+
+---
+
+## 📚 Using Palace as a library
 
 Palace is also a Rust crate (`palace`). Add it as a git dependency:
 
@@ -681,7 +799,7 @@ the same score details as the MCP tools.
 
 ---
 
-## Development
+## 🧪 Development
 
 ```bash
 cargo fmt
@@ -696,7 +814,7 @@ it. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
 
 ---
 
-## Migrating from older versions
+## 🚚 Migrating from older versions
 
 <details>
 <summary>From <code>mempalace</code> (0.1.x)</summary>
@@ -732,6 +850,6 @@ still compatible and are read automatically.
 
 ---
 
-## License
+## 📜 License
 
 [MIT](LICENSE)
