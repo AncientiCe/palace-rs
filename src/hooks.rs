@@ -3,7 +3,7 @@
 //! These power three globally-installed Cursor hooks (see [`crate::install`]):
 //!
 //! - `sessionStart` — inject the protocol and export the session id.
-//! - `userPromptSubmit` (Claude Code / Codex) — recall memory relevant to the
+//! - `userPromptSubmit` (Claude Code / Codex / Gemini / OpenCode) — recall memory relevant to the
 //!   user's question before the agent answers it.
 //! - `postToolUse` — recall relevant memory right when the agent investigates
 //!   (e.g. before/while it greps), so prior decisions surface automatically.
@@ -21,14 +21,25 @@ use serde_json::{json, Value};
 use crate::config::PalaceConfig;
 
 /// The agent client a hook is running for. Determines the output dialect:
-/// Cursor uses its own keys (`additional_context`, `followup_message`, `env`)
-/// while Claude Code and Codex share a "Claude-style" dialect
-/// (`hookSpecificOutput.additionalContext`, `decision`/`reason`).
+/// Cursor and OpenCode use flat keys (`additional_context`, `followup_message`),
+/// Claude Code, Codex and VS Code share the "Claude-style" `hookSpecificOutput`
+/// shape, and Gemini CLI uses that shape with its own event names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookClient {
     Cursor,
     Claude,
     Codex,
+    Gemini,
+    Vscode,
+    OpenCode,
+}
+
+/// The context-injecting hook events, independent of each client's naming.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HookEvent {
+    SessionStart,
+    UserPromptSubmit,
+    PostToolUse,
 }
 
 impl HookClient {
@@ -37,13 +48,66 @@ impl HookClient {
         match value.trim().to_lowercase().as_str() {
             "claude" | "claude-code" => Self::Claude,
             "codex" => Self::Codex,
+            "gemini" | "gemini-cli" => Self::Gemini,
+            "vscode" | "copilot" | "vscode-copilot" => Self::Vscode,
+            "opencode" => Self::OpenCode,
             _ => Self::Cursor,
         }
     }
 
-    /// Whether this client uses the Claude-style hook output dialect.
+    /// Whether this client returns context in a `hookSpecificOutput` object.
     fn claude_style(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex)
+        matches!(
+            self,
+            Self::Claude | Self::Codex | Self::Gemini | Self::Vscode
+        )
+    }
+
+    /// Whether this client can inject context when the user submits a prompt.
+    /// Cursor's `beforeSubmitPrompt` and VS Code's `UserPromptSubmit` cannot.
+    fn injects_on_prompt(self) -> bool {
+        !matches!(self, Self::Cursor | Self::Vscode)
+    }
+
+    /// The event name this client expects in `hookSpecificOutput.hookEventName`.
+    fn event_name(self, event: HookEvent) -> &'static str {
+        match (self, event) {
+            (_, HookEvent::SessionStart) => "SessionStart",
+            (Self::Gemini, HookEvent::UserPromptSubmit) => "BeforeAgent",
+            (Self::Gemini, HookEvent::PostToolUse) => "AfterTool",
+            (_, HookEvent::UserPromptSubmit) => "UserPromptSubmit",
+            (_, HookEvent::PostToolUse) => "PostToolUse",
+        }
+    }
+
+    /// Wrap injected context in this client's response shape.
+    fn context_output(self, event: HookEvent, context: String) -> Value {
+        if self.claude_style() {
+            json!({
+                "hookSpecificOutput": {
+                    "hookEventName": self.event_name(event),
+                    "additionalContext": context,
+                }
+            })
+        } else {
+            json!({ "additional_context": context })
+        }
+    }
+
+    /// The stop response that makes this client continue with `message`.
+    fn continue_output(self, message: &str) -> Value {
+        match self {
+            Self::Claude | Self::Codex => json!({ "decision": "block", "reason": message }),
+            Self::Gemini => json!({ "decision": "deny", "reason": message }),
+            Self::Vscode => json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "Stop",
+                    "decision": "block",
+                    "reason": message,
+                }
+            }),
+            Self::Cursor | Self::OpenCode => json!({ "followup_message": message }),
+        }
     }
 }
 
@@ -85,22 +149,14 @@ pub fn session_start_response(
             context.push_str(&recall);
         }
     }
-    let response = if client.claude_style() {
-        json!({
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": context,
-            }
-        })
-    } else {
-        let mut response = json!({ "additional_context": context });
+    let mut response = client.context_output(HookEvent::SessionStart, context);
+    if client == HookClient::Cursor {
         if let Some(session_id) = input.get("session_id").and_then(Value::as_str) {
             if !session_id.is_empty() {
                 response["env"] = json!({ "PALACE_SESSION_ID": session_id });
             }
         }
-        response
-    };
+    }
     Ok(serde_json::to_string(&response)?)
 }
 
@@ -110,16 +166,7 @@ pub fn post_tool_use_response(conn: &Connection, input: &Value, client: HookClie
     let Some(context) = recall_context(conn, input) else {
         return json!({});
     };
-    if client.claude_style() {
-        json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "additionalContext": context,
-            }
-        })
-    } else {
-        json!({ "additional_context": context })
-    }
+    client.context_output(HookEvent::PostToolUse, context)
 }
 
 /// Prompts shorter than this many words ("go ahead", "yes") are not searched.
@@ -151,20 +198,15 @@ const PROMPT_SEARCH_NUDGE: &str = "Palace memory: this question looks like it de
 /// question *before* the agent starts answering, so Palace is consulted even
 /// when the agent would otherwise go straight to the code or its own knowledge.
 /// A history-style question with no hits gets a one-line search nudge instead.
-/// Cursor's `beforeSubmitPrompt` cannot inject context, so it always gets `{}`.
+/// Clients whose prompt hook cannot inject context (Cursor, VS Code) get `{}`.
 pub fn user_prompt_submit_response(conn: &Connection, input: &Value, client: HookClient) -> Value {
-    if !client.claude_style() {
+    if !client.injects_on_prompt() {
         return json!({});
     }
     let Some(context) = prompt_context(conn, input) else {
         return json!({});
     };
-    json!({
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": context,
-        }
-    })
+    client.context_output(HookEvent::UserPromptSubmit, context)
 }
 
 /// Recall block (or search nudge) for a submitted prompt, or `None` when the
@@ -405,13 +447,7 @@ pub fn stop_response(conn: &Connection, input: &Value, client: HookClient) -> Va
         return json!({});
     }
     match crate::usage::recent_save_status(conn, SAVE_WINDOW_MINUTES) {
-        Ok((engaged, saved)) if engaged && !saved => {
-            if client.claude_style() {
-                json!({ "decision": "block", "reason": SAVE_NUDGE })
-            } else {
-                json!({ "followup_message": SAVE_NUDGE })
-            }
-        }
+        Ok((engaged, saved)) if engaged && !saved => client.continue_output(SAVE_NUDGE),
         _ => json!({}),
     }
 }
@@ -419,7 +455,7 @@ pub fn stop_response(conn: &Connection, input: &Value, client: HookClient) -> Va
 /// Whether the stop hook should stay silent: already continuing from a prior
 /// nudge, or — for Cursor — the turn did not complete cleanly.
 fn stop_should_skip(input: &Value, client: HookClient) -> bool {
-    // Claude/Codex pass `stop_hook_active`; Cursor passes `loop_count`. Either
+    // Claude-style clients pass `stop_hook_active`; Cursor passes `loop_count`. Either
     // signalling "we already triggered a follow-up" means stop nudging so we
     // never loop forever.
     if input
@@ -432,7 +468,7 @@ fn stop_should_skip(input: &Value, client: HookClient) -> bool {
     if input.get("loop_count").and_then(Value::as_i64).unwrap_or(0) != 0 {
         return true;
     }
-    if !client.claude_style() {
+    if client == HookClient::Cursor {
         let status = input.get("status").and_then(Value::as_str).unwrap_or("");
         if status != "completed" {
             return true;
@@ -502,15 +538,35 @@ fn open_palace() -> Option<Connection> {
     }
 }
 
+/// Tool-name fragments that mark a tool as a mutation, not an investigation.
+const MUTATING_TOOL_TERMS: &[&str] = &[
+    "edit", "write", "replace", "patch", "create", "delete", "todo",
+];
+
 /// Extract a search query from an investigation tool's input, or `None` if the
 /// tool is not an investigation (so non-search tools stay silent).
 fn investigation_query(input: &Value) -> Option<String> {
+    // Clients without tool matchers (VS Code) fire for every tool, so skip
+    // anything that changes files rather than investigating them.
+    let tool_name = input
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_lowercase();
+    if MUTATING_TOOL_TERMS
+        .iter()
+        .any(|term| tool_name.contains(term))
+    {
+        return None;
+    }
     let tool_input = input.get("tool_input");
     let candidate = tool_input
         .and_then(|ti| ti.get("pattern").and_then(Value::as_str)) // Grep / Glob
         .or_else(|| tool_input.and_then(|ti| ti.get("query").and_then(Value::as_str)))
         .or_else(|| tool_input.and_then(|ti| ti.get("command").and_then(Value::as_str))) // Codex/Bash shell
         .or_else(|| tool_input.and_then(|ti| ti.get("file_path").and_then(Value::as_str))) // Claude Read/Edit
+        .or_else(|| tool_input.and_then(|ti| ti.get("filePath").and_then(Value::as_str))) // OpenCode/VS Code read
+        .or_else(|| tool_input.and_then(|ti| ti.get("absolute_path").and_then(Value::as_str))) // Gemini read_file
         .or_else(|| tool_input.and_then(|ti| ti.get("path").and_then(Value::as_str))) // Grep/Glob path scope
         .or_else(|| tool_input.and_then(|ti| ti.get("file").and_then(Value::as_str)));
     let text = candidate?.trim();

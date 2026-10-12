@@ -483,3 +483,107 @@ fn session_start_no_recall_without_db() {
     assert!(ctx.contains("Palace Memory Protocol"), "{out}");
     assert!(!ctx.contains("Recalled from Palace memory"), "{out}");
 }
+
+// ── per-client dialects (Gemini, VS Code, OpenCode) ───────────────────────
+
+#[test]
+fn gemini_dialect_uses_its_own_event_names() {
+    let conn = test_db();
+    remember(&conn, TOKIO_DECISION, "decisions");
+
+    let tool = json!({
+        "tool_name": "grep_search",
+        "tool_input": {"pattern": "tokio async-std http server runtime choice"},
+        "cwd": "/work/proj"
+    });
+    let out = post_tool_use_response(&conn, &tool, HookClient::Gemini);
+    assert_eq!(out["hookSpecificOutput"]["hookEventName"], "AfterTool");
+
+    let out = user_prompt_submit_response(
+        &conn,
+        &prompt("why did we pick tokio over async-std for the http server?"),
+        HookClient::Gemini,
+    );
+    assert_eq!(out["hookSpecificOutput"]["hookEventName"], "BeforeAgent");
+}
+
+#[test]
+fn gemini_stop_denies_to_continue() {
+    let conn = test_db();
+    insert_event(&conn, &usage("palace_search")).unwrap();
+    let out = stop_response(
+        &conn,
+        &json!({"stop_hook_active": false}),
+        HookClient::Gemini,
+    );
+    assert_eq!(out["decision"], "deny", "{out}");
+    assert!(out["reason"]
+        .as_str()
+        .unwrap_or("")
+        .contains("palace_diary_write"));
+}
+
+#[test]
+fn vscode_stop_nests_decision_in_hook_specific_output() {
+    let conn = test_db();
+    insert_event(&conn, &usage("palace_search")).unwrap();
+    let out = stop_response(
+        &conn,
+        &json!({"stop_hook_active": false}),
+        HookClient::Vscode,
+    );
+    assert_eq!(out["hookSpecificOutput"]["hookEventName"], "Stop");
+    assert_eq!(out["hookSpecificOutput"]["decision"], "block", "{out}");
+    assert!(out.get("decision").is_none(), "{out}");
+}
+
+#[test]
+fn vscode_prompt_hook_cannot_inject() {
+    let conn = test_db();
+    remember(&conn, TOKIO_DECISION, "decisions");
+    let out = user_prompt_submit_response(
+        &conn,
+        &prompt("why did we pick tokio over async-std for the http server?"),
+        HookClient::Vscode,
+    );
+    assert_eq!(out, json!({}));
+}
+
+#[test]
+fn post_tool_use_skips_mutating_tools_without_matchers() {
+    let conn = test_db();
+    remember(&conn, TOKIO_DECISION, "decisions");
+    let edit = json!({
+        "tool_name": "replace_string_in_file",
+        "tool_input": {"filePath": "tokio async-std http server runtime choice"},
+        "cwd": "/work/proj"
+    });
+    assert_eq!(
+        post_tool_use_response(&conn, &edit, HookClient::Vscode),
+        json!({})
+    );
+}
+
+#[test]
+fn opencode_uses_flat_keys_and_stops_without_status() {
+    let conn = test_db();
+    remember(&conn, TOKIO_DECISION, "decisions");
+    let read = json!({
+        "tool_name": "read",
+        "tool_input": {"filePath": "tokio async-std http server runtime choice"},
+        "cwd": "/work/proj"
+    });
+    let out = post_tool_use_response(&conn, &read, HookClient::OpenCode);
+    assert!(out["additional_context"]
+        .as_str()
+        .unwrap_or("")
+        .contains("tokio"));
+
+    insert_event(&conn, &usage("palace_search")).unwrap();
+    // OpenCode passes no `status`; Cursor's completed-turn check must not apply.
+    let out = stop_response(&conn, &json!({}), HookClient::OpenCode);
+    assert!(out["followup_message"]
+        .as_str()
+        .unwrap_or("")
+        .contains("palace_diary_write"));
+}
