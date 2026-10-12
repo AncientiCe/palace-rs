@@ -23,7 +23,8 @@ use crate::config::PalaceConfig;
 /// The agent client a hook is running for. Determines the output dialect:
 /// Cursor and OpenCode use flat keys (`additional_context`, `followup_message`),
 /// Claude Code, Codex and VS Code share the "Claude-style" `hookSpecificOutput`
-/// shape, and Gemini CLI uses that shape with its own event names.
+/// shape, Gemini CLI uses that shape with its own event names, Cline returns
+/// `contextModification`, and Goose can only block a stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookClient {
     Cursor,
@@ -32,6 +33,8 @@ pub enum HookClient {
     Gemini,
     Vscode,
     OpenCode,
+    Cline,
+    Goose,
 }
 
 /// The context-injecting hook events, independent of each client's naming.
@@ -51,6 +54,8 @@ impl HookClient {
             "gemini" | "gemini-cli" => Self::Gemini,
             "vscode" | "copilot" | "vscode-copilot" => Self::Vscode,
             "opencode" => Self::OpenCode,
+            "cline" => Self::Cline,
+            "goose" => Self::Goose,
             _ => Self::Cursor,
         }
     }
@@ -64,9 +69,10 @@ impl HookClient {
     }
 
     /// Whether this client can inject context when the user submits a prompt.
-    /// Cursor's `beforeSubmitPrompt` and VS Code's `UserPromptSubmit` cannot.
+    /// Cursor's `beforeSubmitPrompt`, VS Code's `UserPromptSubmit` and Goose's
+    /// hooks cannot.
     fn injects_on_prompt(self) -> bool {
-        !matches!(self, Self::Cursor | Self::Vscode)
+        !matches!(self, Self::Cursor | Self::Vscode | Self::Goose)
     }
 
     /// The event name this client expects in `hookSpecificOutput.hookEventName`.
@@ -82,15 +88,17 @@ impl HookClient {
 
     /// Wrap injected context in this client's response shape.
     fn context_output(self, event: HookEvent, context: String) -> Value {
-        if self.claude_style() {
-            json!({
+        match self {
+            _ if self.claude_style() => json!({
                 "hookSpecificOutput": {
                     "hookEventName": self.event_name(event),
                     "additionalContext": context,
                 }
-            })
-        } else {
-            json!({ "additional_context": context })
+            }),
+            Self::Cline => json!({ "contextModification": context }),
+            // Goose hooks have no way to reach the model.
+            Self::Goose => json!({}),
+            _ => json!({ "additional_context": context }),
         }
     }
 
@@ -107,8 +115,51 @@ impl HookClient {
                 }
             }),
             Self::Cursor | Self::OpenCode => json!({ "followup_message": message }),
+            Self::Goose => json!({ "decision": "block", "reason": message }),
+            // Cline cannot continue a task after it completes.
+            Self::Cline => json!({}),
         }
     }
+}
+
+/// Map a client's hook input onto the Claude-style fields the response
+/// builders read (`cwd`, `session_id`, `prompt`, `tool_name`, `tool_input`).
+/// Clients that already send those fields pass through unchanged.
+pub fn normalize_input(input: Value, client: HookClient) -> Value {
+    let mut input = input;
+    let set = |input: &mut Value, key: &str, value: Option<Value>| {
+        if let (Some(value), Some(object)) = (value, input.as_object_mut()) {
+            object.entry(key).or_insert(value);
+        }
+    };
+    match client {
+        HookClient::Cline => {
+            let cwd = input.pointer("/workspaceRoots/0").cloned();
+            let session = input.get("taskId").cloned();
+            let prompt = input.pointer("/userPromptSubmit/prompt").cloned();
+            let tool_name = input
+                .pointer("/postToolUse/toolName")
+                .or_else(|| input.pointer("/tool_call/name"))
+                .cloned();
+            let tool_input = input
+                .pointer("/postToolUse/parameters")
+                .or_else(|| input.pointer("/tool_call/input"))
+                .cloned();
+            set(&mut input, "cwd", cwd);
+            set(&mut input, "session_id", session);
+            set(&mut input, "prompt", prompt);
+            set(&mut input, "tool_name", tool_name);
+            set(&mut input, "tool_input", tool_input);
+        }
+        HookClient::Goose => {
+            let cwd = input.get("working_dir").cloned();
+            let prompt = input.get("message").cloned();
+            set(&mut input, "cwd", cwd);
+            set(&mut input, "prompt", prompt);
+        }
+        _ => {}
+    }
+    input
 }
 
 /// Minimum combined similarity for a recalled memory to be worth injecting.
@@ -485,6 +536,7 @@ pub fn run(event: &str, client: HookClient) -> Result<()> {
     let mut raw = String::new();
     std::io::stdin().read_to_string(&mut raw).ok();
     let input: Value = serde_json::from_str(raw.trim()).unwrap_or_else(|_| json!({}));
+    let input = normalize_input(input, client);
 
     let response = match event {
         "session-start" | "sessionStart" | "SessionStart" => {
@@ -502,9 +554,18 @@ pub fn run(event: &str, client: HookClient) -> Result<()> {
                 user_prompt_submit_response(conn, &input, client)
             }))?
         }
-        "stop" | "Stop" => {
-            serde_json::to_string(&with_db(|conn| stop_response(conn, &input, client)))?
-        }
+        "stop" | "Stop" => serde_json::to_string(&with_db(|conn| {
+            // Goose sends no `stop_hook_active`, so remember per session that
+            // it was already nudged and never block its stop twice.
+            if client == HookClient::Goose && goose_already_nudged(&input) {
+                return json!({});
+            }
+            let response = stop_response(conn, &input, client);
+            if client == HookClient::Goose && response != json!({}) {
+                mark_goose_nudged(&input);
+            }
+            response
+        }))?,
         other => {
             tracing::warn!(event = other, "palace hook: unknown event, ignoring");
             "{}".to_string()
@@ -512,6 +573,41 @@ pub fn run(event: &str, client: HookClient) -> Result<()> {
     };
     println!("{response}");
     Ok(())
+}
+
+/// Marker file recording that a Goose session already got the save nudge.
+fn goose_nudge_marker(input: &Value) -> Option<std::path::PathBuf> {
+    let session = input.get("session_id").and_then(Value::as_str)?;
+    let safe: String = session
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let db_path = PalaceConfig::new().palace_db_path();
+    Some(
+        db_path
+            .parent()?
+            .join("hook_state")
+            .join(format!("goose-stop-{safe}")),
+    )
+}
+
+fn goose_already_nudged(input: &Value) -> bool {
+    goose_nudge_marker(input).is_some_and(|path| path.exists())
+}
+
+fn mark_goose_nudged(input: &Value) {
+    if let Some(path) = goose_nudge_marker(input) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, "");
+    }
 }
 
 /// Open the palace DB and run `f`, returning `{}` if the DB cannot be opened
@@ -564,11 +660,13 @@ fn investigation_query(input: &Value) -> Option<String> {
         .and_then(|ti| ti.get("pattern").and_then(Value::as_str)) // Grep / Glob
         .or_else(|| tool_input.and_then(|ti| ti.get("query").and_then(Value::as_str)))
         .or_else(|| tool_input.and_then(|ti| ti.get("command").and_then(Value::as_str))) // Codex/Bash shell
+        .or_else(|| tool_input.and_then(|ti| ti.get("commands").and_then(Value::as_str))) // Cline run_commands
         .or_else(|| tool_input.and_then(|ti| ti.get("file_path").and_then(Value::as_str))) // Claude Read/Edit
         .or_else(|| tool_input.and_then(|ti| ti.get("filePath").and_then(Value::as_str))) // OpenCode/VS Code read
         .or_else(|| tool_input.and_then(|ti| ti.get("absolute_path").and_then(Value::as_str))) // Gemini read_file
         .or_else(|| tool_input.and_then(|ti| ti.get("path").and_then(Value::as_str))) // Grep/Glob path scope
-        .or_else(|| tool_input.and_then(|ti| ti.get("file").and_then(Value::as_str)));
+        .or_else(|| tool_input.and_then(|ti| ti.get("file").and_then(Value::as_str)))
+        .or_else(|| tool_input.and_then(|ti| ti.get("paths").and_then(Value::as_str))); // Cline read_files
     let text = candidate?.trim();
     if text.len() < 3 {
         return None;

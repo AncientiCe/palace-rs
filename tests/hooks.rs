@@ -3,8 +3,8 @@
 
 use chrono::Utc;
 use palace::hooks::{
-    post_tool_use_response, session_start_response, stop_response, user_prompt_submit_response,
-    HookClient,
+    normalize_input, post_tool_use_response, session_start_response, stop_response,
+    user_prompt_submit_response, HookClient,
 };
 use palace::usage::{insert_event, UsageEvent};
 use serde_json::{json, Value};
@@ -586,4 +586,67 @@ fn opencode_uses_flat_keys_and_stops_without_status() {
         .as_str()
         .unwrap_or("")
         .contains("palace_diary_write"));
+}
+
+// ── Cline and Goose ───────────────────────────────────────────────────────
+
+#[test]
+fn cline_input_is_normalized_and_context_uses_context_modification() {
+    let conn = test_db();
+    remember(&conn, TOKIO_DECISION, "decisions");
+    let raw = json!({
+        "hookName": "PostToolUse",
+        "taskId": "task-1",
+        "workspaceRoots": ["/work/proj"],
+        "postToolUse": {
+            "toolName": "search_codebase",
+            "parameters": {"query": "tokio async-std http server runtime choice"}
+        }
+    });
+    let input = normalize_input(raw, HookClient::Cline);
+    assert_eq!(input["cwd"], "/work/proj");
+    assert_eq!(input["session_id"], "task-1");
+    let out = post_tool_use_response(&conn, &input, HookClient::Cline);
+    assert!(out["contextModification"]
+        .as_str()
+        .unwrap_or("")
+        .contains("tokio"));
+
+    let prompt = normalize_input(
+        json!({
+            "workspaceRoots": ["/work/proj"],
+            "userPromptSubmit": {"prompt": "why did we pick tokio over async-std for the http server?"}
+        }),
+        HookClient::Cline,
+    );
+    let out = user_prompt_submit_response(&conn, &prompt, HookClient::Cline);
+    assert!(out["contextModification"].is_string(), "{out}");
+}
+
+#[test]
+fn cline_cannot_continue_after_completion() {
+    let conn = test_db();
+    insert_event(&conn, &usage("palace_search")).unwrap();
+    assert_eq!(
+        stop_response(&conn, &json!({}), HookClient::Cline),
+        json!({})
+    );
+}
+
+#[test]
+fn goose_blocks_stop_but_never_injects_context() {
+    let conn = test_db();
+    remember(&conn, TOKIO_DECISION, "decisions");
+    insert_event(&conn, &usage("palace_search")).unwrap();
+
+    let input = normalize_input(
+        json!({"event": "Stop", "session_id": "g1", "working_dir": "/work/proj"}),
+        HookClient::Goose,
+    );
+    assert_eq!(input["cwd"], "/work/proj");
+    let out = stop_response(&conn, &input, HookClient::Goose);
+    assert_eq!(out["decision"], "block", "{out}");
+
+    let out = post_tool_use_response(&conn, &grep_tokio("/work/proj"), HookClient::Goose);
+    assert_eq!(out, json!({}));
 }
