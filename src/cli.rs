@@ -177,7 +177,7 @@ enum Commands {
     },
     /// Register the MCP server with local AI clients
     Install {
-        /// Client to configure: cursor, codex, claude, claude-desktop, gemini, vscode, windsurf, opencode, or all
+        /// Client to configure: cursor, codex, claude, claude-desktop, gemini, vscode, windsurf, opencode, cline, zed, goose, or all
         #[arg(long, default_value = "all")]
         client: String,
         /// Configure all supported clients
@@ -204,7 +204,7 @@ enum Commands {
     },
     /// Remove the Palace MCP server from local AI clients
     Uninstall {
-        /// Client to configure: cursor, codex, claude, claude-desktop, gemini, vscode, windsurf, opencode, or all
+        /// Client to configure: cursor, codex, claude, claude-desktop, gemini, vscode, windsurf, opencode, cline, zed, goose, or all
         #[arg(long, default_value = "all")]
         client: String,
         /// Remove all supported clients
@@ -225,7 +225,7 @@ enum Commands {
     },
     /// Show MCP client configuration and palace status
     Doctor {
-        /// Client to inspect: cursor, codex, claude, claude-desktop, gemini, vscode, windsurf, opencode, or all
+        /// Client to inspect: cursor, codex, claude, claude-desktop, gemini, vscode, windsurf, opencode, cline, zed, goose, or all
         #[arg(long, default_value = "all")]
         client: String,
         /// Inspect all supported clients

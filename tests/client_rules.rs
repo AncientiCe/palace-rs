@@ -1443,3 +1443,135 @@ fn install_accepts_jsonc_config_with_comments_and_trailing_commas() {
         "original kept as backup"
     );
 }
+
+// ── Cline, Zed, Goose ─────────────────────────────────────────────────────────
+
+fn zed_dir(home: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        home.join("AppData").join("Roaming").join("Zed")
+    } else {
+        home.join(".config").join("zed")
+    }
+}
+
+fn goose_dir(home: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        home.join("AppData/Roaming/Block/goose/config")
+    } else {
+        home.join(".config/goose")
+    }
+}
+
+#[test]
+fn install_cline_writes_shared_mcp_settings_and_global_rule() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    install_clients(&options(temp.path(), &binary_path, vec![Client::Cline])).unwrap();
+
+    let config = read_json(
+        &temp
+            .path()
+            .join(".cline/data/settings/cline_mcp_settings.json"),
+    );
+    assert_eq!(
+        config["mcpServers"]["palace"]["args"],
+        serde_json::json!(["mcp"])
+    );
+    let rule = fs::read_to_string(temp.path().join(".cline/rules/palace.md")).unwrap();
+    assert!(
+        rule.starts_with("# Palace Memory Protocol"),
+        "no frontmatter = always on"
+    );
+    assert_full_protocol(&rule);
+}
+
+#[test]
+fn install_zed_writes_context_server_into_jsonc_settings() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let dir = zed_dir(temp.path());
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("settings.json"),
+        "// Zed settings\n{\n  \"theme\": \"One Dark\", // keep\n  \"vim_mode\": true,\n}\n",
+    )
+    .unwrap();
+    let opts = options(temp.path(), &binary_path, vec![Client::Zed]);
+    install_clients(&opts).unwrap();
+
+    let settings = read_json(&dir.join("settings.json"));
+    assert_eq!(settings["theme"], "One Dark");
+    let server = &settings["context_servers"]["palace"];
+    assert_eq!(
+        server["command"].as_str(),
+        Some(binary_path.to_string_lossy().as_ref())
+    );
+    assert!(server.get("source").is_none());
+    assert_full_protocol(&fs::read_to_string(dir.join("AGENTS.md")).unwrap());
+    assert!(doctor(&opts).unwrap().clients[0].points_to_expected_binary);
+
+    uninstall_clients(&opts).unwrap();
+    let settings = read_json(&dir.join("settings.json"));
+    assert!(settings["context_servers"].get("palace").is_none());
+    assert_eq!(settings["vim_mode"], true);
+}
+
+#[test]
+fn install_goose_writes_stdio_extension_and_goosehints() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let dir = goose_dir(temp.path());
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("config.yaml"),
+        "GOOSE_PROVIDER: anthropic\nextensions:\n  developer:\n    enabled: true\n    type: builtin\n    name: developer\n",
+    )
+    .unwrap();
+    let opts = options(temp.path(), &binary_path, vec![Client::Goose]);
+    install_clients(&opts).unwrap();
+
+    let text = fs::read_to_string(dir.join("config.yaml")).unwrap();
+    let config: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    assert_eq!(config["GOOSE_PROVIDER"].as_str(), Some("anthropic"));
+    assert!(config["extensions"]["developer"].is_mapping());
+    let palace = &config["extensions"]["palace"];
+    assert_eq!(palace["type"].as_str(), Some("stdio"));
+    assert_eq!(palace["enabled"].as_bool(), Some(true));
+    assert_eq!(
+        palace["cmd"].as_str(),
+        Some(binary_path.to_string_lossy().as_ref())
+    );
+    assert_eq!(palace["args"][0].as_str(), Some("mcp"));
+    let hints = fs::read_to_string(dir.join(".goosehints")).unwrap();
+    assert!(hints.contains("<!-- BEGIN PALACE -->"));
+    assert!(doctor(&opts).unwrap().clients[0].points_to_expected_binary);
+
+    // Idempotent.
+    let report = install_clients(&without_rule(opts.clone())).unwrap();
+    assert!(report.changed.is_empty(), "{report:?}");
+
+    uninstall_clients(&opts).unwrap();
+    let config: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(dir.join("config.yaml")).unwrap()).unwrap();
+    assert!(config["extensions"].get("palace").is_none());
+    assert!(config["extensions"]["developer"].is_mapping());
+}
+
+#[test]
+fn project_scope_cline_zed_goose_share_agents_md_block() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let binary_path = fake_binary(temp.path());
+    let mut opts = options(
+        temp.path(),
+        &binary_path,
+        vec![Client::Cline, Client::Zed, Client::Goose],
+    );
+    opts.scope = Scope::Project;
+    opts.project_dir = Some(project.clone());
+    install_clients(&opts).unwrap();
+
+    let agents = fs::read_to_string(project.join("AGENTS.md")).unwrap();
+    assert_eq!(agents.matches("<!-- BEGIN PALACE -->").count(), 1);
+}

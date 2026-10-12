@@ -45,6 +45,9 @@ pub enum Client {
     Vscode,
     Windsurf,
     OpenCode,
+    Cline,
+    Zed,
+    Goose,
     All,
 }
 
@@ -124,6 +127,9 @@ impl fmt::Display for Client {
             Client::Vscode => f.write_str("vscode"),
             Client::Windsurf => f.write_str("windsurf"),
             Client::OpenCode => f.write_str("opencode"),
+            Client::Cline => f.write_str("cline"),
+            Client::Zed => f.write_str("zed"),
+            Client::Goose => f.write_str("goose"),
             Client::All => f.write_str("all"),
         }
     }
@@ -142,6 +148,9 @@ impl std::str::FromStr for Client {
             "vscode" | "copilot" | "vscode-copilot" => Ok(Client::Vscode),
             "windsurf" => Ok(Client::Windsurf),
             "opencode" => Ok(Client::OpenCode),
+            "cline" => Ok(Client::Cline),
+            "zed" => Ok(Client::Zed),
+            "goose" => Ok(Client::Goose),
             "all" => Ok(Client::All),
             other => Err(anyhow!("unknown MCP client: {other}")),
         }
@@ -204,6 +213,7 @@ pub fn install_clients(options: &InstallOptions) -> Result<InstallReport> {
                 remove_legacy_codex_entry(&path, options.dry_run)?;
                 write_codex_client(&path, &options.binary_path, options.dry_run)?
             }
+            McpFormat::Goose => write_goose_client(&path, &options.binary_path, options.dry_run)?,
             format => {
                 // Remove legacy 0.1.x entries before writing new ones.
                 remove_legacy_json_entry(&path, options.dry_run)?;
@@ -270,6 +280,7 @@ pub fn uninstall_clients(options: &InstallOptions) -> Result<InstallReport> {
                 let b = remove_legacy_codex_entry(&path, options.dry_run)?;
                 a || b
             }
+            McpFormat::Goose => remove_goose_client(&path, options.dry_run)?,
             format => {
                 let instruction = opencode_instruction(options, client)?;
                 let a = remove_json_client(&path, format, instruction.as_deref(), options.dry_run)?;
@@ -517,8 +528,8 @@ pub fn print_doctor_report(report: &DoctorReport) {
                     println!("      ↳ {note}");
                 }
             }
-        } else if status.client == Client::Windsurf {
-            println!("      ↳ Cascade hooks cannot inject context; Devin Local reuses the Claude Code hooks");
+        } else if let Some(note) = no_hooks_note(status.client) {
+            println!("      ↳ {note}");
         }
     }
     println!("  {}", "─".repeat(52));
@@ -533,11 +544,14 @@ pub fn print_doctor_report(report: &DoctorReport) {
 
 /// Clients that `all` configures only when they are installed on this machine,
 /// so `palace install` never creates config folders for agents the user lacks.
-const DETECTED_CLIENTS: [Client; 4] = [
+const DETECTED_CLIENTS: [Client; 7] = [
     Client::Gemini,
     Client::Vscode,
     Client::Windsurf,
     Client::OpenCode,
+    Client::Cline,
+    Client::Zed,
+    Client::Goose,
 ];
 
 fn expand_clients(options: &InstallOptions) -> Vec<Client> {
@@ -574,7 +588,33 @@ fn client_detected(home_dir: &Path, client: Client) -> bool {
         Client::Vscode => vscode_user_dir(home_dir).is_dir(),
         Client::Windsurf => windsurf_dir(home_dir).is_dir(),
         Client::OpenCode => opencode_dir(home_dir).is_dir(),
+        Client::Cline => cline_dir(home_dir).is_dir(),
+        Client::Zed => zed_dir(home_dir).is_dir(),
+        Client::Goose => goose_dir(home_dir).is_dir(),
         _ => true,
+    }
+}
+
+/// Cline's shared data folder (VS Code extension, CLI and JetBrains).
+fn cline_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(".cline")
+}
+
+/// Zed's config folder, which holds `settings.json` and the global `AGENTS.md`.
+fn zed_dir(home_dir: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        home_dir.join("AppData/Roaming/Zed")
+    } else {
+        home_dir.join(".config/zed")
+    }
+}
+
+/// Goose's config folder, which holds `config.yaml` and the global `.goosehints`.
+fn goose_dir(home_dir: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        home_dir.join("AppData/Roaming/Block/goose/config")
+    } else {
+        home_dir.join(".config/goose")
     }
 }
 
@@ -626,6 +666,11 @@ fn config_path(options: &InstallOptions, client: Client) -> Result<PathBuf> {
             Scope::User => Ok(opencode_dir(&options.home_dir).join("opencode.json")),
             Scope::Project => Ok(project_dir_for(options, client)?.join("opencode.json")),
         },
+        Client::Cline => {
+            Ok(cline_dir(&options.home_dir).join("data/settings/cline_mcp_settings.json"))
+        }
+        Client::Zed => Ok(zed_dir(&options.home_dir).join("settings.json")),
+        Client::Goose => Ok(goose_dir(&options.home_dir).join("config.yaml")),
         Client::All => Err(anyhow!("all is not a concrete client")),
     }
 }
@@ -648,6 +693,10 @@ enum McpFormat {
     VscodeServers,
     /// JSON `mcp.palace = { type: "local", command: [bin, "mcp"] }` (OpenCode).
     OpenCode,
+    /// JSON `context_servers.palace = { command, args }` (Zed).
+    Zed,
+    /// YAML `extensions.palace = { type: stdio, cmd, args, ... }` (Goose).
+    Goose,
     /// TOML `[mcp_servers.palace]` (Codex).
     Codex,
 }
@@ -657,6 +706,8 @@ fn mcp_format(client: Client) -> McpFormat {
         Client::Codex => McpFormat::Codex,
         Client::Vscode => McpFormat::VscodeServers,
         Client::OpenCode => McpFormat::OpenCode,
+        Client::Zed => McpFormat::Zed,
+        Client::Goose => McpFormat::Goose,
         _ => McpFormat::McpServers,
     }
 }
@@ -667,6 +718,8 @@ impl McpFormat {
         match self {
             McpFormat::VscodeServers => "servers",
             McpFormat::OpenCode => "mcp",
+            McpFormat::Zed => "context_servers",
+            McpFormat::Goose => "extensions",
             McpFormat::McpServers | McpFormat::Codex => "mcpServers",
         }
     }
@@ -680,7 +733,19 @@ impl McpFormat {
             McpFormat::OpenCode => {
                 json!({ "type": "local", "command": [command, "mcp"], "enabled": true })
             }
-            McpFormat::McpServers | McpFormat::Codex => {
+            McpFormat::Goose => json!({
+                "enabled": true,
+                "type": "stdio",
+                "name": "palace",
+                "description": "Palace long-term memory",
+                "cmd": command,
+                "args": ["mcp"],
+                "envs": {},
+                "env_keys": [],
+                "timeout": 300,
+                "bundled": false,
+            }),
+            McpFormat::McpServers | McpFormat::Zed | McpFormat::Codex => {
                 json!({ "command": command, "args": ["mcp"] })
             }
         }
@@ -757,13 +822,21 @@ fn rule_target(options: &InstallOptions, client: Client) -> Result<RuleTarget> {
         (Client::Windsurf, Scope::Project) => project_dir()?.join(".windsurf/rules/palace.md"),
         (Client::OpenCode, Scope::User) => opencode_dir(&options.home_dir).join("palace.md"),
         (Client::OpenCode, Scope::Project) => project_dir()?.join("AGENTS.md"),
+        (Client::Cline, Scope::User) => cline_dir(&options.home_dir).join("rules/palace.md"),
+        (Client::Zed, Scope::User) => zed_dir(&options.home_dir).join("AGENTS.md"),
+        (Client::Goose, Scope::User) => goose_dir(&options.home_dir).join(".goosehints"),
+        // All three read a project-root AGENTS.md.
+        (Client::Cline | Client::Zed | Client::Goose, Scope::Project) => {
+            project_dir()?.join("AGENTS.md")
+        }
         (Client::All, _) => return Err(anyhow!("all is not a concrete client")),
     };
     let kind = match (client, options.scope) {
         (Client::Cursor, _)
         | (Client::Vscode, Scope::User)
         | (Client::Windsurf, Scope::Project)
-        | (Client::OpenCode, Scope::User) => RuleKind::Standalone,
+        | (Client::OpenCode, Scope::User)
+        | (Client::Cline, Scope::User) => RuleKind::Standalone,
         (Client::All, _) => return Err(anyhow!("all is not a concrete client")),
         _ => RuleKind::ManagedBlock,
     };
@@ -1023,6 +1096,87 @@ fn remove_legacy_codex_entry(path: &Path, dry_run: bool) -> Result<bool> {
     write_toml_if_changed(path, &existing, &next, dry_run)
 }
 
+fn write_goose_client(path: &Path, binary_path: &Path, dry_run: bool) -> Result<bool> {
+    let existing = read_yaml_config(path)?;
+    let mut next = existing.clone();
+    let entry = serde_yaml::to_value(McpFormat::Goose.server_entry(binary_path))?;
+    goose_extensions(&mut next, path)?.insert("palace".into(), entry);
+    write_yaml_if_changed(path, &existing, &next, dry_run)
+}
+
+fn remove_goose_client(path: &Path, dry_run: bool) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let existing = read_yaml_config(path)?;
+    let mut next = existing.clone();
+    if let Some(extensions) = next
+        .get_mut("extensions")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    {
+        extensions.remove("palace");
+    }
+    write_yaml_if_changed(path, &existing, &next, dry_run)
+}
+
+/// The `extensions` mapping of a Goose config, created if missing.
+fn goose_extensions<'a>(
+    config: &'a mut serde_yaml::Value,
+    path: &Path,
+) -> Result<&'a mut serde_yaml::Mapping> {
+    if config.is_null() {
+        *config = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    let root = config
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow!("{} root is not a mapping", path.display()))?;
+    let extensions = root
+        .entry("extensions".into())
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if extensions.is_null() {
+        *extensions = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    extensions
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow!("{} `extensions` is not a mapping", path.display()))
+}
+
+fn read_yaml_config(path: &Path) -> Result<serde_yaml::Value> {
+    if !path.exists() {
+        return Ok(serde_yaml::Value::Null);
+    }
+    let text =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if text.trim().is_empty() {
+        return Ok(serde_yaml::Value::Null);
+    }
+    serde_yaml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+/// Write a YAML config if it changed. Comments are not preserved by the YAML
+/// round-trip, so the original is kept in the `.bak` backup.
+fn write_yaml_if_changed(
+    path: &Path,
+    existing: &serde_yaml::Value,
+    next: &serde_yaml::Value,
+    dry_run: bool,
+) -> Result<bool> {
+    if existing == next {
+        return Ok(false);
+    }
+    if dry_run {
+        return Ok(true);
+    }
+    backup_existing(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("config path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    fs::write(path, serde_yaml::to_string(next)?)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(true)
+}
+
 fn read_toml_document(path: &Path) -> Result<DocumentMut> {
     if !path.exists() {
         return Ok(DocumentMut::new());
@@ -1200,6 +1354,9 @@ fn display_client_name(client: Client) -> &'static str {
         Client::Vscode => "VS Code",
         Client::Windsurf => "Windsurf",
         Client::OpenCode => "OpenCode",
+        Client::Cline => "Cline",
+        Client::Zed => "Zed",
+        Client::Goose => "Goose",
         Client::All => "all",
     }
 }
@@ -1361,7 +1518,10 @@ fn read_configured_command(client: Client, path: &Path) -> Result<Option<String>
         return Ok(None);
     }
     match mcp_format(client) {
-        format @ (McpFormat::McpServers | McpFormat::VscodeServers | McpFormat::OpenCode) => {
+        format @ (McpFormat::McpServers
+        | McpFormat::VscodeServers
+        | McpFormat::OpenCode
+        | McpFormat::Zed) => {
             if !path.exists() {
                 return Ok(None);
             }
@@ -1387,6 +1547,18 @@ fn read_configured_command(client: Client, path: &Path) -> Result<Option<String>
                 .and_then(|servers| servers.get("palace"))
                 .and_then(|server| server.get("command"))
                 .and_then(Item::as_str)
+                .map(String::from))
+        }
+        McpFormat::Goose => {
+            if !path.exists() {
+                return Ok(None);
+            }
+            let config = read_yaml_config(path)?;
+            Ok(config
+                .get("extensions")
+                .and_then(|extensions| extensions.get("palace"))
+                .and_then(|extension| extension.get("cmd"))
+                .and_then(serde_yaml::Value::as_str)
                 .map(String::from))
         }
     }
@@ -2098,6 +2270,19 @@ fn client_hook_installed(home_dir: &Path, client: Client) -> bool {
         Client::OpenCode => opencode_plugin_path(home_dir).exists(),
         _ => nested_hook_target(home_dir, client)
             .is_some_and(|(path, _, _)| nested_hook_installed(&path)),
+    }
+}
+
+/// Why a client gets no Palace hooks, for doctor output.
+fn no_hooks_note(client: Client) -> Option<&'static str> {
+    match client {
+        Client::Windsurf => {
+            Some("Cascade hooks cannot inject context; Devin Local reuses the Claude Code hooks")
+        }
+        Client::Zed => Some(
+            "Zed's agent has no hooks; external agents (Claude Code, Gemini CLI, Codex) use their own Palace setup",
+        ),
+        _ => None,
     }
 }
 
