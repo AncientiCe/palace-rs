@@ -1099,7 +1099,7 @@ fn remove_legacy_codex_entry(path: &Path, dry_run: bool) -> Result<bool> {
 fn write_goose_client(path: &Path, binary_path: &Path, dry_run: bool) -> Result<bool> {
     let existing = read_yaml_config(path)?;
     let mut next = existing.clone();
-    let entry = serde_yaml::to_value(McpFormat::Goose.server_entry(binary_path))?;
+    let entry = serde_norway::to_value(McpFormat::Goose.server_entry(binary_path))?;
     goose_extensions(&mut next, path)?.insert("palace".into(), entry);
     write_yaml_if_changed(path, &existing, &next, dry_run)
 }
@@ -1112,7 +1112,7 @@ fn remove_goose_client(path: &Path, dry_run: bool) -> Result<bool> {
     let mut next = existing.clone();
     if let Some(extensions) = next
         .get_mut("extensions")
-        .and_then(serde_yaml::Value::as_mapping_mut)
+        .and_then(serde_norway::Value::as_mapping_mut)
     {
         extensions.remove("palace");
     }
@@ -1121,44 +1121,44 @@ fn remove_goose_client(path: &Path, dry_run: bool) -> Result<bool> {
 
 /// The `extensions` mapping of a Goose config, created if missing.
 fn goose_extensions<'a>(
-    config: &'a mut serde_yaml::Value,
+    config: &'a mut serde_norway::Value,
     path: &Path,
-) -> Result<&'a mut serde_yaml::Mapping> {
+) -> Result<&'a mut serde_norway::Mapping> {
     if config.is_null() {
-        *config = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        *config = serde_norway::Value::Mapping(serde_norway::Mapping::new());
     }
     let root = config
         .as_mapping_mut()
         .ok_or_else(|| anyhow!("{} root is not a mapping", path.display()))?;
     let extensions = root
         .entry("extensions".into())
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        .or_insert_with(|| serde_norway::Value::Mapping(serde_norway::Mapping::new()));
     if extensions.is_null() {
-        *extensions = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        *extensions = serde_norway::Value::Mapping(serde_norway::Mapping::new());
     }
     extensions
         .as_mapping_mut()
         .ok_or_else(|| anyhow!("{} `extensions` is not a mapping", path.display()))
 }
 
-fn read_yaml_config(path: &Path) -> Result<serde_yaml::Value> {
+fn read_yaml_config(path: &Path) -> Result<serde_norway::Value> {
     if !path.exists() {
-        return Ok(serde_yaml::Value::Null);
+        return Ok(serde_norway::Value::Null);
     }
     let text =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     if text.trim().is_empty() {
-        return Ok(serde_yaml::Value::Null);
+        return Ok(serde_norway::Value::Null);
     }
-    serde_yaml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+    serde_norway::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
 }
 
 /// Write a YAML config if it changed. Comments are not preserved by the YAML
 /// round-trip, so the original is kept in the `.bak` backup.
 fn write_yaml_if_changed(
     path: &Path,
-    existing: &serde_yaml::Value,
-    next: &serde_yaml::Value,
+    existing: &serde_norway::Value,
+    next: &serde_norway::Value,
     dry_run: bool,
 ) -> Result<bool> {
     if existing == next {
@@ -1172,7 +1172,7 @@ fn write_yaml_if_changed(
         .parent()
         .ok_or_else(|| anyhow!("config path has no parent: {}", path.display()))?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
-    fs::write(path, serde_yaml::to_string(next)?)
+    fs::write(path, serde_norway::to_string(next)?)
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(true)
 }
@@ -1558,7 +1558,7 @@ fn read_configured_command(client: Client, path: &Path) -> Result<Option<String>
                 .get("extensions")
                 .and_then(|extensions| extensions.get("palace"))
                 .and_then(|extension| extension.get("cmd"))
-                .and_then(serde_yaml::Value::as_str)
+                .and_then(serde_norway::Value::as_str)
                 .map(String::from))
         }
     }

@@ -358,7 +358,7 @@ pub fn save_config(project_dir: &Path, project_name: &str, rooms: &[Room]) -> Re
         wing: project_name.to_string(),
         rooms: rooms.to_vec(),
     };
-    let yaml = serde_yaml::to_string(&config)?;
+    let yaml = serde_norway::to_string(&config)?;
     let config_path = project_dir.join("palace.yaml");
     std::fs::write(&config_path, yaml)?;
     Ok(config_path)
@@ -375,7 +375,7 @@ pub fn load_config(project_dir: &Path) -> Result<ProjectConfig> {
         );
     }
     let content = std::fs::read_to_string(&path)?;
-    let config: ProjectConfig = serde_yaml::from_str(&content)?;
+    let config: ProjectConfig = serde_norway::from_str(&content)?;
     Ok(config)
 }
 

@@ -1531,7 +1531,7 @@ fn install_goose_writes_stdio_extension_and_goosehints() {
     install_clients(&opts).unwrap();
 
     let text = fs::read_to_string(dir.join("config.yaml")).unwrap();
-    let config: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    let config: serde_norway::Value = serde_norway::from_str(&text).unwrap();
     assert_eq!(config["GOOSE_PROVIDER"].as_str(), Some("anthropic"));
     assert!(config["extensions"]["developer"].is_mapping());
     let palace = &config["extensions"]["palace"];
@@ -1551,8 +1551,8 @@ fn install_goose_writes_stdio_extension_and_goosehints() {
     assert!(report.changed.is_empty(), "{report:?}");
 
     uninstall_clients(&opts).unwrap();
-    let config: serde_yaml::Value =
-        serde_yaml::from_str(&fs::read_to_string(dir.join("config.yaml")).unwrap()).unwrap();
+    let config: serde_norway::Value =
+        serde_norway::from_str(&fs::read_to_string(dir.join("config.yaml")).unwrap()).unwrap();
     assert!(config["extensions"].get("palace").is_none());
     assert!(config["extensions"]["developer"].is_mapping());
 }
