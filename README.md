@@ -9,7 +9,7 @@
   <img alt="Platforms: Linux, macOS, Windows" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-informational">
   <img alt="Rust 1.82+" src="https://img.shields.io/badge/rust-1.82%2B-orange?logo=rust">
   <a href="https://registry.modelcontextprotocol.io"><img alt="Listed in the MCP registry" src="https://img.shields.io/badge/MCP-registry-8250df"></a>
-  <img alt="Works with Claude Code, Codex, Cursor and Claude Desktop" src="https://img.shields.io/badge/works%20with-Claude%20Code%20%7C%20Codex%20%7C%20Cursor%20%7C%20Claude%20Desktop-8A2BE2">
+  <img alt="Works with Claude Code, Codex, Cursor, Gemini CLI, VS Code, OpenCode, Windsurf and Claude Desktop" src="https://img.shields.io/badge/works%20with-Claude%20Code%20%7C%20Codex%20%7C%20Cursor%20%7C%20Gemini%20CLI%20%7C%20VS%20Code%20%7C%20OpenCode%20%7C%20Windsurf-8A2BE2">
 </p>
 
 <p align="center">
@@ -30,7 +30,8 @@
 
 ---
 
-Palace gives Claude Code, Codex, Cursor, and Claude Desktop a memory that
+Palace gives Claude Code, Codex, Cursor, Gemini CLI, VS Code, OpenCode,
+Windsurf, and Claude Desktop a memory that
 lasts between sessions. It stores what happened verbatim, recalls it
 automatically when it's relevant, and cites where each answer came from.
 
@@ -125,7 +126,7 @@ mine or search, then stays cached in `~/.cache/huggingface`.
 ## ⚡ Quick start
 
 ```bash
-palace install            # connect Claude Code, Codex, Cursor, and Claude Desktop
+palace install            # connect every supported agent on this machine
 palace doctor             # check that every client is wired up
 palace init ~/my-project --yes --auto-mine   # detect rooms, write palace.yaml, mine
 ```
@@ -257,13 +258,19 @@ behind tool search.
 ## 🔌 Supported clients
 
 `palace install` configures every supported client by default
-(`--client all`). Use `--client <name>` to configure one.
+(`--client all`). Gemini CLI, VS Code, Windsurf and OpenCode are included only
+when their config folder exists, so Palace never sets up an agent you don't
+have. Use `--client <name>` to configure one explicitly.
 
 | Client | `--client` | MCP config | Rule file | Hooks |
 |---|---|---|---|---|
 | Claude Code | `claude` | `~/.claude.json` | `~/.claude/CLAUDE.md` | `~/.claude/settings.json` |
 | Codex | `codex` | `~/.codex/config.toml` | `~/.codex/AGENTS.md` | `~/.codex/hooks.json` (run `/hooks` once in the Codex CLI to trust them) |
 | Cursor | `cursor` | `~/.cursor/mcp.json` | `~/.cursor/rules/palace.mdc` | `~/.cursor/hooks.json` |
+| Gemini CLI | `gemini` | `~/.gemini/settings.json` | `~/.gemini/GEMINI.md` | `~/.gemini/settings.json` (run only in folders you trust in Gemini) |
+| VS Code (Copilot) | `vscode` | `Code/User/mcp.json` | `Code/User/prompts/palace.instructions.md` | `~/.copilot/hooks/palace.json` (no prompt-time recall: VS Code can't inject there) |
+| OpenCode | `opencode` | `~/.config/opencode/opencode.json` | `~/.config/opencode/palace.md`, listed under `instructions` | `~/.config/opencode/plugins/palace.js` |
+| Windsurf | `windsurf` | `~/.codeium/windsurf/mcp_config.json` | `~/.codeium/windsurf/memories/global_rules.md` | None. Cascade hooks can't inject context. Devin Local reuses the Claude Code hooks. |
 | Claude Desktop | `claude-desktop` | `claude_desktop_config.json` | `~/.claude/CLAUDE.md` | None. Use the [MCP prompts](#mcp-prompts) instead. |
 
 Rule files are written as a managed block. Your existing content is kept.
@@ -276,9 +283,11 @@ palace install --dry-run                             # preview the changes
 palace uninstall                                     # undo everything
 ```
 
-With `--scope project`, rules go to `<project>/CLAUDE.md`, `<project>/AGENTS.md`,
-and `<project>/.cursor/rules/palace.mdc`. Cursor also gets
-`<project>/.cursor/mcp.json`.
+With `--scope project`, rules go to `<project>/CLAUDE.md`, `<project>/AGENTS.md`
+(Codex and OpenCode), `<project>/GEMINI.md`, `<project>/.github/copilot-instructions.md`,
+`<project>/.windsurf/rules/palace.md`, and `<project>/.cursor/rules/palace.mdc`.
+Cursor, VS Code and OpenCode also get a project MCP config
+(`.cursor/mcp.json`, `.vscode/mcp.json`, `opencode.json`).
 
 <details>
 <summary>Manual MCP config</summary>

@@ -4,6 +4,28 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Added
+
+- **Gemini CLI, VS Code (Copilot), OpenCode and Windsurf.** `palace install`
+  now wires four more agents: MCP server, memory protocol rule, and the
+  automatic memory hooks where the agent supports them.
+  - Gemini CLI: `SessionStart`, `BeforeAgent`, `AfterTool` and `AfterAgent`
+    hooks in `~/.gemini/settings.json`. Gemini runs hooks only in trusted
+    folders.
+  - VS Code: `~/.copilot/hooks/palace.json` with session-start, post-tool
+    recall and the stop save nudge. VS Code's prompt hook cannot inject
+    context, so there is no prompt-time recall.
+  - OpenCode: a generated plugin at `~/.config/opencode/plugins/palace.js`
+    bridges OpenCode's events to `palace hook --client opencode`. The rule is
+    added through `instructions`, leaving the global `AGENTS.md` slot (and
+    OpenCode's `~/.claude/CLAUDE.md` fallback) alone.
+  - Windsurf: MCP and global rules only. Cascade hooks cannot inject context;
+    Devin Local already reads the Claude Code hooks.
+- `--client all` includes the new agents only when their config folder
+  exists.
+
 ## [0.15.0] - 2026-09-27
 
 ### Added
