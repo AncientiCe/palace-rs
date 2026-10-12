@@ -1575,3 +1575,76 @@ fn project_scope_cline_zed_goose_share_agents_md_block() {
     let agents = fs::read_to_string(project.join("AGENTS.md")).unwrap();
     assert_eq!(agents.matches("<!-- BEGIN PALACE -->").count(), 1);
 }
+
+fn cline_hook(home: &Path, name: &str) -> PathBuf {
+    let file = if cfg!(windows) {
+        format!("{name}.ps1")
+    } else {
+        name.to_string()
+    };
+    home.join("Documents/Cline/Hooks").join(file)
+}
+
+#[test]
+fn install_cline_writes_hook_scripts_and_keeps_user_hooks() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let user_hook = cline_hook(temp.path(), "UserPromptSubmit");
+    fs::create_dir_all(user_hook.parent().unwrap()).unwrap();
+    fs::write(&user_hook, "echo my own hook\n").unwrap();
+
+    let opts = options(temp.path(), &binary_path, vec![Client::Cline]);
+    install_clients(&opts).unwrap();
+
+    let post = fs::read_to_string(cline_hook(temp.path(), "PostToolUse")).unwrap();
+    assert!(post.contains("palace-managed hook"));
+    assert!(post.contains("hook post-tool-use --client cline"));
+    assert!(post.contains(binary_path.to_string_lossy().as_ref()));
+    assert_eq!(
+        fs::read_to_string(&user_hook).unwrap(),
+        "echo my own hook\n",
+        "a user's own hook must never be overwritten"
+    );
+    assert!(!cline_hook(temp.path(), "TaskComplete").exists());
+
+    uninstall_clients(&opts).unwrap();
+    assert!(!cline_hook(temp.path(), "PostToolUse").exists());
+    assert!(user_hook.exists(), "uninstall leaves the user's hook alone");
+}
+
+#[test]
+fn install_cline_reports_hooks_installed() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary_path, vec![Client::Cline]);
+    install_clients(&opts).unwrap();
+    assert!(doctor(&opts).unwrap().clients[0].hook_installed);
+}
+
+#[test]
+fn install_goose_writes_stop_only_plugin() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary_path, vec![Client::Goose]);
+    install_clients(&opts).unwrap();
+
+    let dir = temp.path().join(".agents/plugins/palace");
+    let manifest = read_json(&dir.join("plugin.json"));
+    assert_eq!(manifest["name"], "palace");
+    let hooks = read_json(&dir.join("hooks/hooks.json"));
+    let events: Vec<&String> = hooks["hooks"].as_object().unwrap().keys().collect();
+    assert_eq!(events, ["Stop"]);
+    let command = hooks["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(command.starts_with('\''), "sh-quoted: {command}");
+    assert!(
+        !command.contains('\\'),
+        "sh needs forward slashes: {command}"
+    );
+    assert!(command.ends_with("hook stop --client goose"));
+    assert!(doctor(&opts).unwrap().clients[0].hook_installed);
+
+    uninstall_clients(&opts).unwrap();
+    assert!(!dir.exists());
+}

@@ -2201,6 +2201,33 @@ fn install_client_hooks(
             )?;
             Ok(Some((path, changed)))
         }
+        Client::Cline => {
+            let dir = cline_hooks_dir(home);
+            let mut changed = false;
+            for (name, cli_event) in CLINE_HOOKS {
+                changed |=
+                    write_cline_hook(&dir, name, cli_event, &options.binary_path, options.dry_run)?;
+            }
+            Ok(Some((dir, changed)))
+        }
+        Client::Goose => {
+            let dir = goose_plugin_dir(home);
+            let manifest = dir.join("plugin.json");
+            let hooks = dir.join("hooks").join("hooks.json");
+            let a = write_text_if_changed(
+                &manifest,
+                &read_text_file(&manifest)?,
+                &goose_plugin_manifest()?,
+                options.dry_run,
+            )?;
+            let b = write_text_if_changed(
+                &hooks,
+                &read_text_file(&hooks)?,
+                &goose_hooks_text(&options.binary_path)?,
+                options.dry_run,
+            )?;
+            Ok(Some((hooks, a || b)))
+        }
         _ => {
             let Some((path, defs, client_flag)) = nested_hook_target(home, client) else {
                 return Ok(None);
@@ -2238,6 +2265,30 @@ fn uninstall_client_hooks(
                 remove_owned_file(&path, options.dry_run)?,
             )))
         }
+        Client::Cline => {
+            let dir = cline_hooks_dir(home);
+            let mut changed = false;
+            for (name, _) in CLINE_HOOKS {
+                let path = dir.join(cline_hook_file_name(name));
+                // Only remove scripts Palace wrote; leave the user's own hooks.
+                if read_text_file(&path)?.contains(PALACE_HOOK_MARKER) {
+                    changed |= remove_owned_file(&path, options.dry_run)?;
+                }
+            }
+            Ok(Some((dir, changed)))
+        }
+        Client::Goose => {
+            let dir = goose_plugin_dir(home);
+            let hooks = dir.join("hooks").join("hooks.json");
+            let a = remove_owned_file(&hooks, options.dry_run)?;
+            let b = remove_owned_file(&dir.join("plugin.json"), options.dry_run)?;
+            if !options.dry_run {
+                // Drop the now-empty plugin folders; ignore anything the user added.
+                let _ = fs::remove_dir(dir.join("hooks"));
+                let _ = fs::remove_dir(&dir);
+            }
+            Ok(Some((hooks, a || b)))
+        }
         _ => {
             let Some((path, defs, _)) = nested_hook_target(home, client) else {
                 return Ok(None);
@@ -2258,6 +2309,8 @@ fn client_has_hooks(client: Client) -> bool {
             | Client::Gemini
             | Client::Vscode
             | Client::OpenCode
+            | Client::Cline
+            | Client::Goose
     )
 }
 
@@ -2268,6 +2321,12 @@ fn client_hook_installed(home_dir: &Path, client: Client) -> bool {
         Client::Vscode => read_text_file(&vscode_hooks_path(home_dir))
             .is_ok_and(|text| text.contains(CURSOR_HOOK_KEY)),
         Client::OpenCode => opencode_plugin_path(home_dir).exists(),
+        Client::Cline => CLINE_HOOKS.iter().all(|(name, _)| {
+            read_text_file(&cline_hooks_dir(home_dir).join(cline_hook_file_name(name)))
+                .is_ok_and(|text| text.contains(PALACE_HOOK_MARKER))
+        }),
+        Client::Goose => read_text_file(&goose_plugin_dir(home_dir).join("hooks/hooks.json"))
+            .is_ok_and(|text| text.contains(CURSOR_HOOK_KEY)),
         _ => nested_hook_target(home_dir, client)
             .is_some_and(|(path, _, _)| nested_hook_installed(&path)),
     }
@@ -2293,6 +2352,9 @@ fn hook_trust_note(client: Client) -> Option<&'static str> {
             Some("run `/hooks` in the Codex CLI once to review and trust the Palace hooks")
         }
         Client::Gemini => Some("hooks only run in folders you have trusted in Gemini CLI"),
+        Client::Goose if cfg!(windows) => {
+            Some("Goose runs hooks with `sh`, so Git Bash (or another sh) must be on PATH")
+        }
         _ => None,
     }
 }
@@ -2364,4 +2426,130 @@ const OPENCODE_PLUGIN_TEMPLATE: &str = include_str!("opencode_plugin.js");
 fn opencode_plugin_text(binary_path: &Path) -> Result<String> {
     let binary = serde_json::to_string(&path_to_string(binary_path))?;
     Ok(OPENCODE_PLUGIN_TEMPLATE.replace("\"__PALACE_BINARY__\"", &binary))
+}
+
+// ── Cline hooks ──────────────────────────────────────────────────────────────
+//
+// Cline runs executable scripts named after the event from its global hooks
+// folder (`Documents/Cline/Hooks`, read by both the VS Code extension and the
+// CLI): `<Event>.ps1` on Windows, an extensionless executable elsewhere. Only
+// `UserPromptSubmit` and `PostToolUse` can inject context in both surfaces, and
+// Cline cannot continue after a task completes, so no stop hook is installed.
+
+/// Marks a script as Palace-managed so a user's own hook is never overwritten.
+const PALACE_HOOK_MARKER: &str = "palace-managed hook";
+
+/// Cline hook names and the `palace hook` event each one runs.
+const CLINE_HOOKS: [(&str, &str); 2] = [
+    ("UserPromptSubmit", "user-prompt-submit"),
+    ("PostToolUse", "post-tool-use"),
+];
+
+/// The user's Documents folder. Uses the platform's known folder (which follows
+/// OneDrive redirection on Windows) for the real home, `<home>/Documents` otherwise.
+fn documents_dir(home_dir: &Path) -> PathBuf {
+    UserDirs::new()
+        .filter(|dirs| dirs.home_dir() == home_dir)
+        .and_then(|dirs| dirs.document_dir().map(Path::to_path_buf))
+        .unwrap_or_else(|| home_dir.join("Documents"))
+}
+
+fn cline_hooks_dir(home_dir: &Path) -> PathBuf {
+    documents_dir(home_dir).join("Cline").join("Hooks")
+}
+
+fn cline_hook_file_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.ps1")
+    } else {
+        name.to_string()
+    }
+}
+
+fn cline_hook_script(binary_path: &Path, cli_event: &str) -> String {
+    let binary = path_to_string(binary_path);
+    if cfg!(windows) {
+        let binary = binary.replace('\'', "''");
+        format!(
+            "# {PALACE_HOOK_MARKER}: rerun `palace install --client cline` to update.\r\n\
+             [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)\r\n\
+             [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\r\n\
+             $OutputEncoding = [System.Text.UTF8Encoding]::new($false)\r\n\
+             [Console]::In.ReadToEnd() | & '{binary}' hook {cli_event} --client cline\r\n"
+        )
+    } else {
+        format!(
+            "#!/bin/sh\n# {PALACE_HOOK_MARKER}: rerun `palace install --client cline` to update.\n\
+             exec {} hook {cli_event} --client cline\n",
+            sh_quote(&binary)
+        )
+    }
+}
+
+/// Write one Cline hook script, unless a hook of that name is the user's own.
+fn write_cline_hook(
+    dir: &Path,
+    name: &str,
+    cli_event: &str,
+    binary_path: &Path,
+    dry_run: bool,
+) -> Result<bool> {
+    let path = dir.join(cline_hook_file_name(name));
+    let existing = read_text_file(&path)?;
+    if path.exists() && !existing.contains(PALACE_HOOK_MARKER) {
+        return Ok(false);
+    }
+    let changed = write_text_if_changed(
+        &path,
+        &existing,
+        &cline_hook_script(binary_path, cli_event),
+        dry_run,
+    )?;
+    #[cfg(not(windows))]
+    if changed && !dry_run {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(changed)
+}
+
+/// Single-quote a string for `sh`.
+fn sh_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+// ── Goose hooks ──────────────────────────────────────────────────────────────
+//
+// Goose discovers Open Plugins under `~/.agents/plugins/<name>/`. Its hooks
+// cannot reach the model, but a `Stop` block continues the turn, so Palace
+// installs only the save nudge. Goose runs hook commands with `sh -c` on every
+// OS, hence the forward-slash, single-quoted binary path.
+
+fn goose_plugin_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(".agents").join("plugins").join("palace")
+}
+
+fn goose_plugin_manifest() -> Result<String> {
+    let manifest = json!({
+        "name": "palace",
+        "version": env!("CARGO_PKG_VERSION"),
+        "description": "Palace memory: nudges Goose to save what it learned before stopping",
+    });
+    Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
+}
+
+fn goose_hooks_text(binary_path: &Path) -> Result<String> {
+    let binary = path_to_string(binary_path).replace('\\', "/");
+    let config = json!({
+        "hooks": {
+            "Stop": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("{} hook stop --client goose", sh_quote(&binary)),
+                    "timeout": 30,
+                }]
+            }]
+        }
+    });
+    Ok(format!("{}\n", serde_json::to_string_pretty(&config)?))
 }
