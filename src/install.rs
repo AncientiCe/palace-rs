@@ -346,17 +346,8 @@ pub fn doctor(options: &InstallOptions) -> Result<DoctorReport> {
         let rule_installed = rule_installed(&target)?;
         let rule_stale = rule_is_stale(&target)?;
         let rule_weak = rule_is_weak(&target)?;
-        let hook_installed = if options.scope == Scope::User {
-            if client == Client::Cursor {
-                cursor_hook_installed(&options.home_dir)
-            } else if let Some((path, _, _)) = nested_hook_target(&options.home_dir, client) {
-                nested_hook_installed(&path)
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        let hook_installed =
+            options.scope == Scope::User && client_hook_installed(&options.home_dir, client);
         clients.push(ClientStatus {
             client,
             path,
@@ -432,13 +423,19 @@ pub fn print_install_report(action: &str, report: &InstallReport) {
     }
     // Codex requires a one-time interactive trust review before newly written
     // hooks will run, so call it out explicitly.
-    let codex_hooks_touched = report
-        .hook_changed
-        .iter()
-        .chain(report.hook_unchanged.iter())
-        .any(|p| p.ends_with("hooks.json") && p.components().any(|c| c.as_os_str() == ".codex"));
-    if codex_hooks_touched {
-        println!("  Codex: run `/hooks` in Codex once to review and trust the Palace hooks.");
+    let hooks_touched = |dir: &str| {
+        report
+            .hook_changed
+            .iter()
+            .chain(report.hook_unchanged.iter())
+            .any(|p| p.components().any(|c| c.as_os_str() == dir))
+    };
+    for (dir, client) in [(".codex", Client::Codex), (".gemini", Client::Gemini)] {
+        if hooks_touched(dir) {
+            if let Some(note) = hook_trust_note(client) {
+                println!("  {}: {note}.", display_client_name(client));
+            }
+        }
     }
 }
 
@@ -508,19 +505,20 @@ pub fn print_doctor_report(report: &DoctorReport) {
             "✗ rule missing — run: palace install"
         };
         println!("      {rule_state}");
-        if matches!(
-            status.client,
-            Client::Cursor | Client::Claude | Client::Codex
-        ) {
+        if client_has_hooks(status.client) {
             let hook_state = if status.hook_installed {
                 "✓ memory hooks installed (session-start, post-tool-use recall, stop save)"
             } else {
                 "✗ memory hooks missing — run: palace install"
             };
             println!("      {hook_state}");
-            if status.client == Client::Codex && status.hook_installed {
-                println!("      ↳ run `/hooks` in Codex once to trust the Palace hooks");
+            if status.hook_installed {
+                if let Some(note) = hook_trust_note(status.client) {
+                    println!("      ↳ {note}");
+                }
             }
+        } else if status.client == Client::Windsurf {
+            println!("      ↳ Cascade hooks cannot inject context; Devin Local reuses the Claude Code hooks");
         }
     }
     println!("  {}", "─".repeat(52));
@@ -1715,6 +1713,32 @@ fn codex_hooks() -> &'static [NestedHook] {
     ]
 }
 
+/// Gemini CLI hooks: same nested shape, with its own event and tool names.
+fn gemini_hooks() -> &'static [NestedHook] {
+    &[
+        NestedHook {
+            event: "SessionStart",
+            cli_event: "session-start",
+            matcher: None,
+        },
+        NestedHook {
+            event: "BeforeAgent",
+            cli_event: "user-prompt-submit",
+            matcher: None,
+        },
+        NestedHook {
+            event: "AfterTool",
+            cli_event: "post-tool-use",
+            matcher: Some("^(read_file|read_many_files|grep_search|glob|run_shell_command)$"),
+        },
+        NestedHook {
+            event: "AfterAgent",
+            cli_event: "stop",
+            matcher: None,
+        },
+    ]
+}
+
 /// The nested-hooks config path, hook set, and `--client` flag for a client, or
 /// `None` for clients without a nested hook system (Cursor uses its own flat
 /// format; Claude Desktop has no hooks).
@@ -1732,6 +1756,11 @@ fn nested_hook_target(
             home_dir.join(".codex").join("hooks.json"),
             codex_hooks(),
             "codex",
+        )),
+        Client::Gemini => Some((
+            home_dir.join(".gemini").join("settings.json"),
+            gemini_hooks(),
+            "gemini",
         )),
         _ => None,
     }
@@ -1903,23 +1932,48 @@ fn nested_hook_installed(path: &Path) -> bool {
 }
 
 /// Install the automatic memory hooks for a client at user scope. Returns the
-/// hook config path and whether it changed, or `None` for clients without a
-/// nested hook system (Cursor is handled separately; Claude Desktop has none).
+/// hook config path and whether it changed, or `None` for clients without
+/// hooks (Cursor is handled separately; Claude Desktop and Windsurf have none).
 fn install_client_hooks(
     options: &InstallOptions,
     client: Client,
 ) -> Result<Option<(PathBuf, bool)>> {
-    let Some((path, defs, client_flag)) = nested_hook_target(&options.home_dir, client) else {
-        return Ok(None);
-    };
-    let changed = install_nested_hooks(
-        &path,
-        defs,
-        &options.binary_path,
-        client_flag,
-        options.dry_run,
-    )?;
-    Ok(Some((path, changed)))
+    let home = &options.home_dir;
+    match client {
+        Client::Vscode => {
+            let path = vscode_hooks_path(home);
+            let changed = write_text_if_changed(
+                &path,
+                &read_text_file(&path)?,
+                &vscode_hooks_text(&options.binary_path)?,
+                options.dry_run,
+            )?;
+            Ok(Some((path, changed)))
+        }
+        Client::OpenCode => {
+            let path = opencode_plugin_path(home);
+            let changed = write_text_if_changed(
+                &path,
+                &read_text_file(&path)?,
+                &opencode_plugin_text(&options.binary_path)?,
+                options.dry_run,
+            )?;
+            Ok(Some((path, changed)))
+        }
+        _ => {
+            let Some((path, defs, client_flag)) = nested_hook_target(home, client) else {
+                return Ok(None);
+            };
+            let changed = install_nested_hooks(
+                &path,
+                defs,
+                &options.binary_path,
+                client_flag,
+                options.dry_run,
+            )?;
+            Ok(Some((path, changed)))
+        }
+    }
 }
 
 /// Uninstall the automatic memory hooks for a client at user scope.
@@ -1927,9 +1981,133 @@ fn uninstall_client_hooks(
     options: &InstallOptions,
     client: Client,
 ) -> Result<Option<(PathBuf, bool)>> {
-    let Some((path, defs, _)) = nested_hook_target(&options.home_dir, client) else {
-        return Ok(None);
+    let home = &options.home_dir;
+    match client {
+        Client::Vscode => {
+            let path = vscode_hooks_path(home);
+            Ok(Some((
+                path.clone(),
+                remove_owned_file(&path, options.dry_run)?,
+            )))
+        }
+        Client::OpenCode => {
+            let path = opencode_plugin_path(home);
+            Ok(Some((
+                path.clone(),
+                remove_owned_file(&path, options.dry_run)?,
+            )))
+        }
+        _ => {
+            let Some((path, defs, _)) = nested_hook_target(home, client) else {
+                return Ok(None);
+            };
+            let changed = remove_nested_hooks(&path, defs, options.dry_run)?;
+            Ok(Some((path, changed)))
+        }
+    }
+}
+
+/// Whether Palace installs memory hooks for this client.
+fn client_has_hooks(client: Client) -> bool {
+    matches!(
+        client,
+        Client::Cursor
+            | Client::Claude
+            | Client::Codex
+            | Client::Gemini
+            | Client::Vscode
+            | Client::OpenCode
+    )
+}
+
+/// True if Palace's user-scope hooks are registered for this client.
+fn client_hook_installed(home_dir: &Path, client: Client) -> bool {
+    match client {
+        Client::Cursor => cursor_hook_installed(home_dir),
+        Client::Vscode => read_text_file(&vscode_hooks_path(home_dir))
+            .is_ok_and(|text| text.contains(CURSOR_HOOK_KEY)),
+        Client::OpenCode => opencode_plugin_path(home_dir).exists(),
+        _ => nested_hook_target(home_dir, client)
+            .is_some_and(|(path, _, _)| nested_hook_installed(&path)),
+    }
+}
+
+/// A one-time step the user must take before a client runs Palace's hooks.
+fn hook_trust_note(client: Client) -> Option<&'static str> {
+    match client {
+        Client::Codex => {
+            Some("run `/hooks` in the Codex CLI once to review and trust the Palace hooks")
+        }
+        Client::Gemini => Some("hooks only run in folders you have trusted in Gemini CLI"),
+        _ => None,
+    }
+}
+
+/// Delete a file Palace owns outright (VS Code hook file, OpenCode plugin).
+fn remove_owned_file(path: &Path, dry_run: bool) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    if !dry_run {
+        fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+    Ok(true)
+}
+
+/// A hook command that every shell can run: bare when the path has no spaces
+/// (PowerShell treats a leading quoted string as a value, not a command).
+fn portable_hook_command(binary_path: &Path, cli_event: &str, client_flag: &str) -> String {
+    let binary = path_to_string(binary_path);
+    let binary = if binary.contains(char::is_whitespace) {
+        format!("\"{binary}\"")
+    } else {
+        binary
     };
-    let changed = remove_nested_hooks(&path, defs, options.dry_run)?;
-    Ok(Some((path, changed)))
+    format!("{binary} hook {cli_event} --client {client_flag}")
+}
+
+// ── VS Code agent hooks ──────────────────────────────────────────────────────
+//
+// VS Code loads every `*.json` under `~/.copilot/hooks/`, so Palace owns a whole
+// file there. Its native format is a flat command list per event: matchers are
+// not supported, which is why the post-tool-use runner skips mutating tools
+// itself. `UserPromptSubmit` cannot inject context in VS Code, so it is omitted.
+
+fn vscode_hooks_path(home_dir: &Path) -> PathBuf {
+    home_dir.join(".copilot").join("hooks").join("palace.json")
+}
+
+fn vscode_hooks_text(binary_path: &Path) -> Result<String> {
+    let entry = |cli_event: &str| {
+        json!([{
+            "type": "command",
+            "command": portable_hook_command(binary_path, cli_event, "vscode"),
+            "timeout": 30,
+        }])
+    };
+    let config = json!({
+        "hooks": {
+            "SessionStart": entry("session-start"),
+            "PostToolUse": entry("post-tool-use"),
+            "Stop": entry("stop"),
+        }
+    });
+    Ok(format!("{}\n", serde_json::to_string_pretty(&config)?))
+}
+
+// ── OpenCode plugin ──────────────────────────────────────────────────────────
+//
+// OpenCode has no command hooks; it auto-loads JS plugins from its `plugins/`
+// folder. Palace writes a small plugin that pipes each event to
+// `palace hook <event> --client opencode` and applies the flat-key response.
+
+fn opencode_plugin_path(home_dir: &Path) -> PathBuf {
+    opencode_dir(home_dir).join("plugins").join("palace.js")
+}
+
+const OPENCODE_PLUGIN_TEMPLATE: &str = include_str!("opencode_plugin.js");
+
+fn opencode_plugin_text(binary_path: &Path) -> Result<String> {
+    let binary = serde_json::to_string(&path_to_string(binary_path))?;
+    Ok(OPENCODE_PLUGIN_TEMPLATE.replace("\"__PALACE_BINARY__\"", &binary))
 }

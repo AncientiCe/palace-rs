@@ -1323,3 +1323,92 @@ fn project_scoped_install_covers_new_clients() {
     let windsurf = fs::read_to_string(project.join(".windsurf/rules/palace.md")).unwrap();
     assert!(windsurf.starts_with("---\ntrigger: always_on\n---\n"));
 }
+
+#[test]
+fn install_gemini_registers_nested_hooks_in_settings() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary_path, vec![Client::Gemini]);
+    install_clients(&opts).unwrap();
+
+    let settings = read_json(&temp.path().join(".gemini/settings.json"));
+    assert!(
+        settings["mcpServers"]["palace"].is_object(),
+        "MCP entry kept"
+    );
+    for event in ["SessionStart", "BeforeAgent", "AfterTool", "AfterAgent"] {
+        let commands = nested_commands(
+            &serde_json::json!({ "hooks": { event: settings["hooks"][event].clone() } }),
+        );
+        assert!(
+            commands.iter().any(|c| c.contains("--client gemini")),
+            "{event}: {settings}"
+        );
+    }
+    assert!(settings["hooks"]["AfterTool"][0]["matcher"]
+        .as_str()
+        .unwrap()
+        .contains("grep_search"));
+    assert!(doctor(&opts).unwrap().clients[0].hook_installed);
+
+    uninstall_clients(&opts).unwrap();
+    let settings = read_json(&temp.path().join(".gemini/settings.json"));
+    assert!(nested_commands(&settings).is_empty());
+    assert!(settings["mcpServers"].get("palace").is_none());
+}
+
+#[test]
+fn install_vscode_writes_owned_hook_file() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary_path, vec![Client::Vscode]);
+    install_clients(&opts).unwrap();
+
+    let path = temp.path().join(".copilot/hooks/palace.json");
+    let hooks = read_json(&path);
+    for event in ["SessionStart", "PostToolUse", "Stop"] {
+        let entry = &hooks["hooks"][event][0];
+        assert_eq!(entry["type"], "command");
+        let command = entry["command"].as_str().unwrap();
+        assert!(command.ends_with("--client vscode"), "{command}");
+        assert!(
+            !command.starts_with('"'),
+            "no quotes when path has no spaces"
+        );
+        assert!(entry.get("matcher").is_none(), "VS Code ignores matchers");
+    }
+    assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
+    assert!(doctor(&opts).unwrap().clients[0].hook_installed);
+
+    uninstall_clients(&opts).unwrap();
+    assert!(!path.exists());
+}
+
+#[test]
+fn install_opencode_writes_plugin_with_binary_path() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary_path, vec![Client::OpenCode]);
+    install_clients(&opts).unwrap();
+
+    let path = temp.path().join(".config/opencode/plugins/palace.js");
+    let plugin = fs::read_to_string(&path).unwrap();
+    let literal = serde_json::to_string(&binary_path.to_string_lossy()).unwrap();
+    assert!(plugin.contains(&format!("const PALACE = {literal}")));
+    assert!(!plugin.contains("__PALACE_BINARY__"));
+    assert!(plugin.contains("--client"));
+    assert!(doctor(&opts).unwrap().clients[0].hook_installed);
+
+    uninstall_clients(&opts).unwrap();
+    assert!(!path.exists());
+}
+
+#[test]
+fn install_windsurf_writes_no_hooks() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let report =
+        install_clients(&options(temp.path(), &binary_path, vec![Client::Windsurf])).unwrap();
+    assert!(report.hook_changed.is_empty() && report.hook_unchanged.is_empty());
+    assert!(!temp.path().join(".codeium/windsurf/hooks.json").exists());
+}
