@@ -872,7 +872,76 @@ fn read_json_config(path: &Path) -> Result<Value> {
     if text.trim().is_empty() {
         return Ok(json!({}));
     }
-    serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+    parse_json_lenient(&text, path)
+}
+
+/// Parse a JSON config, accepting the JSONC extensions (comments, trailing
+/// commas) that Zed, VS Code and Cursor allow in their settings files. The
+/// strict parse runs first so plain JSON keeps its exact error messages.
+fn parse_json_lenient(text: &str, path: &Path) -> Result<Value> {
+    serde_json::from_str(text).or_else(|strict_err| {
+        // Two passes: a trailing comma may sit before a comment that the first
+        // pass removes, and only then is it visibly trailing.
+        serde_json::from_str(&strip_jsonc(&strip_jsonc(text)))
+            .map_err(|_| strict_err)
+            .with_context(|| format!("failed to parse {}", path.display()))
+    })
+}
+
+/// Remove `//` and `/* */` comments and trailing commas outside of strings.
+fn strip_jsonc(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut in_string = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if c == '\\' && i + 1 < chars.len() {
+                out.push(chars[i + 1]);
+                i += 1;
+            } else if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match (c, chars.get(i + 1)) {
+            ('"', _) => {
+                in_string = true;
+                out.push(c);
+                i += 1;
+            }
+            ('/', Some('/')) => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            ('/', Some('*')) => {
+                i += 2;
+                while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                    i += 1;
+                }
+                i += 2;
+            }
+            (',', _) => {
+                let next = chars[i + 1..]
+                    .iter()
+                    .position(|c| !c.is_whitespace())
+                    .map(|offset| chars[i + 1 + offset]);
+                if !matches!(next, Some('}' | ']')) {
+                    out.push(c);
+                }
+                i += 1;
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 fn ensure_json_server(config: &mut Value, binary_path: &Path, format: McpFormat) -> Result<()> {
@@ -1529,7 +1598,7 @@ fn read_hooks_json(path: &Path) -> Result<Value> {
     if text.trim().is_empty() {
         return Ok(json!({ "version": 1, "hooks": {} }));
     }
-    serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+    parse_json_lenient(&text, path)
 }
 
 fn is_palace_entry(entry: &Value) -> bool {
@@ -1777,7 +1846,7 @@ fn read_json_object(path: &Path) -> Result<Value> {
     if text.trim().is_empty() {
         return Ok(json!({}));
     }
-    serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+    parse_json_lenient(&text, path)
 }
 
 /// True if a nested matcher-group contains a palace command handler.

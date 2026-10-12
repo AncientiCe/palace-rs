@@ -1412,3 +1412,34 @@ fn install_windsurf_writes_no_hooks() {
     assert!(report.hook_changed.is_empty() && report.hook_unchanged.is_empty());
     assert!(!temp.path().join(".codeium/windsurf/hooks.json").exists());
 }
+
+#[test]
+fn install_accepts_jsonc_config_with_comments_and_trailing_commas() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let cursor_dir = temp.path().join(".cursor");
+    fs::create_dir_all(&cursor_dir).unwrap();
+    fs::write(
+        cursor_dir.join("mcp.json"),
+        "// user servers\n{\n  /* keep */ \"mcpServers\": {\n    \"other\": { \"command\": \"x\", \"args\": [\"// not a comment\"], }, // trailing\n  },\n}\n",
+    )
+    .unwrap();
+
+    install_clients(&without_rule(options(
+        temp.path(),
+        &binary_path,
+        vec![Client::Cursor],
+    )))
+    .unwrap();
+
+    let config = read_json(&cursor_dir.join("mcp.json"));
+    assert_eq!(
+        config["mcpServers"]["other"]["args"],
+        serde_json::json!(["// not a comment"])
+    );
+    assert!(config["mcpServers"]["palace"].is_object());
+    assert!(
+        cursor_dir.join("mcp.json.bak").exists(),
+        "original kept as backup"
+    );
+}
