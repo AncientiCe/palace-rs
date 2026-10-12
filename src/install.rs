@@ -41,6 +41,10 @@ pub enum Client {
     Codex,
     Claude,
     ClaudeDesktop,
+    Gemini,
+    Vscode,
+    Windsurf,
+    OpenCode,
     All,
 }
 
@@ -116,6 +120,10 @@ impl fmt::Display for Client {
             Client::Codex => f.write_str("codex"),
             Client::Claude => f.write_str("claude"),
             Client::ClaudeDesktop => f.write_str("claude-desktop"),
+            Client::Gemini => f.write_str("gemini"),
+            Client::Vscode => f.write_str("vscode"),
+            Client::Windsurf => f.write_str("windsurf"),
+            Client::OpenCode => f.write_str("opencode"),
             Client::All => f.write_str("all"),
         }
     }
@@ -130,6 +138,10 @@ impl std::str::FromStr for Client {
             "codex" => Ok(Client::Codex),
             "claude" | "claude-code" => Ok(Client::Claude),
             "claude-desktop" => Ok(Client::ClaudeDesktop),
+            "gemini" | "gemini-cli" => Ok(Client::Gemini),
+            "vscode" | "copilot" | "vscode-copilot" => Ok(Client::Vscode),
+            "windsurf" => Ok(Client::Windsurf),
+            "opencode" => Ok(Client::OpenCode),
             "all" => Ok(Client::All),
             other => Err(anyhow!("unknown MCP client: {other}")),
         }
@@ -184,20 +196,26 @@ impl InstallOptions {
 /// upgrade with no duplicated servers.
 pub fn install_clients(options: &InstallOptions) -> Result<InstallReport> {
     let mut report = InstallReport::default();
-    for client in expand_clients(&options.clients) {
+    for client in expand_clients(options) {
         let path = config_path(options, client)?;
 
-        let changed = match client {
-            Client::Cursor | Client::Claude | Client::ClaudeDesktop => {
-                // Remove legacy 0.1.x entries before writing new ones.
-                remove_legacy_json_entry(&path, options.dry_run)?;
-                write_json_client(&path, &options.binary_path, options.dry_run)?
-            }
-            Client::Codex => {
+        let changed = match mcp_format(client) {
+            McpFormat::Codex => {
                 remove_legacy_codex_entry(&path, options.dry_run)?;
                 write_codex_client(&path, &options.binary_path, options.dry_run)?
             }
-            Client::All => false,
+            format => {
+                // Remove legacy 0.1.x entries before writing new ones.
+                remove_legacy_json_entry(&path, options.dry_run)?;
+                let instruction = opencode_instruction(options, client)?;
+                write_json_client(
+                    &path,
+                    &options.binary_path,
+                    format,
+                    instruction.as_deref(),
+                    options.dry_run,
+                )?
+            }
         };
         if changed {
             report.changed.push(path);
@@ -244,20 +262,20 @@ pub fn install_clients(options: &InstallOptions) -> Result<InstallReport> {
 /// either install can be cleaned up with a single command.
 pub fn uninstall_clients(options: &InstallOptions) -> Result<InstallReport> {
     let mut report = InstallReport::default();
-    for client in expand_clients(&options.clients) {
+    for client in expand_clients(options) {
         let path = config_path(options, client)?;
-        let changed = match client {
-            Client::Cursor | Client::Claude | Client::ClaudeDesktop => {
-                let a = remove_json_client(&path, options.dry_run)?;
-                let b = remove_legacy_json_entry(&path, options.dry_run)?;
-                a || b
-            }
-            Client::Codex => {
+        let changed = match mcp_format(client) {
+            McpFormat::Codex => {
                 let a = remove_codex_client(&path, options.dry_run)?;
                 let b = remove_legacy_codex_entry(&path, options.dry_run)?;
                 a || b
             }
-            Client::All => false,
+            format => {
+                let instruction = opencode_instruction(options, client)?;
+                let a = remove_json_client(&path, format, instruction.as_deref(), options.dry_run)?;
+                let b = remove_legacy_json_entry(&path, options.dry_run)?;
+                a || b
+            }
         };
         if changed {
             report.changed.push(path);
@@ -320,7 +338,7 @@ pub fn doctor(options: &InstallOptions) -> Result<DoctorReport> {
     let embedding_model_cached = check_embedding_model_cached();
 
     let mut clients = Vec::new();
-    for client in expand_clients(&options.clients) {
+    for client in expand_clients(options) {
         let path = config_path(options, client)?;
         let target = rule_target(options, client)?;
         let command = read_configured_command(client, &path)?;
@@ -515,17 +533,33 @@ pub fn print_doctor_report(report: &DoctorReport) {
     println!();
 }
 
-fn expand_clients(clients: &[Client]) -> Vec<Client> {
+/// Clients that `all` configures only when they are installed on this machine,
+/// so `palace install` never creates config folders for agents the user lacks.
+const DETECTED_CLIENTS: [Client; 4] = [
+    Client::Gemini,
+    Client::Vscode,
+    Client::Windsurf,
+    Client::OpenCode,
+];
+
+fn expand_clients(options: &InstallOptions) -> Vec<Client> {
+    let clients = &options.clients;
     if clients.is_empty() || clients.contains(&Client::All) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        return vec![
+        let mut expanded = vec![
             Client::Cursor,
             Client::Codex,
             Client::Claude,
             Client::ClaudeDesktop,
         ];
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        return vec![Client::Cursor, Client::Codex, Client::Claude];
+        let mut expanded = vec![Client::Cursor, Client::Codex, Client::Claude];
+        expanded.extend(
+            DETECTED_CLIENTS
+                .into_iter()
+                .filter(|client| client_detected(&options.home_dir, *client)),
+        );
+        expanded
     } else {
         clients
             .iter()
@@ -533,6 +567,38 @@ fn expand_clients(clients: &[Client]) -> Vec<Client> {
             .filter(|client| *client != Client::All)
             .collect()
     }
+}
+
+/// True if the client's user config folder exists, i.e. the agent is installed.
+fn client_detected(home_dir: &Path, client: Client) -> bool {
+    match client {
+        Client::Gemini => home_dir.join(".gemini").is_dir(),
+        Client::Vscode => vscode_user_dir(home_dir).is_dir(),
+        Client::Windsurf => windsurf_dir(home_dir).is_dir(),
+        Client::OpenCode => opencode_dir(home_dir).is_dir(),
+        _ => true,
+    }
+}
+
+/// VS Code's per-user settings folder (default profile, stable channel).
+fn vscode_user_dir(home_dir: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        home_dir.join("AppData/Roaming/Code/User")
+    } else if cfg!(target_os = "macos") {
+        home_dir.join("Library/Application Support/Code/User")
+    } else {
+        home_dir.join(".config/Code/User")
+    }
+}
+
+/// Windsurf's per-user folder, which holds its MCP config, rules and hooks.
+fn windsurf_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(".codeium").join("windsurf")
+}
+
+/// OpenCode's global config folder; it uses `~/.config` on every OS.
+fn opencode_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(".config").join("opencode")
 }
 
 fn config_path(options: &InstallOptions, client: Client) -> Result<PathBuf> {
@@ -550,8 +616,87 @@ fn config_path(options: &InstallOptions, client: Client) -> Result<PathBuf> {
         // Claude Code CLI reads from ~/.claude.json (top-level file, not ~/.claude/ directory)
         Client::Claude => Ok(options.home_dir.join(".claude.json")),
         Client::ClaudeDesktop => claude_desktop_config_path(&options.home_dir),
+        Client::Gemini => Ok(options.home_dir.join(".gemini").join("settings.json")),
+        Client::Vscode => match options.scope {
+            Scope::User => Ok(vscode_user_dir(&options.home_dir).join("mcp.json")),
+            Scope::Project => Ok(project_dir_for(options, client)?
+                .join(".vscode")
+                .join("mcp.json")),
+        },
+        Client::Windsurf => Ok(windsurf_dir(&options.home_dir).join("mcp_config.json")),
+        Client::OpenCode => match options.scope {
+            Scope::User => Ok(opencode_dir(&options.home_dir).join("opencode.json")),
+            Scope::Project => Ok(project_dir_for(options, client)?.join("opencode.json")),
+        },
         Client::All => Err(anyhow!("all is not a concrete client")),
     }
+}
+
+fn project_dir_for(options: &InstallOptions, client: Client) -> Result<&PathBuf> {
+    options.project_dir.as_ref().ok_or_else(|| {
+        anyhow!(
+            "--path is required for project-scope {} installs",
+            display_client_name(client)
+        )
+    })
+}
+
+/// How a client's MCP config file registers servers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum McpFormat {
+    /// JSON `mcpServers.palace = { command, args }` (Cursor, Claude, Gemini, Windsurf).
+    McpServers,
+    /// JSON `servers.palace = { type: "stdio", command, args }` (VS Code).
+    VscodeServers,
+    /// JSON `mcp.palace = { type: "local", command: [bin, "mcp"] }` (OpenCode).
+    OpenCode,
+    /// TOML `[mcp_servers.palace]` (Codex).
+    Codex,
+}
+
+fn mcp_format(client: Client) -> McpFormat {
+    match client {
+        Client::Codex => McpFormat::Codex,
+        Client::Vscode => McpFormat::VscodeServers,
+        Client::OpenCode => McpFormat::OpenCode,
+        _ => McpFormat::McpServers,
+    }
+}
+
+impl McpFormat {
+    /// The JSON key that holds the server map.
+    fn servers_key(self) -> &'static str {
+        match self {
+            McpFormat::VscodeServers => "servers",
+            McpFormat::OpenCode => "mcp",
+            McpFormat::McpServers | McpFormat::Codex => "mcpServers",
+        }
+    }
+
+    fn server_entry(self, binary_path: &Path) -> Value {
+        let command = path_to_string(binary_path);
+        match self {
+            McpFormat::VscodeServers => {
+                json!({ "type": "stdio", "command": command, "args": ["mcp"] })
+            }
+            McpFormat::OpenCode => {
+                json!({ "type": "local", "command": [command, "mcp"], "enabled": true })
+            }
+            McpFormat::McpServers | McpFormat::Codex => {
+                json!({ "command": command, "args": ["mcp"] })
+            }
+        }
+    }
+}
+
+/// OpenCode reads a global `AGENTS.md` *instead of* `~/.claude/CLAUDE.md`, so at
+/// user scope Palace ships its rule as a separate file listed under the config's
+/// `instructions` key rather than claiming the `AGENTS.md` slot.
+fn opencode_instruction(options: &InstallOptions, client: Client) -> Result<Option<String>> {
+    if client != Client::OpenCode || options.scope != Scope::User || !options.install_rule {
+        return Ok(None);
+    }
+    Ok(Some(path_to_string(&rule_target(options, client)?.path)))
 }
 
 fn claude_desktop_config_path(_home_dir: &Path) -> Result<PathBuf> {
@@ -582,6 +727,8 @@ enum RuleKind {
 struct RuleTarget {
     path: PathBuf,
     kind: RuleKind,
+    /// Selects the standalone file format (frontmatter differs per client).
+    client: Client,
 }
 
 fn rule_target(options: &InstallOptions, client: Client) -> Result<RuleTarget> {
@@ -600,14 +747,29 @@ fn rule_target(options: &InstallOptions, client: Client) -> Result<RuleTarget> {
         (Client::Claude, Scope::Project) => project_dir()?.join("CLAUDE.md"),
         // Claude Desktop has no rules/prompts file to inject into
         (Client::ClaudeDesktop, _) => options.home_dir.join(".claude/CLAUDE.md"),
+        (Client::Gemini, Scope::User) => options.home_dir.join(".gemini/GEMINI.md"),
+        (Client::Gemini, Scope::Project) => project_dir()?.join("GEMINI.md"),
+        (Client::Vscode, Scope::User) => {
+            vscode_user_dir(&options.home_dir).join("prompts/palace.instructions.md")
+        }
+        (Client::Vscode, Scope::Project) => project_dir()?.join(".github/copilot-instructions.md"),
+        (Client::Windsurf, Scope::User) => {
+            windsurf_dir(&options.home_dir).join("memories/global_rules.md")
+        }
+        (Client::Windsurf, Scope::Project) => project_dir()?.join(".windsurf/rules/palace.md"),
+        (Client::OpenCode, Scope::User) => opencode_dir(&options.home_dir).join("palace.md"),
+        (Client::OpenCode, Scope::Project) => project_dir()?.join("AGENTS.md"),
         (Client::All, _) => return Err(anyhow!("all is not a concrete client")),
     };
-    let kind = match client {
-        Client::Cursor => RuleKind::Standalone,
-        Client::Codex | Client::Claude | Client::ClaudeDesktop => RuleKind::ManagedBlock,
-        Client::All => return Err(anyhow!("all is not a concrete client")),
+    let kind = match (client, options.scope) {
+        (Client::Cursor, _)
+        | (Client::Vscode, Scope::User)
+        | (Client::Windsurf, Scope::Project)
+        | (Client::OpenCode, Scope::User) => RuleKind::Standalone,
+        (Client::All, _) => return Err(anyhow!("all is not a concrete client")),
+        _ => RuleKind::ManagedBlock,
     };
-    Ok(RuleTarget { path, kind })
+    Ok(RuleTarget { path, kind, client })
 }
 
 fn home_dir() -> Result<PathBuf> {
@@ -627,26 +789,64 @@ fn home_dir() -> Result<PathBuf> {
     Err(anyhow!("could not determine home directory"))
 }
 
-fn write_json_client(path: &Path, binary_path: &Path, dry_run: bool) -> Result<bool> {
+fn write_json_client(
+    path: &Path,
+    binary_path: &Path,
+    format: McpFormat,
+    instruction: Option<&str>,
+    dry_run: bool,
+) -> Result<bool> {
     let existing = read_json_config(path)?;
     let mut next = existing.clone();
-    ensure_json_server(&mut next, binary_path)?;
+    if format == McpFormat::OpenCode && next.as_object().is_some_and(|o| o.is_empty()) {
+        next["$schema"] = json!("https://opencode.ai/config.json");
+    }
+    ensure_json_server(&mut next, binary_path, format)?;
+    if let Some(instruction) = instruction {
+        ensure_instruction(&mut next, instruction)?;
+    }
     write_if_changed(path, existing, next, dry_run)
 }
 
-fn remove_json_client(path: &Path, dry_run: bool) -> Result<bool> {
+fn remove_json_client(
+    path: &Path,
+    format: McpFormat,
+    instruction: Option<&str>,
+    dry_run: bool,
+) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
     let existing = read_json_config(path)?;
     let mut next = existing.clone();
-    let Some(servers) = next.get_mut("mcpServers").and_then(Value::as_object_mut) else {
-        return Ok(false);
-    };
-    if servers.remove("palace").is_none() {
-        return Ok(false);
+    if let Some(servers) = next
+        .get_mut(format.servers_key())
+        .and_then(Value::as_object_mut)
+    {
+        servers.remove("palace");
+    }
+    if let Some(instruction) = instruction {
+        if let Some(list) = next.get_mut("instructions").and_then(Value::as_array_mut) {
+            list.retain(|item| item.as_str() != Some(instruction));
+        }
     }
     write_if_changed(path, existing, next, dry_run)
+}
+
+/// Add `instruction` to the config's `instructions` array (OpenCode).
+fn ensure_instruction(config: &mut Value, instruction: &str) -> Result<()> {
+    let object = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("JSON config root is not an object"))?;
+    let list = object
+        .entry("instructions")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| anyhow!("instructions must be a JSON array"))?;
+    if !list.iter().any(|item| item.as_str() == Some(instruction)) {
+        list.push(json!(instruction));
+    }
+    Ok(())
 }
 
 /// Remove the legacy `mempalace` entry from a JSON MCP config (0.1.x cleanup).
@@ -677,25 +877,20 @@ fn read_json_config(path: &Path) -> Result<Value> {
     serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
 }
 
-fn ensure_json_server(config: &mut Value, binary_path: &Path) -> Result<()> {
+fn ensure_json_server(config: &mut Value, binary_path: &Path, format: McpFormat) -> Result<()> {
     if !config.is_object() {
         *config = json!({});
     }
     let object = config
         .as_object_mut()
         .ok_or_else(|| anyhow!("JSON config root is not an object"))?;
+    let key = format.servers_key();
     let servers = object
-        .entry("mcpServers")
+        .entry(key)
         .or_insert_with(|| json!({}))
         .as_object_mut()
-        .ok_or_else(|| anyhow!("mcpServers must be a JSON object"))?;
-    servers.insert(
-        "palace".to_string(),
-        json!({
-            "command": path_to_string(binary_path),
-            "args": ["mcp"],
-        }),
-    );
+        .ok_or_else(|| anyhow!("{key} must be a JSON object"))?;
+    servers.insert("palace".to_string(), format.server_entry(binary_path));
     Ok(())
 }
 
@@ -811,7 +1006,7 @@ fn install_rule(target: &RuleTarget, profile: Profile, dry_run: bool) -> Result<
     // Migrate any legacy block to the new markers before upserting.
     let migrated = migrate_legacy_rule_block(&original)?;
     let next = match target.kind {
-        RuleKind::Standalone => cursor_rule_text(profile),
+        RuleKind::Standalone => standalone_rule_text(target.client, profile),
         RuleKind::ManagedBlock => upsert_managed_rule(&migrated, profile)?,
     };
     // Compare against the original file content so that a legacy-only migration
@@ -848,14 +1043,16 @@ fn rule_installed(target: &RuleTarget) -> Result<bool> {
     }
     let text = read_text_file(&target.path)?;
     Ok(match target.kind {
-        RuleKind::Standalone => matches_any_cursor_rule(&text),
+        RuleKind::Standalone => matches_any_standalone_rule(target.client, &text),
         RuleKind::ManagedBlock => find_managed_block(&text)?.is_some(),
     })
 }
 
 /// True if the standalone rule text matches the generated rule for any profile.
-fn matches_any_cursor_rule(text: &str) -> bool {
-    Profile::all().iter().any(|p| text == cursor_rule_text(*p))
+fn matches_any_standalone_rule(client: Client, text: &str) -> bool {
+    Profile::all()
+        .iter()
+        .any(|p| text == standalone_rule_text(client, *p))
 }
 
 /// True if the rule file exists and contains legacy `mempalace_*` tool names
@@ -867,7 +1064,7 @@ fn rule_is_stale(target: &RuleTarget) -> Result<bool> {
     let text = read_text_file(&target.path)?;
     let has_legacy = text.contains(LEGACY_RULE_BEGIN) || text.contains("mempalace_status");
     let has_current = match target.kind {
-        RuleKind::Standalone => matches_any_cursor_rule(&text),
+        RuleKind::Standalone => matches_any_standalone_rule(target.client, &text),
         RuleKind::ManagedBlock => find_managed_block(&text)?.is_some(),
     };
     Ok(has_legacy && !has_current)
@@ -932,6 +1129,10 @@ fn display_client_name(client: Client) -> &'static str {
         Client::Codex => "Codex",
         Client::Claude => "Claude Code",
         Client::ClaudeDesktop => "Claude Desktop",
+        Client::Gemini => "Gemini CLI",
+        Client::Vscode => "VS Code",
+        Client::Windsurf => "Windsurf",
+        Client::OpenCode => "OpenCode",
         Client::All => "all",
     }
 }
@@ -959,11 +1160,16 @@ fn write_text_if_changed(path: &Path, existing: &str, next: &str, dry_run: bool)
     Ok(true)
 }
 
-fn cursor_rule_text(profile: Profile) -> String {
+/// A standalone rule file: the client's always-on frontmatter plus the protocol.
+fn standalone_rule_text(client: Client, profile: Profile) -> String {
     let body = rule_body(profile);
-    format!(
-        "---\ndescription: Consult Palace memory before answering about remembered facts\nalwaysApply: true\n---\n\n# Palace Memory Protocol — MANDATORY\n\n{body}\n"
-    )
+    let frontmatter = match client {
+        Client::Cursor => "---\ndescription: Consult Palace memory before answering about remembered facts\nalwaysApply: true\n---\n\n",
+        Client::Vscode => "---\ndescription: Consult Palace memory before answering about remembered facts\napplyTo: \"**\"\n---\n\n",
+        Client::Windsurf => "---\ntrigger: always_on\n---\n\n",
+        _ => "",
+    };
+    format!("{frontmatter}# Palace Memory Protocol — MANDATORY\n\n{body}\n")
 }
 
 fn managed_rule_block(profile: Profile) -> String {
@@ -1084,20 +1290,27 @@ fn backup_existing(path: &Path) -> Result<()> {
 }
 
 fn read_configured_command(client: Client, path: &Path) -> Result<Option<String>> {
-    match client {
-        Client::Cursor | Client::Claude | Client::ClaudeDesktop => {
+    if client == Client::All {
+        return Ok(None);
+    }
+    match mcp_format(client) {
+        format @ (McpFormat::McpServers | McpFormat::VscodeServers | McpFormat::OpenCode) => {
             if !path.exists() {
                 return Ok(None);
             }
             let config = read_json_config(path)?;
-            Ok(config
-                .get("mcpServers")
+            let command = config
+                .get(format.servers_key())
                 .and_then(|servers| servers.get("palace"))
-                .and_then(|server| server.get("command"))
-                .and_then(Value::as_str)
-                .map(String::from))
+                .and_then(|server| server.get("command"));
+            // OpenCode stores the command as `[binary, "mcp"]`.
+            let command = match command {
+                Some(Value::Array(parts)) => parts.first(),
+                other => other,
+            };
+            Ok(command.and_then(Value::as_str).map(String::from))
         }
-        Client::Codex => {
+        McpFormat::Codex => {
             if !path.exists() {
                 return Ok(None);
             }
@@ -1109,7 +1322,6 @@ fn read_configured_command(client: Client, path: &Path) -> Result<Option<String>
                 .and_then(Item::as_str)
                 .map(String::from))
         }
-        Client::All => Ok(None),
     }
 }
 

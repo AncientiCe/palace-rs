@@ -1141,3 +1141,185 @@ fn doctor_reports_hook_installed_for_claude_and_codex() {
         );
     }
 }
+
+// ── Gemini CLI, VS Code, Windsurf, OpenCode ──────────────────────────────────
+
+fn vscode_user_dir(home: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        home.join("AppData/Roaming/Code/User")
+    } else if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/Code/User")
+    } else {
+        home.join(".config/Code/User")
+    }
+}
+
+fn assert_full_protocol(rule: &str) {
+    assert!(rule.contains("palace_session_context"), "{rule}");
+    assert!(rule.contains("palace_kg_add"), "{rule}");
+    assert!(rule.contains("MEMORY ROUTING"), "{rule}");
+}
+
+#[test]
+fn install_gemini_writes_settings_and_gemini_md() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    install_clients(&options(temp.path(), &binary_path, vec![Client::Gemini])).unwrap();
+
+    let config = read_json(&temp.path().join(".gemini/settings.json"));
+    assert_eq!(
+        config["mcpServers"]["palace"]["command"].as_str(),
+        Some(binary_path.to_string_lossy().as_ref())
+    );
+    let rule = fs::read_to_string(temp.path().join(".gemini/GEMINI.md")).unwrap();
+    assert!(rule.contains("<!-- BEGIN PALACE -->"));
+    assert_full_protocol(&rule);
+}
+
+#[test]
+fn install_vscode_writes_stdio_server_and_always_on_instructions() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    install_clients(&options(temp.path(), &binary_path, vec![Client::Vscode])).unwrap();
+
+    let user_dir = vscode_user_dir(temp.path());
+    let config = read_json(&user_dir.join("mcp.json"));
+    let server = &config["servers"]["palace"];
+    assert_eq!(server["type"], "stdio");
+    assert_eq!(server["args"], serde_json::json!(["mcp"]));
+    assert!(config.get("mcpServers").is_none());
+
+    let rule = fs::read_to_string(user_dir.join("prompts/palace.instructions.md")).unwrap();
+    assert!(rule.starts_with("---\n"));
+    assert!(rule.contains("applyTo: \"**\""));
+    assert_full_protocol(&rule);
+}
+
+#[test]
+fn install_windsurf_writes_mcp_config_and_global_rules() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    install_clients(&options(temp.path(), &binary_path, vec![Client::Windsurf])).unwrap();
+
+    let dir = temp.path().join(".codeium/windsurf");
+    let config = read_json(&dir.join("mcp_config.json"));
+    assert!(config["mcpServers"]["palace"]["command"].is_string());
+    let rule = fs::read_to_string(dir.join("memories/global_rules.md")).unwrap();
+    assert!(rule.contains("<!-- BEGIN PALACE -->"));
+    assert!(
+        rule.len() < 6000,
+        "Windsurf global rules are capped at 6000 chars"
+    );
+    assert_full_protocol(&rule);
+}
+
+#[test]
+fn install_opencode_registers_local_server_and_instruction_file() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    install_clients(&options(temp.path(), &binary_path, vec![Client::OpenCode])).unwrap();
+
+    let dir = temp.path().join(".config").join("opencode");
+    let config = read_json(&dir.join("opencode.json"));
+    assert_eq!(config["$schema"], "https://opencode.ai/config.json");
+    let server = &config["mcp"]["palace"];
+    assert_eq!(server["type"], "local");
+    assert_eq!(server["enabled"], true);
+    assert_eq!(
+        server["command"],
+        serde_json::json!([binary_path.to_string_lossy(), "mcp"])
+    );
+    let rule_path = dir.join("palace.md");
+    assert_eq!(
+        config["instructions"],
+        serde_json::json!([rule_path.to_string_lossy()])
+    );
+    assert_full_protocol(&fs::read_to_string(&rule_path).unwrap());
+    // The global AGENTS.md slot stays free so OpenCode keeps its CLAUDE.md fallback.
+    assert!(!dir.join("AGENTS.md").exists());
+
+    let report = doctor(&options(temp.path(), &binary_path, vec![Client::OpenCode])).unwrap();
+    let status = &report.clients[0];
+    assert!(status.points_to_expected_binary, "{status:?}");
+    assert!(status.rule_installed, "{status:?}");
+}
+
+#[test]
+fn uninstall_opencode_removes_server_and_instruction_only() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let dir = temp.path().join(".config").join("opencode");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("opencode.json"),
+        r#"{"theme":"tokyonight","instructions":["docs/style.md"],"mcp":{"other":{"type":"local","command":["x"]}}}"#,
+    )
+    .unwrap();
+    let opts = options(temp.path(), &binary_path, vec![Client::OpenCode]);
+    install_clients(&opts).unwrap();
+    uninstall_clients(&opts).unwrap();
+
+    let config = read_json(&dir.join("opencode.json"));
+    assert_eq!(config["theme"], "tokyonight");
+    assert_eq!(config["instructions"], serde_json::json!(["docs/style.md"]));
+    assert!(config["mcp"].get("palace").is_none());
+    assert!(config["mcp"].get("other").is_some());
+    assert!(!dir.join("palace.md").exists());
+}
+
+#[test]
+fn install_all_includes_new_clients_only_when_detected() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    fs::create_dir_all(temp.path().join(".gemini")).unwrap();
+
+    let report = install_clients(&without_rule(options(
+        temp.path(),
+        &binary_path,
+        vec![Client::All],
+    )))
+    .unwrap();
+    let paths: Vec<String> = report
+        .changed
+        .iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    assert!(paths.iter().any(|p| p.ends_with(".gemini/settings.json")));
+    assert!(!temp.path().join(".codeium").exists(), "{paths:?}");
+    assert!(!temp.path().join(".config/opencode").exists(), "{paths:?}");
+    assert!(!vscode_user_dir(temp.path()).exists(), "{paths:?}");
+}
+
+#[test]
+fn project_scoped_install_covers_new_clients() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let binary_path = fake_binary(temp.path());
+    let mut install_options = options(
+        temp.path(),
+        &binary_path,
+        vec![
+            Client::Gemini,
+            Client::Vscode,
+            Client::Windsurf,
+            Client::OpenCode,
+        ],
+    );
+    install_options.scope = Scope::Project;
+    install_options.project_dir = Some(project.clone());
+    install_clients(&install_options).unwrap();
+
+    assert!(read_json(&project.join(".vscode/mcp.json"))["servers"]["palace"].is_object());
+    assert!(read_json(&project.join("opencode.json"))["mcp"]["palace"].is_object());
+    for path in [
+        project.join("GEMINI.md"),
+        project.join(".github/copilot-instructions.md"),
+        project.join(".windsurf/rules/palace.md"),
+        project.join("AGENTS.md"),
+    ] {
+        assert_full_protocol(&fs::read_to_string(&path).unwrap());
+    }
+    let windsurf = fs::read_to_string(project.join(".windsurf/rules/palace.md")).unwrap();
+    assert!(windsurf.starts_with("---\ntrigger: always_on\n---\n"));
+}
