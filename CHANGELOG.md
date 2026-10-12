@@ -23,8 +23,23 @@ This Rust implementation uses its own `0.x` version track.
     OpenCode's `~/.claude/CLAUDE.md` fallback) alone.
   - Windsurf: MCP and global rules only. Cascade hooks cannot inject context;
     Devin Local already reads the Claude Code hooks.
+- **Cline, Zed and Goose.**
+  - Cline: shared `cline_mcp_settings.json`, an always-on rule in
+    `~/.cline/rules/`, and `UserPromptSubmit`/`PostToolUse` hook scripts in
+    `Documents/Cline/Hooks`. A hook script you wrote yourself is never
+    overwritten or removed.
+  - Zed: `context_servers` in `settings.json` and Zed's global `AGENTS.md`.
+    Zed's agent has no hooks.
+  - Goose: a stdio extension in `config.yaml`, `.goosehints`, and a Stop-only
+    plugin in `~/.agents/plugins/palace` that nudges Goose to save its work.
 - `--client all` includes the new agents only when their config folder
   exists.
+
+### Fixed
+
+- JSON configs with comments or trailing commas (JSONC, as Zed, VS Code and
+  Cursor allow) no longer make `palace install` fail. They are rewritten as
+  plain JSON; the original stays in the `.bak` backup.
 
 ## [0.15.0] - 2026-09-27
 
