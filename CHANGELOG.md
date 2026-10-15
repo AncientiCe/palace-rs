@@ -4,6 +4,13 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Security
+
+- **Bumped `rustls` to 0.23.46** for RUSTSEC-2026-0346, -0347, -0348 and
+  -0349, and dropped the temporary ignores from `.cargo/audit.toml`.
+
 ## [0.16.1] - 2026-10-15
 
 ### Fixed
