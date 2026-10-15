@@ -214,6 +214,14 @@ pub fn session_start_response(
 /// Build the post-tool-use response: inject relevant memory when the tool looks
 /// like an investigation and Palace has something pertinent; otherwise `{}`.
 pub fn post_tool_use_response(conn: &Connection, input: &Value, client: HookClient) -> Value {
+    let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    if let Some(session_id) = session_id(input) {
+        let _ = crate::hook_sessions::record_tool(conn, session_id, cwd(input), tool);
+    }
+    // The agent is already consulting Palace; recalling on top of that is noise.
+    if crate::hook_sessions::palace_tool(tool).is_some() {
+        return json!({});
+    }
     let Some(context) = recall_context(conn, input) else {
         return json!({});
     };
@@ -251,6 +259,9 @@ const PROMPT_SEARCH_NUDGE: &str = "Palace memory: this question looks like it de
 /// A history-style question with no hits gets a one-line search nudge instead.
 /// Clients whose prompt hook cannot inject context (Cursor, VS Code) get `{}`.
 pub fn user_prompt_submit_response(conn: &Connection, input: &Value, client: HookClient) -> Value {
+    if let Some(session_id) = session_id(input) {
+        let _ = crate::hook_sessions::record_prompt(conn, session_id, cwd(input));
+    }
     if !client.injects_on_prompt() {
         return json!({});
     }
@@ -489,6 +500,19 @@ fn session_start_recall(conn: &Connection, cwd: &str) -> Option<String> {
          re-deciding; a prior agent may have already done this)\n{}",
         sections.join("\n\n")
     ))
+}
+
+/// The agent's session id from hook input, if present and non-empty.
+fn session_id(input: &Value) -> Option<&str> {
+    input
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
+/// The session's working directory from hook input, or `""`.
+fn cwd(input: &Value) -> &str {
+    input.get("cwd").and_then(Value::as_str).unwrap_or("")
 }
 
 /// Build the stop response: ask the agent to record its work when the session

@@ -191,6 +191,18 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_usage_events_tool ON usage_events(tool);
         CREATE INDEX IF NOT EXISTS idx_usage_events_query_hash ON usage_events(query_hash);
 
+        -- Per-agent-session activity recorded by the hooks (see hook_sessions.rs).
+        CREATE TABLE IF NOT EXISTS hook_sessions (
+            session_id  TEXT PRIMARY KEY,
+            cwd         TEXT NOT NULL DEFAULT '',
+            prompts     INTEGER NOT NULL DEFAULT 0,
+            tool_calls  INTEGER NOT NULL DEFAULT 0,
+            palace_used INTEGER NOT NULL DEFAULT 0,
+            saved       INTEGER NOT NULL DEFAULT 0,
+            updated_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hook_sessions_updated ON hook_sessions(updated_at);
+
         CREATE TABLE IF NOT EXISTS gain_feedback (
             query_id   TEXT NOT NULL,
             drawer_id  TEXT NOT NULL,

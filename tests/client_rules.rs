@@ -1051,9 +1051,10 @@ fn install_clients_claude_installs_nested_hooks() {
         );
     }
 
-    // PostToolUse should target the file-investigation tools.
+    // PostToolUse targets the file-investigation tools (for recall) and
+    // palace's own MCP tools (to record per-session palace use).
     let post = &val["hooks"]["PostToolUse"][0];
-    assert_eq!(post["matcher"], "Grep|Read|Glob", "{val}");
+    assert_eq!(post["matcher"], "Grep|Read|Glob|mcp__palace__.*", "{val}");
 }
 
 #[test]
@@ -1184,6 +1185,33 @@ fn doctor_reports_hook_installed_for_claude_and_codex() {
             "{client} hook should be reported installed after install"
         );
     }
+}
+
+#[test]
+fn doctor_reports_claude_hook_with_outdated_matcher_as_missing() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary, vec![Client::Claude]);
+    install_clients(&opts).unwrap();
+
+    // Simulate a pre-0.17 install whose PostToolUse hook does not match
+    // palace's own MCP tools, so per-session palace use is never recorded.
+    let settings = temp.path().join(".claude").join("settings.json");
+    let text = fs::read_to_string(&settings).unwrap();
+    fs::write(
+        &settings,
+        text.replace("Grep|Read|Glob|mcp__palace__.*", "Grep|Read|Glob"),
+    )
+    .unwrap();
+
+    let report = doctor(&opts).unwrap();
+    assert!(
+        report
+            .clients
+            .iter()
+            .any(|s| s.client == Client::Claude && !s.hook_installed),
+        "an outdated palace hook matcher must prompt a reinstall"
+    );
 }
 
 // ── Gemini CLI, VS Code, Windsurf, OpenCode ──────────────────────────────────

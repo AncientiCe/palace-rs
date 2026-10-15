@@ -17,6 +17,14 @@ This Rust implementation uses its own `0.x` version track.
   already arrives through MCP instructions and rule files. Pass
   `verbose: true` to get the old fields back. `palace_get_aaak_spec` still
   serves the AAAK spec.
+- **Hooks now track Palace use per agent session.** Palace's MCP usage log
+  is keyed by server process, so it could not tell whether *this* session
+  consulted memory. The prompt and after-tool hooks now record each
+  session's prompts, tool calls, and Palace use in a new `hook_sessions`
+  table (pruned after 7 days). Claude Code's after-tool hook also matches
+  `mcp__palace__.*` for this; it no longer runs recall on Palace's own
+  calls. `palace doctor` reports a Claude hook with the old matcher as
+  missing, so re-run `palace install` after upgrading.
 
 ## [0.16.2] - 2026-10-15
 

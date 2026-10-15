@@ -1905,7 +1905,8 @@ struct NestedHook {
     matcher: Option<&'static str>,
 }
 
-/// Claude Code hooks: investigations surface through the Grep/Read/Glob tools.
+/// Claude Code hooks: investigations surface through the Grep/Read/Glob tools,
+/// and palace's own MCP tools are matched so the hook records per-session use.
 fn claude_hooks() -> &'static [NestedHook] {
     &[
         NestedHook {
@@ -1921,7 +1922,7 @@ fn claude_hooks() -> &'static [NestedHook] {
         NestedHook {
             event: "PostToolUse",
             cli_event: "post-tool-use",
-            matcher: Some("Grep|Read|Glob"),
+            matcher: Some("Grep|Read|Glob|mcp__palace__.*"),
         },
         NestedHook {
             event: "Stop",
@@ -2159,20 +2160,27 @@ fn remove_nested_hooks(path: &Path, defs: &[NestedHook], dry_run: bool) -> Resul
 }
 
 /// True if any Palace hook is registered in a nested-format config file.
-fn nested_hook_installed(path: &Path) -> bool {
-    read_json_object(path)
-        .ok()
-        .and_then(|v| {
-            v.get("hooks").and_then(Value::as_object).map(|hooks| {
-                hooks.values().any(|groups| {
-                    groups
-                        .as_array()
-                        .map(|gs| gs.iter().any(nested_group_is_palace))
-                        .unwrap_or(false)
+/// Whether every hook in `defs` is installed with its current matcher. An
+/// older palace entry with a different matcher counts as missing, so doctor
+/// prompts a reinstall.
+fn nested_hook_installed(path: &Path, defs: &[NestedHook]) -> bool {
+    let Ok(config) = read_json_object(path) else {
+        return false;
+    };
+    let Some(hooks) = config.get("hooks").and_then(Value::as_object) else {
+        return false;
+    };
+    defs.iter().all(|def| {
+        hooks
+            .get(def.event)
+            .and_then(Value::as_array)
+            .is_some_and(|groups| {
+                groups.iter().any(|group| {
+                    nested_group_is_palace(group)
+                        && group.get("matcher").and_then(Value::as_str) == def.matcher
                 })
             })
-        })
-        .unwrap_or(false)
+    })
 }
 
 /// Install the automatic memory hooks for a client at user scope. Returns the
@@ -2331,7 +2339,7 @@ fn client_hook_installed(home_dir: &Path, client: Client) -> bool {
         Client::Goose => read_text_file(&goose_plugin_dir(home_dir).join("hooks/hooks.json"))
             .is_ok_and(|text| text.contains(CURSOR_HOOK_KEY)),
         _ => nested_hook_target(home_dir, client)
-            .is_some_and(|(path, _, _)| nested_hook_installed(&path)),
+            .is_some_and(|(path, defs, _)| nested_hook_installed(&path, defs)),
     }
 }
 
