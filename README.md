@@ -98,6 +98,16 @@ brew tap AncientiCe/palace
 brew install palace
 ```
 
+To upgrade, refresh the tap first. Without `brew update`, Homebrew can keep
+reporting the old version as already installed:
+
+```bash
+brew update && brew upgrade palace
+```
+
+When a release changes the memory protocol rule (the CHANGELOG says so), run
+`palace install` again afterwards so your agents get the new rule text.
+
 **MCP registry / MCPB bundle.** Palace is listed in the official
 [MCP registry](https://registry.modelcontextprotocol.io) as
 `io.github.ancientice/palace-rs`. Each release also ships a `palace-<version>.mcpb`
