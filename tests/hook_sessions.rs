@@ -113,3 +113,51 @@ fn hooks_without_session_id_record_nothing() {
         .unwrap();
     assert_eq!(count, 0);
 }
+
+// ── per-prompt reminder ────────────────────────────────────────────────────
+
+fn session_prompt(text: &str) -> Value {
+    json!({ "prompt": text, "cwd": "/work/proj", "session_id": "s1" })
+}
+
+fn context(out: &Value) -> &str {
+    out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("")
+}
+
+const PLAIN_PROMPT: &str = "add a flag to print the version string";
+
+#[test]
+fn prompt_reminds_claude_until_palace_is_used() {
+    let conn = test_db();
+    let out = user_prompt_submit_response(&conn, &session_prompt(PLAIN_PROMPT), HookClient::Claude);
+    assert!(
+        context(&out).contains("Palace not consulted yet this session"),
+        "{out}"
+    );
+
+    record_tool(&conn, "s1", "/work/proj", "mcp__palace__palace_status").unwrap();
+    let out = user_prompt_submit_response(&conn, &session_prompt(PLAIN_PROMPT), HookClient::Claude);
+    assert_eq!(out, json!({}), "no reminder once palace was used: {out}");
+}
+
+#[test]
+fn prompt_reminder_skips_trivial_prompts() {
+    let conn = test_db();
+    for text in ["go ahead", "/code-review high"] {
+        let out = user_prompt_submit_response(&conn, &session_prompt(text), HookClient::Claude);
+        assert_eq!(out, json!({}), "{text:?} must not get a reminder");
+    }
+}
+
+#[test]
+fn prompt_reminder_only_for_clients_with_session_tracking() {
+    let conn = test_db();
+    let out = user_prompt_submit_response(&conn, &session_prompt(PLAIN_PROMPT), HookClient::Codex);
+    assert_eq!(
+        out,
+        json!({}),
+        "codex palace calls are not tracked yet: {out}"
+    );
+}

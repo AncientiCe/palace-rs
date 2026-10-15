@@ -238,6 +238,9 @@ fn user_prompt_submit_nudges_history_questions_without_hits() {
 #[test]
 fn user_prompt_submit_silent_for_plain_or_trivial_prompts() {
     let conn = test_db();
+    // The session already consulted Palace, so only recall could inject here.
+    palace::hook_sessions::record_tool(&conn, "abc", "/work/proj", "mcp__palace__palace_status")
+        .unwrap();
     for text in [
         "go ahead",
         "/code-review high",

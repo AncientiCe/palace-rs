@@ -75,6 +75,13 @@ impl HookClient {
         !matches!(self, Self::Cursor | Self::Vscode | Self::Goose)
     }
 
+    /// Whether this client's Palace calls reach the after-tool hook, so
+    /// per-session palace use (and the reminders built on it) is reliable.
+    /// Only Claude Code's `mcp__palace__*` tool naming is confirmed so far.
+    fn tracks_palace_use(self) -> bool {
+        self == Self::Claude
+    }
+
     /// The event name this client expects in `hookSpecificOutput.hookEventName`.
     fn event_name(self, event: HookEvent) -> &'static str {
         match (self, event) {
@@ -253,6 +260,11 @@ const PROMPT_SEARCH_NUDGE: &str = "Palace memory: this question looks like it de
     decisions or history, and auto-recall found nothing close. Call palace_search (and \
     palace_kg_query for stable facts) before answering from the code or from training data.";
 
+/// Reminder injected into prompts until the session calls any Palace tool.
+const PALACE_REMINDER: &str = "Palace not consulted yet this session. Load the palace tools if \
+    they are deferred, run the SESSION START calls (palace_status, palace_session_context), and \
+    call palace_search before answering questions about past work.";
+
 /// Build the user-prompt-submit response: recall memory relevant to the user's
 /// question *before* the agent starts answering, so Palace is consulted even
 /// when the agent would otherwise go straight to the code or its own knowledge.
@@ -265,21 +277,45 @@ pub fn user_prompt_submit_response(conn: &Connection, input: &Value, client: Hoo
     if !client.injects_on_prompt() {
         return json!({});
     }
-    let Some(context) = prompt_context(conn, input) else {
+    let Some(prompt) = substantive_prompt(input) else {
         return json!({});
     };
-    client.context_output(HookEvent::UserPromptSubmit, context)
+    let parts: Vec<String> = [
+        prompt_context(conn, input, prompt),
+        palace_reminder(conn, input, client),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if parts.is_empty() {
+        return json!({});
+    }
+    client.context_output(HookEvent::UserPromptSubmit, parts.join("\n\n"))
 }
 
-/// Recall block (or search nudge) for a submitted prompt, or `None` when the
-/// prompt is trivial, a slash command, or unrelated to anything remembered.
-fn prompt_context(conn: &Connection, input: &Value) -> Option<String> {
+/// The submitted prompt, or `None` for slash commands and very short prompts.
+fn substantive_prompt(input: &Value) -> Option<&str> {
     let prompt = input.get("prompt").and_then(Value::as_str)?.trim();
     if prompt.starts_with('/') || prompt.split_whitespace().count() < PROMPT_MIN_WORDS {
         return None;
     }
-    let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
-    let lines = recall_lines(conn, prompt, cwd);
+    Some(prompt)
+}
+
+/// One-line reminder for a session that has not touched Palace yet, or
+/// `None` once it has (or when this client's palace calls are not tracked).
+fn palace_reminder(conn: &Connection, input: &Value, client: HookClient) -> Option<String> {
+    if !client.tracks_palace_use() {
+        return None;
+    }
+    let activity = crate::hook_sessions::activity(conn, session_id(input)?).ok()??;
+    (!activity.palace_used).then(|| PALACE_REMINDER.to_string())
+}
+
+/// Recall block (or search nudge) for a substantive prompt, or `None` when
+/// the prompt is unrelated to anything remembered.
+fn prompt_context(conn: &Connection, input: &Value, prompt: &str) -> Option<String> {
+    let lines = recall_lines(conn, prompt, cwd(input));
     if !lines.is_empty() {
         return Some(format!(
             "Palace memory relevant to this request (check it before answering; cite the drawer \

@@ -26,6 +26,14 @@ This Rust implementation uses its own `0.x` version track.
   calls. `palace doctor` reports a Claude hook with the old matcher as
   missing, so re-run `palace install` after upgrading.
 
+### Added
+
+- **Prompt reminder until a session uses Palace (Claude Code).** While a
+  session has not called any Palace tool, the prompt hook adds a one-line
+  reminder to load the palace tools, run the session-start calls, and search
+  before answering questions about past work. It stops as soon as any
+  Palace tool runs, and skips slash commands and very short prompts.
+
 ## [0.16.2] - 2026-10-15
 
 ### Security
