@@ -955,6 +955,22 @@ fn session_start_hook_response_contains_protocol() {
     );
 }
 
+#[test]
+fn every_profile_rule_tells_deferring_clients_to_load_protocol_tools_first() {
+    use palace::config::Profile;
+    for profile in [Profile::Coding, Profile::Creative, Profile::Personal] {
+        let body = palace::install::rule_body(profile);
+        let session_start = body.find("## SESSION START").unwrap();
+        let load_step = body
+            .find("tool search")
+            .unwrap_or_else(|| panic!("{profile:?} rule must mention tool search"));
+        assert!(
+            load_step > session_start && load_step < body.find("palace_status").unwrap(),
+            "{profile:?} rule must load tools before the first palace_status call"
+        );
+    }
+}
+
 // ── Claude Code / Codex nested hooks ─────────────────────────────────────────
 
 /// Collect every command string across all events of a nested hooks file.
