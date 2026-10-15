@@ -4,6 +4,24 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [0.16.1] - 2026-10-15
+
+### Fixed
+
+- **Protocol rule now tells deferring clients to load the palace tools
+  first.** The Claude desktop app ignores the `anthropic/alwaysLoad` hint
+  and lists `palace_*` tools by name only, so sessions skipped SESSION
+  START. Every profile's rule now opens SESSION START with a step to load
+  the nine protocol tools in one batch via tool search. Re-run
+  `palace install` to pick up the new rule text.
+
+### Security
+
+- **Temporarily ignoring RUSTSEC-2026-0346, -0347, -0348 and -0349** in
+  `.cargo/audit.toml`. They affect `rustls` 0.23.45 (pulled in by `hf-hub`
+  through `ureq`); the fix, 0.23.46, is not on crates.io yet. The ignores
+  will be dropped once `rustls` can be bumped.
+
 ## [0.16.0] - 2026-10-12
 
 ### Added
