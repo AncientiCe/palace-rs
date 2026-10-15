@@ -4,6 +4,14 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Changed
+
+- **`palace doctor` flags rules without the tool-search load step.** A rule
+  installed before 0.16.1 is now reported as weak, with a hint to re-run
+  `palace install`.
+
 ## [0.16.2] - 2026-10-15
 
 ### Security

@@ -1302,6 +1302,9 @@ fn rule_is_weak(target: &RuleTarget) -> Result<bool> {
     let lower = text.to_lowercase();
     let required = [
         "session start",
+        // Clients that defer MCP tools (e.g. the Claude desktop app) skip the
+        // protocol unless the rule says to load the palace tools first.
+        "tool search",
         "palace_status",
         "palace_session_context",
         "palace_diary_search",
@@ -1337,7 +1340,7 @@ fn adoption_warnings(clients: &[ClientStatus]) -> Vec<String> {
             ));
         } else if status.rule_weak {
             warnings.push(format!(
-                "{client} rule lacks session warm-start, KG/diary recall, or memory-vs-code routing; reinstall so remembered context is searched first."
+                "{client} rule lacks session warm-start (including loading deferred palace tools), KG/diary recall, or memory-vs-code routing; reinstall so remembered context is searched first."
             ));
         }
     }
