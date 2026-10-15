@@ -7,8 +7,10 @@
 //!   user's question before the agent answers it.
 //! - `postToolUse` — recall relevant memory right when the agent investigates
 //!   (e.g. before/while it greps), so prior decisions surface automatically.
-//! - `stop` — when a session engaged Palace but never recorded anything, return
-//!   a follow-up message so the agent saves its investigation before finishing.
+//! - `stop` — when a session did real work but never recorded anything, return
+//!   a follow-up message so the agent saves its work before finishing. Claude
+//!   Code is judged per session (see [`crate::hook_sessions`]); other clients
+//!   use a recent-activity window.
 //!
 //! The builders are pure functions over a [`Connection`] and the hook input
 //! JSON so they can be unit-tested without spawning Cursor. All paths fail open:
@@ -183,6 +185,16 @@ const SAVE_NUDGE: &str = "Before finishing: you investigated using Palace memory
     recorded nothing. Save it so the next agent benefits — call palace_diary_write with what you \
     investigated and decided, and palace_kg_add for any durable facts or decisions (use \
     palace_kg_invalidate first if a fact changed). Then stop.";
+
+/// The nudge for a session that did real work without consulting Palace.
+const UNUSED_NUDGE: &str = "Before finishing: this session did real work but did not use Palace \
+    memory at all. Record it so the next agent benefits — call palace_diary_write with what you \
+    did and decided, and palace_kg_add for any durable facts. Then stop.";
+
+/// A session with at least this many prompts counts as real work.
+const BUSY_SESSION_PROMPTS: i64 = 2;
+/// A session with at least this many tracked tool calls counts as real work.
+const BUSY_SESSION_TOOL_CALLS: i64 = 3;
 
 /// Build the session-start response: inject the protocol AND — when a palace DB
 /// is available — real warm-start recall (recent diary + project knowledge for
@@ -557,10 +569,46 @@ pub fn stop_response(conn: &Connection, input: &Value, client: HookClient) -> Va
     if stop_should_skip(input, client) {
         return json!({});
     }
+    if let Some(activity) = tracked_activity(conn, input, client) {
+        return match session_stop_nudge(&activity) {
+            Some(message) => client.continue_output(message),
+            None => json!({}),
+        };
+    }
     match crate::usage::recent_save_status(conn, SAVE_WINDOW_MINUTES) {
         Ok((engaged, saved)) if engaged && !saved => client.continue_output(SAVE_NUDGE),
         _ => json!({}),
     }
+}
+
+/// This session's recorded activity, when the client's palace calls are
+/// tracked per session; `None` falls back to the global save window.
+fn tracked_activity(
+    conn: &Connection,
+    input: &Value,
+    client: HookClient,
+) -> Option<crate::hook_sessions::SessionActivity> {
+    if !client.tracks_palace_use() {
+        return None;
+    }
+    crate::hook_sessions::activity(conn, session_id(input)?)
+        .ok()
+        .flatten()
+}
+
+/// The nudge for a session that did real work but saved nothing, or `None`
+/// for trivial sessions and sessions that saved.
+fn session_stop_nudge(activity: &crate::hook_sessions::SessionActivity) -> Option<&'static str> {
+    let busy =
+        activity.prompts >= BUSY_SESSION_PROMPTS || activity.tool_calls >= BUSY_SESSION_TOOL_CALLS;
+    if !busy || activity.saved {
+        return None;
+    }
+    Some(if activity.palace_used {
+        SAVE_NUDGE
+    } else {
+        UNUSED_NUDGE
+    })
 }
 
 /// Whether the stop hook should stay silent: already continuing from a prior

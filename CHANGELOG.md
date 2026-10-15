@@ -33,6 +33,12 @@ This Rust implementation uses its own `0.x` version track.
   reminder to load the palace tools, run the session-start calls, and search
   before answering questions about past work. It stops as soon as any
   Palace tool runs, and skips slash commands and very short prompts.
+- **Stop nudge for sessions that never used Palace (Claude Code).** The stop
+  hook now judges Claude Code sessions on their own activity instead of any
+  Palace use in the last 6 hours. A session with real work (2+ prompts or 3+
+  tracked tool calls) that saved nothing is asked to record it, including
+  sessions that never touched Palace. Trivial sessions stay silent, and
+  another session's activity no longer silences or triggers the nudge.
 
 ## [0.16.2] - 2026-10-15
 

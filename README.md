@@ -224,9 +224,9 @@ without editing per-project files:
 | Hook | What it does |
 |---|---|
 | **Session start** | Injects the memory protocol, recent diary entries for this project (from any agent), and the top drawers of the project's wing. |
-| **Prompt submit** | Searches Palace with your actual question and injects matching drawers before the agent answers. If a history question finds nothing, it tells the agent to run `palace_search`. Skips short prompts and slash commands. Claude Code and Codex only. |
-| **Post tool use** | While the agent greps and reads files, recalls related memory so earlier decisions surface without a search. |
-| **Stop** | If the session used Palace but saved nothing, asks the agent once to write a diary entry and record decisions before it finishes. |
+| **Prompt submit** | Searches Palace with your actual question and injects matching drawers before the agent answers. If a history question finds nothing, it tells the agent to run `palace_search`. In Claude Code it also adds a one-line reminder until the session calls a Palace tool. Skips short prompts and slash commands. Claude Code and Codex only. |
+| **Post tool use** | While the agent greps and reads files, recalls related memory so earlier decisions surface without a search. In Claude Code it also records the session's Palace calls. |
+| **Stop** | If the session did real work but saved nothing, asks the agent once to write a diary entry and record decisions before it finishes. In Claude Code this is judged per session, including sessions that never used Palace; other agents use a recent-activity window. |
 
 Auto-recall is limited to the current project. Drawers from your other
 project wings and diaries from other projects stay out. Topic wings still

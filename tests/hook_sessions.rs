@@ -1,7 +1,9 @@
 //! Tests for per-session activity recorded by the agent hooks.
 
 use palace::hook_sessions::{activity, palace_tool, record_prompt, record_tool};
-use palace::hooks::{post_tool_use_response, user_prompt_submit_response, HookClient};
+use palace::hooks::{
+    post_tool_use_response, stop_response, user_prompt_submit_response, HookClient,
+};
 use serde_json::{json, Value};
 
 fn test_db() -> rusqlite::Connection {
@@ -160,4 +162,94 @@ fn prompt_reminder_only_for_clients_with_session_tracking() {
         json!({}),
         "codex palace calls are not tracked yet: {out}"
     );
+}
+
+// ── stop nudge ─────────────────────────────────────────────────────────────
+
+fn stop_input() -> Value {
+    json!({ "session_id": "s1", "cwd": "/work/proj", "stop_hook_active": false })
+}
+
+fn busy_session(conn: &rusqlite::Connection) {
+    record_prompt(conn, "s1", "/work/proj").unwrap();
+    record_prompt(conn, "s1", "/work/proj").unwrap();
+}
+
+#[test]
+fn stop_nudges_busy_session_that_never_used_palace() {
+    let conn = test_db();
+    busy_session(&conn);
+    let out = stop_response(&conn, &stop_input(), HookClient::Claude);
+    assert_eq!(out["decision"], "block", "{out}");
+    let reason = out["reason"].as_str().unwrap_or("");
+    assert!(reason.contains("did not use Palace"), "{out}");
+    assert!(reason.contains("palace_diary_write"), "{out}");
+}
+
+#[test]
+fn stop_nudges_busy_session_that_used_palace_but_saved_nothing() {
+    let conn = test_db();
+    busy_session(&conn);
+    record_tool(&conn, "s1", "/work/proj", "mcp__palace__palace_search").unwrap();
+    let out = stop_response(&conn, &stop_input(), HookClient::Claude);
+    assert_eq!(out["decision"], "block", "{out}");
+    assert!(
+        out["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("recorded nothing"),
+        "{out}"
+    );
+}
+
+#[test]
+fn stop_silent_once_session_saved() {
+    let conn = test_db();
+    busy_session(&conn);
+    record_tool(&conn, "s1", "/work/proj", "mcp__palace__palace_diary_write").unwrap();
+    assert_eq!(
+        stop_response(&conn, &stop_input(), HookClient::Claude),
+        json!({})
+    );
+}
+
+#[test]
+fn stop_silent_for_trivial_session_even_if_others_engaged() {
+    let conn = test_db();
+    record_prompt(&conn, "s1", "/work/proj").unwrap();
+    // Another session searched Palace and saved nothing; that must not leak.
+    record_tool(&conn, "other", "/work/x", "mcp__palace__palace_search").unwrap();
+    let mut event = palace::usage::UsageEvent {
+        ts: chrono::Utc::now().to_rfc3339(),
+        session_id: "mcp".into(),
+        project: "x".into(),
+        tool: "palace_search".into(),
+        wing: None,
+        room: None,
+        query_hash: None,
+        result_count: 0,
+        top_similarity: None,
+        bytes_returned: 0,
+        est_tokens_saved: 0,
+        duration_ms: 1,
+        outcome: "x".into(),
+        meta: json!({}),
+    };
+    palace::usage::insert_event(&conn, &event).unwrap();
+    event.tool = "palace_kg_query".into();
+    palace::usage::insert_event(&conn, &event).unwrap();
+
+    assert_eq!(
+        stop_response(&conn, &stop_input(), HookClient::Claude),
+        json!({})
+    );
+}
+
+#[test]
+fn stop_session_nudge_respects_stop_hook_active() {
+    let conn = test_db();
+    busy_session(&conn);
+    let mut input = stop_input();
+    input["stop_hook_active"] = json!(true);
+    assert_eq!(stop_response(&conn, &input, HookClient::Claude), json!({}));
 }
