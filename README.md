@@ -501,7 +501,7 @@ to turn recording off.
 
 | Tool | Description |
 |---|---|
-| `palace_status` | Palace overview and protocol text |
+| `palace_status` | Palace overview: drawer and wing counts, recent sessions (`verbose` adds rooms, protocol text, AAAK spec) |
 | `palace_verify` | Check MCP tools, database health, embeddings, and model cache |
 | `palace_recall_check` | Run project-memory probes and report expected hits |
 | `palace_gain` | Usage gains and savings. Accepts an optional `record` payload for feedback. |

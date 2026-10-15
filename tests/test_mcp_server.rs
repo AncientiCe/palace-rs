@@ -32,6 +32,68 @@ fn status_returns_counts() {
     assert_eq!(count, 1);
 }
 
+#[test]
+fn status_is_compact_by_default() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    store::add_drawer(
+        &conn,
+        "wing_test",
+        "room_a",
+        "content",
+        None,
+        "f.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let result =
+        palace::mcp_server::dispatch_tool(&conn, &config, "palace_status", &serde_json::json!({}));
+
+    assert_eq!(result["total_drawers"], 1);
+    assert_eq!(result["wings"]["wing_test"], 1);
+    assert!(result.get("palace_path").is_some());
+    assert!(result.get("profile").is_some());
+    // Already served elsewhere (MCP instructions, rule files, palace_get_aaak_spec)
+    // or rarely needed at session start.
+    assert!(result.get("aaak_dialect").is_none(), "{result}");
+    assert!(result.get("protocol").is_none(), "{result}");
+    assert!(result.get("rooms").is_none(), "{result}");
+}
+
+#[test]
+fn status_verbose_includes_rooms_protocol_and_aaak() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    store::add_drawer(
+        &conn,
+        "wing_test",
+        "room_a",
+        "content",
+        None,
+        "f.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_status",
+        &serde_json::json!({"verbose": true}),
+    );
+
+    assert_eq!(result["rooms"]["room_a"], 1);
+    assert!(result["protocol"].as_str().is_some_and(|p| !p.is_empty()));
+    assert!(result["aaak_dialect"]
+        .as_str()
+        .is_some_and(|a| !a.is_empty()));
+}
+
 // ── Taxonomy ──────────────────────────────────────────────────────────────
 
 #[test]

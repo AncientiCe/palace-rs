@@ -245,7 +245,7 @@ pub fn dispatch_tool_with_usage(
 
 pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args: &Value) -> Value {
     match name {
-        "palace_status" => tool_status(conn, config),
+        "palace_status" => tool_status(conn, config, args),
         "palace_list_wings" => tool_list_wings(conn),
         "palace_create_wing" => tool_create_wing(conn, args),
         "palace_project_status" => tool_project_status(conn, args),
@@ -307,14 +307,17 @@ fn no_palace() -> Value {
     })
 }
 
-fn tool_status(conn: &Connection, config: &PalaceConfig) -> Value {
+/// Palace overview. Compact by default, since agents call it at the start of
+/// every session: the protocol already arrives via MCP instructions and rule
+/// files, and the AAAK spec via `palace_get_aaak_spec`. `verbose: true` adds
+/// per-room counts, the protocol text, and the AAAK spec.
+fn tool_status(conn: &Connection, config: &PalaceConfig, args: &Value) -> Value {
+    let verbose = args
+        .get("verbose")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let count = count_drawers(conn).unwrap_or(0);
     let wings = wing_counts(conn).unwrap_or_default();
-    let rooms = room_counts(conn, None)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(k, v)| (k, json!(v)))
-        .collect::<serde_json::Map<_, _>>();
 
     // Surface recent diary entries for any known agent (warm-start context).
     let cutoff = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
@@ -351,12 +354,22 @@ fn tool_status(conn: &Connection, config: &PalaceConfig) -> Value {
     let mut response = json!({
         "total_drawers": count,
         "wings": wings,
-        "rooms": rooms,
         "palace_path": config.palace_db_path().to_string_lossy(),
         "profile": config.profile().as_str(),
-        "protocol": crate::dialect::palace_protocol(config.profile()),
-        "aaak_dialect": AAAK_SPEC,
     });
+    if verbose {
+        let rooms = room_counts(conn, None)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k, json!(v)))
+            .collect::<serde_json::Map<_, _>>();
+        response["rooms"] = json!(rooms);
+        response["protocol"] = json!(crate::dialect::palace_protocol(config.profile()));
+        response["aaak_dialect"] = json!(AAAK_SPEC);
+    } else {
+        response["more"] =
+            json!("Pass verbose=true for per-room counts, the protocol text, and the AAAK spec.");
+    }
 
     if !last_session.is_empty() {
         response["last_session"] = json!(last_session);
@@ -2003,8 +2016,13 @@ fn tool_list() -> Value {
     let mut tools = json!([
         {
             "name": "palace_status",
-            "description": "Palace overview — total drawers, wing and room counts",
-            "inputSchema": {"type": "object", "properties": {}}
+            "description": "Palace overview — total drawers, wing counts, and recent sessions. Pass verbose=true for room counts, the protocol text, and the AAAK spec.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "verbose": {"type": "boolean", "description": "Include per-room counts, the protocol text, and the AAAK spec (default: false)"}
+                }
+            }
         },
         {
             "name": "palace_gain",

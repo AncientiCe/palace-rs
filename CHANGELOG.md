@@ -11,6 +11,12 @@ This Rust implementation uses its own `0.x` version track.
 - **`palace doctor` flags rules without the tool-search load step.** A rule
   installed before 0.16.1 is now reported as weak, with a hint to re-run
   `palace install`.
+- **`palace_status` is compact by default.** It no longer returns per-room
+  counts, the protocol text, or the AAAK spec, cutting its output by more
+  than half; agents call it at the start of every session, and the protocol
+  already arrives through MCP instructions and rule files. Pass
+  `verbose: true` to get the old fields back. `palace_get_aaak_spec` still
+  serves the AAAK spec.
 
 ## [0.16.2] - 2026-10-15
 
