@@ -474,6 +474,8 @@ fn installed_rules_include_full_memory_lifecycle_for_all_clients() {
         assert!(rule.contains("palace_kg_add"));
         assert!(rule.contains("palace_kg_invalidate"));
         assert!(rule.contains("MEMORY ROUTING"));
+        assert!(rule.contains("Palace is the ONLY persistent memory"));
+        assert!(rule.contains("general/preferences"));
     }
 }
 
@@ -542,6 +544,34 @@ fn doctor_marks_rule_weak_without_tool_search_load_step() {
     let old_body: String = palace::install::RULE_BODY
         .lines()
         .filter(|line| !line.contains("tool search"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        codex_dir.join("AGENTS.md"),
+        format!("<!-- BEGIN PALACE -->\n# Palace Memory Protocol — MANDATORY\n\n{old_body}\n<!-- END PALACE -->\n"),
+    )
+    .unwrap();
+
+    let binary_path = fake_binary(temp.path());
+    let install_options = options(temp.path(), &binary_path, vec![Client::Codex]);
+    let report = doctor(&install_options).unwrap();
+
+    assert!(report
+        .clients
+        .iter()
+        .any(|s| s.client == Client::Codex && s.rule_weak));
+}
+
+#[test]
+fn doctor_marks_rule_weak_without_only_memory_line() {
+    let temp = TempDir::new().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    // A full 0.17.0 rule: every step, but nothing saying Palace is the only
+    // persistent memory, so agents still write to their client's file memory.
+    let old_body: String = palace::install::RULE_BODY
+        .lines()
+        .filter(|line| !line.contains("ONLY persistent memory"))
         .collect::<Vec<_>>()
         .join("\n");
     fs::write(

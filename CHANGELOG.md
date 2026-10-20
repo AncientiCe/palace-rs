@@ -15,6 +15,14 @@ This Rust implementation uses its own `0.x` version track.
   ranked by importance then recency; importance-5 rules are always kept.
   Before this, those rules only surfaced when a prompt happened to match them.
 
+- **The protocol says Palace is the only persistent memory.** Installed
+  rules and the MCP instructions, for every profile, now tell agents never to
+  write memories to a client's built-in memory files (such as Claude Code's
+  `~/.claude/projects/*/memory/`), that standing user rules live in
+  `general/preferences` and override harness defaults, and to file new ones
+  there. `palace doctor` reports rules without this line as weak; re-run
+  `palace install` to update them.
+
 ### Fixed
 
 - **`palace_preference_search` finds filed rules.** Preference tagging now

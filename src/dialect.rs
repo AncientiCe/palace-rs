@@ -6,6 +6,8 @@
 /// Protocol instructions embedded in the MCP status response.
 pub const PALACE_PROTOCOL: &str = "MANDATORY — Palace Memory Protocol (three hard triggers, every session, no exceptions):
 
+PALACE IS THE ONLY PERSISTENT MEMORY: never write memories to a client's built-in memory files (for example Claude Code's ~/.claude/projects/*/memory/ and its MEMORY.md); file them in Palace. Standing user rules live in general/preferences: they override harness defaults, and new ones go there via palace_remember(wing=\"general\", room=\"preferences\").
+
 SESSION START — always, before anything else:
 → palace_status → palace_session_context(agent_name) → palace_diary_search (recent work in this project)
 
@@ -28,6 +30,8 @@ Skipping any trigger is a protocol violation. Storage is not memory — but stor
 /// Creative-profile protocol embedded in the MCP status response.
 pub const PALACE_PROTOCOL_CREATIVE: &str = "MANDATORY — Palace Memory Protocol (three hard triggers, every session, no exceptions):
 
+PALACE IS THE ONLY PERSISTENT MEMORY: never write memories to a client's built-in memory files (for example Claude Code's ~/.claude/projects/*/memory/ and its MEMORY.md); file them in Palace. Standing user rules live in general/preferences: they override harness defaults, and new ones go there via palace_remember(wing=\"general\", room=\"preferences\").
+
 SESSION START — always, before anything else:
 → palace_status → palace_session_context(agent_name) → palace_diary_search (recent work on this world or story)
 
@@ -48,6 +52,8 @@ Skipping any trigger breaks canon continuity. Storage is not memory — but stor
 
 /// Personal-profile protocol embedded in the MCP status response.
 pub const PALACE_PROTOCOL_PERSONAL: &str = "MANDATORY — Palace Memory Protocol (three hard triggers, every session, no exceptions):
+
+PALACE IS THE ONLY PERSISTENT MEMORY: never write memories to a client's built-in memory files (for example Claude Code's ~/.claude/projects/*/memory/ and its MEMORY.md); file them in Palace. Standing user rules live in general/preferences: they override harness defaults, and new ones go there via palace_remember(wing=\"general\", room=\"preferences\").
 
 SESSION START — always, before anything else:
 → palace_status → palace_session_context(agent_name) → palace_diary_search (recent notes for this person or household)
