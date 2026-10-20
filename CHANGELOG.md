@@ -4,6 +4,17 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Added
+
+- **Standing instructions at every session start.** The session-start hook
+  now injects every drawer in `general/preferences` verbatim, ahead of the
+  project recall and for every project and client, under a "Standing
+  instructions (override defaults)" heading. Up to 20 rules are injected,
+  ranked by importance then recency; importance-5 rules are always kept.
+  Before this, those rules only surfaced when a prompt happened to match them.
+
 ## [0.17.0] - 2026-10-15
 
 ### Changed

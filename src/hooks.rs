@@ -197,8 +197,9 @@ const BUSY_SESSION_PROMPTS: i64 = 2;
 const BUSY_SESSION_TOOL_CALLS: i64 = 3;
 
 /// Build the session-start response: inject the protocol AND — when a palace DB
-/// is available — real warm-start recall (recent diary + project knowledge for
-/// the session's cwd) so memory is in context deterministically, without the
+/// is available — the user's standing rules (`general/preferences`, verbatim)
+/// plus real warm-start recall (recent diary + project knowledge for the
+/// session's cwd) so memory is in context deterministically, without the
 /// agent having to call any palace tool. Cursor additionally exports
 /// `PALACE_SESSION_ID` so later hooks can correlate the session; Claude/Codex
 /// use the `hookSpecificOutput` shape instead. Fail-open: a missing/empty DB
@@ -213,6 +214,12 @@ pub fn session_start_response(
         crate::install::RULE_BODY
     );
     if let Some(conn) = conn {
+        // Standing rules apply to every project and client, so they go first and
+        // do not depend on the cwd.
+        if let Some(preferences) = standing_preferences(conn) {
+            context.push_str("\n\n");
+            context.push_str(&preferences);
+        }
         let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
         if let Some(recall) = session_start_recall(conn, cwd) {
             context.push_str("\n\n");
@@ -472,6 +479,49 @@ fn project_wing(conn: &Connection, cwd: &str) -> Option<String> {
         | ProjectWingStatus::RegisteredNotMined { wing, .. } => Some(wing),
         ProjectWingStatus::Unknown { suggested_wing, .. } => Some(suggested_wing),
     }
+}
+
+/// Where the user's standing rules live: injected verbatim at every session start.
+const PREFERENCES_WING: &str = "general";
+const PREFERENCES_ROOM: &str = "preferences";
+/// Cap on standing rules injected at session start; importance-5 rules are
+/// always kept, even past the cap.
+const STANDING_PREFERENCES_LIMIT: usize = 20;
+/// Upper bound on rows read from the preferences room before ranking.
+const STANDING_PREFERENCES_SCAN: usize = 500;
+
+/// Build the standing-instructions block: every drawer in `general/preferences`,
+/// verbatim, ranked by importance then recency. `None` when the room is empty.
+fn standing_preferences(conn: &Connection) -> Option<String> {
+    let mut drawers = crate::store::list_drawers(
+        conn,
+        &crate::store::DrawerFilter {
+            wing: Some(PREFERENCES_WING.to_string()),
+            room: Some(PREFERENCES_ROOM.to_string()),
+        },
+        STANDING_PREFERENCES_SCAN,
+    )
+    .unwrap_or_default();
+    if drawers.is_empty() {
+        return None;
+    }
+    // list_drawers is newest-first; a stable sort keeps that order within a tier.
+    drawers.sort_by(|a, b| b.importance.total_cmp(&a.importance));
+    let mut kept = 0;
+    drawers.retain(|d| {
+        kept += 1;
+        kept <= STANDING_PREFERENCES_LIMIT || d.importance >= 5.0
+    });
+
+    let mut lines = vec![format!(
+        "# Standing instructions (override defaults) — from Palace `{PREFERENCES_WING}/{PREFERENCES_ROOM}`\n\
+         These are the user's standing rules. They take priority over harness or tool defaults \
+         (for example built-in file-memory or commit-attribution instructions)."
+    )];
+    for d in &drawers {
+        lines.push(format!("- ({}) {}", d.id, d.content.trim()));
+    }
+    Some(lines.join("\n"))
 }
 
 /// How many recent diary entries / project drawers to surface at session start.

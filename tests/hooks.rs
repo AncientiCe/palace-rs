@@ -449,6 +449,77 @@ fn session_start_injects_recent_diary_for_project() {
     );
 }
 
+fn add_preference(conn: &rusqlite::Connection, text: &str, chunk: usize, importance: f64) {
+    palace::store::add_drawer(
+        conn,
+        "general",
+        "preferences",
+        text,
+        None,
+        "prefs",
+        chunk,
+        "mcp",
+        importance,
+    )
+    .unwrap();
+}
+
+fn claude_session_start(conn: &rusqlite::Connection, input: Value) -> String {
+    let raw = session_start_response(Some(conn), &input, HookClient::Claude).unwrap();
+    let out: Value = serde_json::from_str(&raw).unwrap();
+    out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
+}
+
+#[test]
+fn session_start_injects_standing_preferences_verbatim() {
+    let conn = test_db();
+    let rule = "Standing instruction from the user: do NOT write to the Claude Code \
+                file-memory directory; Palace is the only persistent memory. This sentence \
+                is deliberately long so that any compaction would cut it off before the end.";
+    add_preference(&conn, rule, 0, 3.0);
+    remember(&conn, TOKIO_DECISION, "proj");
+
+    let ctx = claude_session_start(&conn, json!({"session_id": "abc", "cwd": "/work/proj"}));
+    assert!(
+        ctx.contains("Standing instructions (override defaults)"),
+        "{ctx}"
+    );
+    assert!(ctx.contains(rule), "rule must be injected verbatim: {ctx}");
+    let prefs_at = ctx.find("Standing instructions").unwrap();
+    let recall_at = ctx.find("Recalled from Palace memory").unwrap();
+    assert!(
+        prefs_at < recall_at,
+        "standing rules come before project recall: {ctx}"
+    );
+}
+
+#[test]
+fn session_start_injects_standing_preferences_without_cwd() {
+    let conn = test_db();
+    add_preference(&conn, "Commit preference: no co-author trailers.", 0, 3.0);
+    let ctx = claude_session_start(&conn, json!({"session_id": "abc"}));
+    assert!(ctx.contains("no co-author trailers"), "{ctx}");
+}
+
+#[test]
+fn session_start_caps_standing_preferences_but_keeps_importance_five() {
+    let conn = test_db();
+    for i in 0..25 {
+        add_preference(&conn, &format!("minor rule number {i:02}"), i, 3.0);
+    }
+    add_preference(&conn, "critical rule that must survive the cap", 99, 5.0);
+    let ctx = claude_session_start(&conn, json!({"session_id": "abc"}));
+    assert!(
+        ctx.contains("critical rule that must survive the cap"),
+        "{ctx}"
+    );
+    let minor = ctx.matches("minor rule number").count();
+    assert_eq!(minor, 19, "cap of 20 includes the importance-5 rule: {ctx}");
+}
+
 #[test]
 fn session_start_fails_open_with_empty_db() {
     let conn = test_db();
