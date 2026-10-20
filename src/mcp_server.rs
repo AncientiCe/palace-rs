@@ -1808,24 +1808,10 @@ fn tool_upgrade_embeddings(conn: &Connection, args: &Value) -> Value {
         match crate::embedder::embed_one(content) {
             Ok(emb) => {
                 let bytes = crate::embedder::vec_to_blob(&emb);
-                let pref_bytes = if refresh_preferences {
-                    crate::preference::preference_span(content)
-                        .and_then(|span| crate::embedder::embed_one(&span).ok())
-                        .map(|embedding| crate::embedder::vec_to_blob(&embedding))
-                } else {
-                    None
-                };
-                let update = if refresh_preferences {
-                    conn.execute(
-                        "UPDATE drawers SET embedding = ?1, pref_embedding = ?2 WHERE id = ?3",
-                        rusqlite::params![bytes, pref_bytes, id],
-                    )
-                } else {
-                    conn.execute(
-                        "UPDATE drawers SET embedding = ?1 WHERE id = ?2",
-                        rusqlite::params![bytes, id],
-                    )
-                };
+                let update = conn.execute(
+                    "UPDATE drawers SET embedding = ?1 WHERE id = ?2",
+                    rusqlite::params![bytes, id],
+                );
                 match update {
                     Ok(_) => reembedded += 1,
                     Err(_) => errors += 1,
@@ -1834,11 +1820,20 @@ fn tool_upgrade_embeddings(conn: &Connection, args: &Value) -> Value {
             Err(_) => errors += 1,
         }
     }
+    let preferences_refreshed = if refresh_preferences {
+        match crate::store::refresh_preference_tags(conn, true) {
+            Ok(count) => count,
+            Err(e) => return json!({"error": e.to_string()}),
+        }
+    } else {
+        0
+    };
     json!({
         "reembedded": reembedded,
         "errors": errors,
         "total": ids_and_content.len(),
         "refresh_preferences": refresh_preferences,
+        "preferences_refreshed": preferences_refreshed,
     })
 }
 

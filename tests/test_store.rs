@@ -810,3 +810,164 @@ fn backfill_registers_existing_wings_with_inferred_kind() {
     let again = palace::migrate::backfill_wings_registry(&conn).unwrap();
     assert_eq!(again, 0);
 }
+
+// ── source-aware preference tagging ───────────────────────────────────────
+
+const MEMORY_RULE: &str = "Standing instruction from Ionut Riza: use ONLY Palace for persistent \
+     memory. Do NOT write to the Claude Code file-memory directory.";
+
+fn pref_embedding_is_set(conn: &Connection, id: &str) -> bool {
+    conn.query_row(
+        "SELECT pref_embedding IS NOT NULL FROM drawers WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn mined_code_is_not_tagged_on_phrase_matches() {
+    let conn = open_test_db();
+    let chunks = vec![(
+        "// Always use the facade. I prefer this; never use raw SQL.".to_string(),
+        0usize,
+        vec![0.1f32; 384],
+    )];
+    replace_file_drawers(
+        &conn,
+        "proj",
+        "src",
+        "/repo/src/db.rs",
+        "hash",
+        &chunks,
+        "palace",
+        3.0,
+    )
+    .unwrap();
+    let drawer = &list_drawers(&conn, &DrawerFilter::default(), 1).unwrap()[0];
+    assert!(drawer.metadata.get("preference").is_none(), "{drawer:?}");
+    assert!(!pref_embedding_is_set(&conn, &drawer.id));
+}
+
+#[test]
+fn refresh_treats_miner_recorded_files_as_code_whatever_the_extension() {
+    let conn = open_test_db();
+    let chunks = vec![(
+        "Agents: never use default exports. I want named ones.".to_string(),
+        0usize,
+        vec![0.1f32; 384],
+    )];
+    replace_file_drawers(
+        &conn,
+        "proj",
+        "docs",
+        "/repo/AGENTS.md",
+        "hash",
+        &chunks,
+        "palace",
+        3.0,
+    )
+    .unwrap();
+    let id = list_drawers(&conn, &DrawerFilter::default(), 1).unwrap()[0]
+        .id
+        .clone();
+    conn.execute(
+        "UPDATE drawers SET metadata = '{\"preference\":true}', pref_embedding = embedding",
+        [],
+    )
+    .unwrap();
+    assert_eq!(refresh_preference_tags(&conn, false).unwrap(), 1);
+    assert!(!pref_embedding_is_set(&conn, &id));
+}
+
+#[test]
+fn scoped_preference_search_finds_third_person_rules() {
+    let conn = open_test_db();
+    let config = palace::config::PalaceConfig::new();
+    let filed = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &serde_json::json!({"text": MEMORY_RULE, "wing": "general", "room": "preferences"}),
+    );
+    let rule_id = filed["id"]
+        .as_str()
+        .expect("remember returns an id")
+        .to_string();
+    assert!(pref_embedding_is_set(&conn, &rule_id));
+    palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &serde_json::json!({
+            "text": "Editor preference from Ionut Riza: dark theme, 4-space indentation.",
+            "wing": "general",
+            "room": "preferences"
+        }),
+    );
+
+    let found = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_preference_search",
+        &serde_json::json!({
+            "wing": "general",
+            "query": "which memory system should I use for persistent memory"
+        }),
+    );
+    assert_eq!(found["results"][0]["id"], rule_id.as_str(), "{found}");
+}
+
+#[test]
+fn refresh_preference_tags_retags_existing_drawers() {
+    let conn = open_test_db();
+    let embedding = vec![0.1f32; 384];
+    // A mined code chunk tagged under the old rules, and a third-person rule
+    // filed before the room counted.
+    let (_, code_id) = add_drawer(
+        &conn,
+        "proj",
+        "src",
+        "fn helper() {} // i prefer this",
+        Some(&embedding),
+        "/repo/src/lib.rs",
+        0,
+        "palace",
+        3.0,
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE drawers SET metadata = '{\"preference\":true}', pref_embedding = embedding
+         WHERE id = ?1",
+        [&code_id],
+    )
+    .unwrap();
+    let (_, rule_id) = add_drawer(
+        &conn,
+        "general",
+        "preferences",
+        MEMORY_RULE,
+        Some(&embedding),
+        "palace_remember/x",
+        0,
+        "mcp",
+        5.0,
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE drawers SET metadata = '{}', pref_embedding = NULL WHERE id = ?1",
+        [&rule_id],
+    )
+    .unwrap();
+
+    assert_eq!(refresh_preference_tags(&conn, false).unwrap(), 2);
+    assert!(!pref_embedding_is_set(&conn, &code_id));
+    assert!(pref_embedding_is_set(&conn, &rule_id));
+    let rule = get_drawer(&conn, &rule_id).unwrap().unwrap();
+    assert_eq!(rule.metadata["preference"], true);
+    assert_eq!(
+        refresh_preference_tags(&conn, false).unwrap(),
+        0,
+        "idempotent"
+    );
+}

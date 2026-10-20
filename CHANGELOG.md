@@ -15,6 +15,18 @@ This Rust implementation uses its own `0.x` version track.
   ranked by importance then recency; importance-5 rules are always kept.
   Before this, those rules only surfaced when a prompt happened to match them.
 
+### Fixed
+
+- **`palace_preference_search` finds filed rules.** Preference tagging now
+  depends on where a drawer came from. Anything filed into a `preferences`
+  room is a preference whatever its wording; agent-filed drawers also match
+  third-person and imperative rules ("Standing instruction from ...", "do
+  not use", "must never"); mined project files are never tagged, so code that
+  happens to say "always use" no longer crowds the results; mined
+  conversations keep first-person matching. Existing drawers are re-tagged
+  once when the palace is first opened by this version.
+  `upgrade-embeddings --refresh-preferences` uses the same rules.
+
 ## [0.17.0] - 2026-10-15
 
 ### Changed

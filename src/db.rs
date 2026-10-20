@@ -3,7 +3,7 @@
 //! Single palace.db file replaces both ChromaDB (drawers) and SQLite KG (triples).
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
 
 /// Open (or create) the palace SQLite database with WAL mode enabled.
@@ -245,6 +245,11 @@ fn migrate(conn: &Connection) -> Result<()> {
 
     crate::migrate::backfill_wings_registry(conn)
         .context("backfilling wings registry from existing drawers")?;
+    // Fail open: a busy or locked palace must not stop it from opening. The
+    // version stays unrecorded, so the next open retries.
+    if let Err(err) = retag_preferences_if_stale(conn) {
+        tracing::warn!(error = %err, "palace: could not re-tag preference drawers");
+    }
 
     conn.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)
@@ -252,6 +257,31 @@ fn migrate(conn: &Connection) -> Result<()> {
         params!["schema_version", "1"],
     )
     .context("recording schema version")?;
+    Ok(())
+}
+
+/// Re-tag drawers once whenever the preference-tagging rules change.
+fn retag_preferences_if_stale(conn: &Connection) -> Result<()> {
+    const KEY: &str = "preference_tagging_version";
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if current.as_deref() == Some(crate::store::PREFERENCE_TAGGING_VERSION) {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    crate::store::refresh_preference_tags(&tx, false).context("re-tagging preference drawers")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![KEY, crate::store::PREFERENCE_TAGGING_VERSION],
+    )
+    .context("recording preference tagging version")?;
+    tx.commit()?;
     Ok(())
 }
 

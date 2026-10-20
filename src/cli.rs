@@ -787,24 +787,10 @@ pub fn run() -> Result<()> {
                 match crate::embedder::embed_one(content) {
                     Ok(emb) => {
                         let bytes = crate::embedder::vec_to_blob(&emb);
-                        let pref_bytes = if refresh_preferences {
-                            crate::preference::preference_span(content)
-                                .and_then(|span| crate::embedder::embed_one(&span).ok())
-                                .map(|embedding| crate::embedder::vec_to_blob(&embedding))
-                        } else {
-                            None
-                        };
-                        let update = if refresh_preferences {
-                            conn.execute(
-                                "UPDATE drawers SET embedding = ?1, pref_embedding = ?2 WHERE id = ?3",
-                                rusqlite::params![bytes, pref_bytes, id],
-                            )
-                        } else {
-                            conn.execute(
-                                "UPDATE drawers SET embedding = ?1 WHERE id = ?2",
-                                rusqlite::params![bytes, id],
-                            )
-                        };
+                        let update = conn.execute(
+                            "UPDATE drawers SET embedding = ?1 WHERE id = ?2",
+                            rusqlite::params![bytes, id],
+                        );
                         if update.is_ok() {
                             reembedded += 1;
                         } else {
@@ -815,6 +801,10 @@ pub fn run() -> Result<()> {
                 }
             }
             println!("  Re-embedded {reembedded}/{total} drawer(s). Errors: {errors}.");
+            if refresh_preferences {
+                let refreshed = crate::store::refresh_preference_tags(&conn, true)?;
+                println!("  Refreshed {refreshed} preference tag(s).");
+            }
         }
 
         Commands::Timeline { entity } => {

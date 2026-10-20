@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::embedder::{blob_to_vec, cosine_similarity, vec_to_blob};
+use crate::preference::PreferenceSource;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Drawer {
@@ -73,9 +74,36 @@ pub fn add_drawer(
     added_by: &str,
     importance: f64,
 ) -> Result<(bool, String)> {
+    insert_drawer(
+        conn,
+        wing,
+        room,
+        content,
+        embedding,
+        source_file,
+        chunk_index,
+        added_by,
+        importance,
+        PreferenceSource::infer(source_file),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_drawer(
+    conn: &Connection,
+    wing: &str,
+    room: &str,
+    content: &str,
+    embedding: Option<&[f32]>,
+    source_file: &str,
+    chunk_index: usize,
+    added_by: &str,
+    importance: f64,
+    source: PreferenceSource,
+) -> Result<(bool, String)> {
     let id = drawer_id(wing, room, source_file, chunk_index);
     let blob = embedding.map(vec_to_blob);
-    let preference_span = crate::preference::preference_span(content);
+    let preference_span = crate::preference::drawer_preference_span(content, room, source);
     let pref_blob = preference_embedding_blob(preference_span.as_deref(), embedding);
     let filed_at = Utc::now().to_rfc3339();
     let entity_metadata = crate::entity_detector::entity_metadata(content);
@@ -132,7 +160,11 @@ pub fn add_drawer_with_id(
     extra_meta: Option<&serde_json::Value>,
 ) -> Result<bool> {
     let blob = embedding.map(vec_to_blob);
-    let preference_span = crate::preference::preference_span(content);
+    let preference_span = crate::preference::drawer_preference_span(
+        content,
+        room,
+        PreferenceSource::infer(source_file),
+    );
     let pref_blob = preference_embedding_blob(preference_span.as_deref(), embedding);
     let filed_at = Utc::now().to_rfc3339();
     let metadata = metadata_for_content(extra_meta, preference_span.as_deref());
@@ -189,11 +221,16 @@ pub fn update_drawer_content(conn: &Connection, id: &str, content: &str) -> Resu
     let hall = crate::hall_router::detect_hall(content);
     let embedding = crate::embedder::embed_one(content).ok();
     let blob = embedding.as_deref().map(vec_to_blob);
-    let preference_span = crate::preference::preference_span(content);
+    let current = get_drawer(conn, id).ok().flatten();
+    let preference_span = current.as_ref().and_then(|drawer| {
+        crate::preference::drawer_preference_span(
+            content,
+            &drawer.room,
+            stored_preference_source(conn, &drawer.source_file),
+        )
+    });
     let pref_blob = preference_embedding_blob(preference_span.as_deref(), embedding.as_deref());
-    let current_metadata = get_drawer(conn, id)
-        .ok()
-        .flatten()
+    let current_metadata = current
         .map(|drawer| drawer.metadata)
         .unwrap_or_else(|| serde_json::json!({}));
     let metadata_text = serde_json::to_string(&metadata_for_content(
@@ -391,7 +428,7 @@ pub fn replace_file_drawers(
         } else {
             Some(embedding.as_slice())
         };
-        let (inserted, _) = add_drawer(
+        let (inserted, _) = insert_drawer(
             conn,
             wing,
             room,
@@ -401,6 +438,7 @@ pub fn replace_file_drawers(
             *chunk_index,
             added_by,
             importance,
+            PreferenceSource::Code,
         )?;
         if inserted {
             added += 1;
@@ -953,6 +991,100 @@ fn preference_embedding_blob(
         .ok()
         .unwrap_or_else(|| fallback.to_vec());
     Some(vec_to_blob(&embedding))
+}
+
+/// The preference source of a stored drawer: a file the project miner
+/// recorded is code whatever its extension; otherwise infer from the path.
+fn stored_preference_source(conn: &Connection, source_file: &str) -> PreferenceSource {
+    let mined = conn
+        .query_row(
+            "SELECT 1 FROM mined_files WHERE source_file = ?1",
+            params![source_file],
+            |_| Ok(()),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .is_some();
+    if mined {
+        PreferenceSource::Code
+    } else {
+        PreferenceSource::infer(source_file)
+    }
+}
+
+/// Bump when the preference-tagging rules change, so `db::migrate` re-tags
+/// existing drawers once.
+pub const PREFERENCE_TAGGING_VERSION: &str = "2";
+
+/// Re-tag every drawer under the current preference rules: set or clear the
+/// `preference` metadata and `pref_embedding`. Only drawers whose tag changed
+/// are written, unless `reembed` is set, which also re-embeds every tagged
+/// span (after an embedding-model upgrade). Returns how many drawers changed.
+pub fn refresh_preference_tags(conn: &Connection, reembed: bool) -> Result<usize> {
+    let mut pending: Vec<(String, Option<String>, serde_json::Value)> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, room, source_file, content, metadata, pref_embedding IS NOT NULL,
+                    source_file IN (SELECT source_file FROM mined_files)
+             FROM drawers ORDER BY rowid",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let room: String = row.get(1)?;
+            let source_file: String = row.get(2)?;
+            let source = if row.get(6)? {
+                PreferenceSource::Code
+            } else {
+                PreferenceSource::infer(&source_file)
+            };
+            let content: String = row.get(3)?;
+            let metadata = parse_json_object(&row.get::<_, String>(4)?);
+            let has_pref_embedding: bool = row.get(5)?;
+            let span = crate::preference::drawer_preference_span(&content, &room, source);
+            let tagged = metadata.get("preference").and_then(|v| v.as_bool()) == Some(true);
+            let unchanged = match &span {
+                None => !tagged && !has_pref_embedding,
+                Some(span) => {
+                    !reembed
+                        && tagged
+                        && has_pref_embedding
+                        && metadata.get("preference_span").and_then(|v| v.as_str())
+                            == Some(span.as_str())
+                }
+            };
+            if !unchanged {
+                pending.push((row.get(0)?, span, metadata));
+            }
+        }
+    }
+
+    for (id, span, metadata) in &pending {
+        let pref_blob = match span {
+            Some(_) => {
+                let stored: Option<Vec<u8>> = conn
+                    .query_row(
+                        "SELECT embedding FROM drawers WHERE id = ?1",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                let fallback = stored.as_deref().map(blob_to_vec);
+                preference_embedding_blob(span.as_deref(), fallback.as_deref())
+            }
+            None => None,
+        };
+        let metadata_text =
+            serde_json::to_string(&metadata_for_content(Some(metadata), span.as_deref()))
+                .unwrap_or_else(|_| "{}".to_string());
+        conn.execute(
+            "UPDATE drawers SET metadata = ?1, pref_embedding = ?2 WHERE id = ?3",
+            params![metadata_text, pref_blob, id],
+        )
+        .context("refreshing drawer preference tag")?;
+    }
+    Ok(pending.len())
 }
 
 /// Re-index BM25 terms for a drawer whose content just changed in place
