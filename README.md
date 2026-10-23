@@ -54,8 +54,8 @@ Palace fixes that by:
 
 - **Storing text verbatim.** Code, notes, and conversations are stored as
   written, not as an LLM summary that loses detail.
-- **Running locally.** Embeddings come from `all-MiniLM-L6-v2` on ONNX
-  Runtime, on your CPU. Nothing leaves your machine unless you turn on
+- **Running locally.** Embeddings come from `all-MiniLM-L6-v2` (or another
+  [supported model](#embedding-models)) on ONNX Runtime, on your CPU. Nothing leaves your machine unless you turn on
   [remote mode](#remote-mode-shared-team-memory).
 - **Recalling without being asked.** Hooks inject relevant memory when a
   session starts, when you send a prompt, and while the agent investigates.
@@ -204,6 +204,48 @@ classified as `preference`, `decision`, `how_to`, `definition`, `temporal`, or
 `unknown`. Preference-shaped questions ("how do I like my commits?") get a
 dedicated pass against tagged preference spans. A local cross-encoder
 reranker is available as an option (`--rerank` or `PALACE_RERANK=1`).
+
+### Embedding models
+
+Palace ships with `all-MiniLM-L6-v2` and can switch a palace to another
+local model. Every vector is rebuilt from the stored text, so switching never
+loses memory.
+
+| Model id | Model | Precision | Notes |
+|---|---|---|---|
+| `minilm-l6-v2` | all-MiniLM-L6-v2 | fp32 | Default |
+| `minilm-l6-v2-q8` | all-MiniLM-L6-v2 | int8 | About 2x faster indexing, same recall in the bake-off |
+| `bge-small` | bge-small-en-v1.5 | fp32 | Experimental, about 2.5x slower indexing |
+| `bge-small-q8` | bge-small-en-v1.5 | int8 | Experimental |
+| `bge-base-q8` | bge-base-en-v1.5 | int8 | Experimental, 768-dim |
+
+Experimental models scored below MiniLM on the coding-agent eval, though
+higher on probes from a real palace (see the
+[bake-off](#embedding-model-bake-off)). You can try them on your own palace:
+verification decides whether it switches.
+
+```bash
+palace embeddings list                       # models, which is active, which are downloaded
+palace embeddings estimate minilm-l6-v2-q8   # time, disk and latency, measured on this machine
+palace embeddings migrate minilm-l6-v2-q8    # build, verify, switch
+palace embeddings rollback                   # back to the previous model, instantly
+palace embeddings cleanup                    # drop the previous model's vectors
+```
+
+`migrate` builds the new vectors in batches while search keeps using the
+current model, so it is safe to interrupt and rerun. When the vectors are
+built, it checks the new model against the current one on 200 known-item
+probes taken from your palace (hybrid and vector-only recall@1/@5, plus query
+latency). It switches only if recall@5 drops by at most 0.01 and p95 query
+latency stays within budget. The budget is twice the current model's p95, and
+at least 25 ms. Run `palace embeddings cutover --force` to switch anyway, or
+`palace embeddings cancel` to keep the current model.
+
+Setting `embedding_model` in `config.json` (or `PALACE_EMBEDDING_MODEL`)
+picks the model for a new, empty palace. An existing palace never switches
+on its own. `palace status`, `palace_status`, and `palace_session_context`
+report the pending migration until you run `migrate`. In remote mode the
+server owns the model, so these commands run on the server.
 
 Agent-generated query dumps are cleaned up before retrieval. Results come back
 with score provenance (`combined`, `cosine`, `bm25`, `coding_boost`,
@@ -419,7 +461,8 @@ Run `palace <command> --help` for every flag.
 | `palace export` / `palace import <file>` | Back up or restore drawers as JSON (embeddings are rebuilt on import) |
 | `palace prune --older-than-days <n>` | Delete old drawers (`--dry-run` to preview) |
 | `palace repair` | Re-embed drawers that are missing vectors |
-| `palace upgrade-embeddings` | Re-embed everything (`--refresh-preferences` for preference spans) |
+| `palace upgrade-embeddings` | Re-embed everything with the active model (`--refresh-preferences` for preference spans) |
+| `palace embeddings …` | List, estimate, migrate to, verify, cut over to, or roll back [embedding models](#embedding-models) |
 | `palace migrate <db>` | Copy drawers from another palace database |
 | `palace compress` | Compress drawers to the AAAK dialect |
 
@@ -495,7 +538,7 @@ to turn recording off.
 ## 🧩 MCP tools
 
 <details>
-<summary>All 49 tools</summary>
+<summary>All 50 tools</summary>
 
 **Status and health**
 
@@ -540,6 +583,7 @@ to turn recording off.
 | `palace_prune` | Remove stale or low-value drawers |
 | `palace_export` / `palace_import` | Export or import palace data |
 | `palace_upgrade_embeddings` | Re-embed drawers and refresh preference vectors |
+| `palace_embeddings` | List models, estimate, and migrate to another embedding model in the background |
 
 **Knowledge graph**
 
@@ -602,12 +646,16 @@ Settings load in this order: environment variables, then
 | `PALACE_SOURCE_DIR` | `~/Desktop/transcripts` | Default source for `palace split` |
 | `PALACE_MINE_TRACE` | off | `1` prints per-stage mining timings |
 | `PALACE_MCP_MODE` | `local` | `local` or `remote` |
+| `PALACE_EMBEDDING_MODEL` | `minilm-l6-v2` | Embedding model for new palaces (see [embedding models](#embedding-models)) |
+| `PALACE_EMBEDDING_LATENCY_BUDGET_MS` | 2x current p95 | Query-latency budget for `palace embeddings verify` |
+| `PALACE_EMBED_THREADS` | all cores | ONNX threads used for embedding |
 | `PALACE_REMOTE_ENDPOINT` | none | Palace Server URL (host, base URL, or full `/mcp` URL) |
 | `PALACE_API_KEY` | none | Palace Server API key (`ps_…`) |
 
 `config.json` takes the same settings as keys: `palace_path`, `profile`,
 `entity_languages`, `topic_wings`, `people_map`, `mcp_mode`,
-`remote_endpoint`, `remote_api_key`. Palace writes this file with owner-only
+`remote_endpoint`, `remote_api_key`, `embedding_model`,
+`embedding_latency_budget_ms`. Palace writes this file with owner-only
 `0600` permissions.
 
 ### `palace.yaml` (per project)
@@ -648,6 +696,33 @@ cargo test --test coding_agent_eval -- --nocapture
 The test reports `recall@1` and `recall@5`, and fails if retrieval drops below
 a fixed threshold. It answers the question that matters: can a coding agent
 find the right project context when it needs it?
+
+### Embedding model bake-off
+
+`tests/embedding_bakeoff.rs` scores every [embedding model](#embedding-models)
+on this eval with embedded drawers, and on 200 known-item probes from a real
+palace. It also measures indexing throughput and query latency. Each probe is
+an inner sentence of a drawer with about 30% of its words dropped.
+
+```bash
+PALACE_RUN_BAKEOFF=1 PALACE_BAKEOFF_DB=~/.palace/palace/palace.db \
+  cargo test --release --test embedding_bakeoff -- --nocapture
+```
+
+| Model | Coding eval R@1 / R@5 | Palace probes R@1 / R@5 | Indexing | Query p95 |
+|---|---:|---:|---:|---:|
+| `minilm-l6-v2` (default) | 0.902 / 1.000 | 0.850 / 0.970 | 112 drawers/s | 2.3 ms |
+| `minilm-l6-v2-q8` | **0.922** / 1.000 | 0.860 / 0.980 | **204 drawers/s** | 2.6 ms |
+| `bge-small` | 0.863 / 1.000 | 0.910 / 0.985 | 55 drawers/s | 7.2 ms |
+| `bge-small-q8` | 0.863 / 1.000 | 0.915 / 0.985 | 103 drawers/s | 5.5 ms |
+| `bge-base-q8` | 0.863 / 1.000 | **0.920 / 0.985** | 39 drawers/s | 11.0 ms |
+
+Hybrid recall, 400 drawers sampled from a 10,700-drawer palace, Windows,
+16 threads. BGE ranks best with a 0.5 cosine floor and an even cosine/BM25
+split, which its registry entry carries. A model ships as non-experimental
+only if it matches MiniLM on the coding-agent eval, so the BGE models stay
+experimental for now even though they win on real-palace probes. `verify`
+measures the same thing on your own palace before it switches.
 
 ### LongMemEval
 

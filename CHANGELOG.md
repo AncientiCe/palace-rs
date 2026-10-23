@@ -4,6 +4,56 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Added
+
+- **Switchable embedding models.** `palace embeddings` lists models,
+  estimates the cost of switching on this machine (download, time, disk,
+  query latency), and migrates a palace to another model:
+  `minilm-l6-v2-q8` (int8 MiniLM) and, as experimental, `bge-small`,
+  `bge-small-q8` and `bge-base-q8`. `migrate` builds the new vectors in
+  resumable batches while search keeps using the current model, verifies
+  the new model on 200 known-item probes from the palace, and switches only
+  if recall@5 drops by at most 0.01 and p95 query latency stays within
+  budget. The old vectors stay until `cleanup`, so `rollback` is instant
+  and byte-identical. The MCP tool `palace_embeddings` does the same, with
+  `migrate` running in the background of the server.
+- **`embedding_model` setting** (`PALACE_EMBEDDING_MODEL`): the model a new
+  palace starts on. Existing palaces never switch on their own;
+  `palace status`, `palace_status` and `palace_session_context` report the
+  pending migration instead. `embedding_latency_budget_ms`
+  (`PALACE_EMBEDDING_LATENCY_BUDGET_MS`) sets the verify latency budget, and
+  `PALACE_EMBED_THREADS` caps ONNX threads.
+- **Embedding bake-off** (`tests/embedding_bakeoff.rs`, opt-in with
+  `PALACE_RUN_BAKEOFF=1`): recall and speed per model on the coding-agent
+  eval and on probes from a real palace, plus a ranking-weight grid with
+  `PALACE_BAKEOFF_TUNE=1`. Measured on a 10,700-drawer palace:
+
+  | Model | Coding eval R@1 | Palace probes R@1 | Indexing | Query p95 |
+  |---|---:|---:|---:|---:|
+  | `minilm-l6-v2` | 0.902 | 0.850 | 112 drawers/s | 2.3 ms |
+  | `minilm-l6-v2-q8` | 0.922 | 0.860 | 204 drawers/s | 2.6 ms |
+  | `bge-small` | 0.863 | 0.910 | 55 drawers/s | 7.2 ms |
+  | `bge-small-q8` | 0.863 | 0.915 | 103 drawers/s | 5.5 ms |
+  | `bge-base-q8` | 0.863 | 0.920 | 39 drawers/s | 11.0 ms |
+
+### Changed
+
+- **Batch embedding is 3-4x faster.** Batches padded every text to the
+  longest one and ran slower than one-at-a-time embedding (29 vs 90
+  drawers/s). Texts are now sorted by length and run 8 at a time: 107-115
+  drawers/s with MiniLM. `repair`, `upgrade-embeddings` and `import` embed in
+  batches and write each batch in one transaction.
+- **The palace records its embedding model** in `meta.active_embedding_model`.
+  Existing palaces are marked `minilm-l6-v2` on first open; no vector is
+  rewritten. Stored vectors of another length are skipped by search instead
+  of being compared, so a mismatch degrades to keyword search.
+- **Library API:** `embedder::embed_query` and `embed_documents` replace
+  `embed_one` and `embed_batch`, which remain as deprecated wrappers.
+  Query embedding adds the model's instruction prefix (BGE).
+  `palace doctor` and `palace_verify` report the active model.
+
 ## [0.17.1] - 2026-10-20
 
 ### Added
