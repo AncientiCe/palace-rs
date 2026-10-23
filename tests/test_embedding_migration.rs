@@ -347,3 +347,41 @@ fn starting_a_migration_to_the_active_model_fails() {
     assert!(migration::start(&conn, embedding_models::DEFAULT_MODEL_ID).is_err());
     assert!(migration::start(&conn, "no-such-model").is_err());
 }
+
+#[test]
+fn preference_vectors_follow_the_stored_span() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let conn = seeded_palace(&dir);
+    migration::start(&conn, TARGET).unwrap();
+    backfill(&conn);
+    let pref_id: String = conn
+        .query_row(
+            "SELECT id FROM drawers WHERE pref_embedding IS NOT NULL LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the seeded palace has a preference drawer");
+    let stored = |conn: &Connection| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM embedding_vectors WHERE owner_kind = 'pref' AND owner_id = ?1",
+            [&pref_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(stored(&conn), 1);
+
+    conn.execute(
+        "UPDATE drawers SET metadata = json_set(metadata, '$.preference_span', 'a re-tagged span')
+         WHERE id = ?1",
+        [&pref_id],
+    )
+    .unwrap();
+    assert_eq!(
+        stored(&conn),
+        0,
+        "re-tagging drops the stale preference vector"
+    );
+    assert_eq!(backfill(&conn), 1, "and the backfill rebuilds it");
+}

@@ -254,6 +254,11 @@ fn migrate(conn: &Connection) -> Result<()> {
             DELETE FROM embedding_vectors
             WHERE owner_kind IN ('drawer', 'pref') AND owner_id = NEW.id;
         END;
+        -- Re-tagging can change a preference span without touching content.
+        CREATE TRIGGER IF NOT EXISTS trg_drawers_metadata_pref_vectors
+        AFTER UPDATE OF metadata ON drawers WHEN NEW.metadata IS NOT OLD.metadata BEGIN
+            DELETE FROM embedding_vectors WHERE owner_kind = 'pref' AND owner_id = NEW.id;
+        END;
         CREATE TRIGGER IF NOT EXISTS trg_closets_delete_vectors
         AFTER DELETE ON closets BEGIN
             DELETE FROM embedding_vectors WHERE owner_kind = 'closet' AND owner_id = OLD.id;

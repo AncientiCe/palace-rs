@@ -95,8 +95,12 @@ impl OwnerKind {
                      WHERE v.owner_kind = 'drawer' AND v.owner_id = d.id AND v.model = ?1)
                  ORDER BY length(d.content) LIMIT ?2"
             }
+            // The span tagging stored in metadata, so the new vector covers
+            // the same text as the active one.
             OwnerKind::Pref => {
-                "SELECT d.id, d.content FROM drawers d
+                "SELECT d.id, COALESCE(CASE WHEN json_valid(d.metadata)
+                     THEN json_extract(d.metadata, '$.preference_span') END, d.content)
+                 FROM drawers d
                  WHERE d.pref_embedding IS NOT NULL AND NOT EXISTS (SELECT 1 FROM embedding_vectors v
                      WHERE v.owner_kind = 'pref' AND v.owner_id = d.id AND v.model = ?1)
                  ORDER BY length(d.content) LIMIT ?2"
@@ -107,14 +111,6 @@ impl OwnerKind {
                      WHERE v.owner_kind = 'closet' AND v.owner_id = c.id AND v.model = ?1)
                  ORDER BY length(c.topic) LIMIT ?2"
             }
-        }
-    }
-
-    /// Text that is embedded for an owner, given the column `missing_sql` returns.
-    fn embed_text(self, text: String) -> String {
-        match self {
-            OwnerKind::Pref => crate::preference::preference_span(&text).unwrap_or(text),
-            OwnerKind::Drawer | OwnerKind::Closet => text,
         }
     }
 }
@@ -316,10 +312,7 @@ fn write_vectors(
     kind: OwnerKind,
     rows: Vec<(String, String)>,
 ) -> Result<u64> {
-    let (ids, texts): (Vec<String>, Vec<String>) = rows
-        .into_iter()
-        .map(|(id, text)| (id, kind.embed_text(text)))
-        .unzip();
+    let (ids, texts): (Vec<String>, Vec<String>) = rows.into_iter().unzip();
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
     let vectors = crate::embedder::embed_documents_with(spec, &refs)
         .with_context(|| format!("embedding {} vectors with {}", kind.as_str(), spec.id))?;
