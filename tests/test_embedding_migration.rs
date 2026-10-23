@@ -9,7 +9,6 @@ use palace::ranker::hybrid_search;
 use palace::store::{add_drawer, DrawerFilter};
 use rusqlite::Connection;
 use std::sync::Mutex;
-use std::time::Duration;
 
 const TARGET: &str = "minilm-l6-v2-q8";
 
@@ -73,7 +72,7 @@ fn stored_rows(conn: &Connection, model: &str) -> i64 {
 
 fn backfill(conn: &Connection) -> u64 {
     let spec = embedding_models::find(TARGET).unwrap();
-    migration::backfill(conn, spec, Duration::ZERO, &mut |_| {}).expect("backfill")
+    migration::backfill(conn, spec, &mut |_| {}).expect("backfill")
 }
 
 fn ranked_ids(conn: &Connection, query: &str) -> Vec<(String, f64)> {
@@ -160,7 +159,7 @@ fn interrupted_backfill_resumes_without_duplicates() {
     let spec = migration::start(&conn, TARGET).unwrap();
 
     let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        migration::backfill(&conn, spec, Duration::ZERO, &mut |written| {
+        migration::backfill(&conn, spec, &mut |written| {
             if written >= 32 {
                 panic!("simulated interruption");
             }

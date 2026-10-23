@@ -1128,7 +1128,6 @@ fn handle_embeddings(config: &PalaceConfig, action: EmbeddingsAction) -> Result<
             let remaining = total.total() - total.done();
             let report = migration::run(
                 &conn,
-                std::time::Duration::ZERO,
                 config.embedding_latency_budget_ms(),
                 !no_cutover,
                 force,

@@ -280,13 +280,11 @@ pub fn coverage(conn: &Connection, model: &str) -> Result<Coverage> {
 }
 
 /// Embed every owner that has no `spec` vector yet, one transaction per
-/// batch. Safe to interrupt and rerun: it only ever fills gaps. `pause`
-/// is slept between batches to leave CPU for search when run in the
-/// background. `progress` sees the number of vectors written so far.
+/// batch. Safe to interrupt and rerun: it only ever fills gaps. `progress`
+/// sees the number of vectors written so far.
 pub fn backfill(
     conn: &Connection,
     spec: &'static ModelSpec,
-    pause: Duration,
     progress: &mut dyn FnMut(u64),
 ) -> Result<u64> {
     let mut written = 0u64;
@@ -306,9 +304,6 @@ pub fn backfill(
             }
             written += write_vectors(conn, spec, kind, rows)?;
             progress(written);
-            if !pause.is_zero() {
-                std::thread::sleep(pause);
-            }
         }
     }
     Ok(written)
@@ -746,14 +741,13 @@ pub struct RunReport {
 /// verify.
 pub fn run(
     conn: &Connection,
-    pause: Duration,
     latency_budget_ms: Option<f64>,
     cutover_when_passed: bool,
     force: bool,
     progress: &mut dyn FnMut(u64),
 ) -> Result<RunReport> {
     let spec = target(conn)?.context("no migration in progress")?;
-    let written = backfill(conn, spec, pause, progress)?;
+    let written = backfill(conn, spec, progress)?;
     let verify = verify(conn, VERIFY_SAMPLE, latency_budget_ms)?;
     let switched = if cutover_when_passed && (verify.passed || force) {
         Some(cutover(conn, true)?)
@@ -820,12 +814,12 @@ fn switch_to(conn: &Connection, spec: &'static ModelSpec) -> Result<SwitchReport
     }
     // Fill gaps outside the write lock first; writes that land in between
     // are caught inside the transaction below.
-    let mut caught_up = backfill(conn, spec, Duration::ZERO, &mut |_| {})?;
+    let mut caught_up = backfill(conn, spec, &mut |_| {})?;
 
     let tx = conn
         .unchecked_transaction()
         .context("starting model switch")?;
-    caught_up += backfill(&tx, spec, Duration::ZERO, &mut |_| {})?;
+    caught_up += backfill(&tx, spec, &mut |_| {})?;
     if !coverage(&tx, spec.id)?.complete() {
         bail!("{} is missing vectors; rerun migrate", spec.id);
     }

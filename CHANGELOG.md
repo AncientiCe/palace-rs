@@ -17,8 +17,9 @@ This Rust implementation uses its own `0.x` version track.
   the new model on 200 known-item probes from the palace, and switches only
   if recall@5 drops by at most 0.01 and p95 query latency stays within
   budget. The old vectors stay until `cleanup`, so `rollback` is instant
-  and byte-identical. The MCP tool `palace_embeddings` does the same, with
-  `migrate` running in the background of the server.
+  and byte-identical. Migrations run only when you start them from the CLI;
+  the MCP tool `palace_embeddings` reports models and status but cannot
+  start, switch, or clean up a migration.
 - **`embedding_model` setting** (`PALACE_EMBEDDING_MODEL`): the model a new
   palace starts on. Existing palaces never switch on their own;
   `palace status`, `palace_status` and `palace_session_context` report the
