@@ -541,13 +541,59 @@ pub fn get_search_result_drawer(conn: &Connection, id: &str) -> Result<Option<Dr
 }
 
 /// Where drawer vectors are read from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VectorSource<'a> {
     /// `drawers.embedding`: the active model's vectors.
     Hot,
     /// `embedding_vectors` rows of one model (a migration target or an
     /// archived model).
     Stored(&'a str),
+    /// Vectors already read into memory with [`load_vectors`], for running
+    /// many searches without rescanning the table each time. The filter
+    /// given to [`load_vectors`] applies; the one passed to the search does not.
+    Loaded(&'a LoadedVectors),
+}
+
+/// Drawer vectors held in memory. See [`VectorSource::Loaded`].
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct LoadedVectors {
+    rows: Vec<(String, Vec<f32>)>,
+}
+
+impl LoadedVectors {
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// Read the `(drawer id, vector)` pairs of `source` that match `filter`.
+pub fn load_vectors(
+    conn: &Connection,
+    source: VectorSource,
+    filter: &DrawerFilter,
+) -> Result<LoadedVectors> {
+    if let VectorSource::Loaded(loaded) = source {
+        return Ok(loaded.clone());
+    }
+    let (sql, where_params) = vector_query(source, filter, "d.id");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params_from_iter(where_params.iter().map(|p| p.as_ref())),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    blob_to_vec(&r.get::<_, Vec<u8>>(1)?),
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("loading drawer vectors")?;
+    Ok(LoadedVectors { rows })
 }
 
 /// SQL selecting `columns` plus the vector column of `source` for drawers
@@ -576,7 +622,7 @@ fn vector_query(
                 where_params.len()
             )
         }
-        VectorSource::Hot => format!(
+        VectorSource::Hot | VectorSource::Loaded(_) => format!(
             "SELECT {columns}, d.embedding
              FROM drawers d WHERE d.embedding IS NOT NULL {extra} ORDER BY d.filed_at DESC"
         ),
@@ -606,6 +652,9 @@ pub fn vector_search_in(
     filter: &DrawerFilter,
     n_results: usize,
 ) -> Result<Vec<SearchResult>> {
+    if let VectorSource::Loaded(loaded) = source {
+        return search_loaded(conn, query_vec, loaded, n_results);
+    }
     let (sql, where_params) = vector_query(
         source,
         filter,
@@ -657,6 +706,38 @@ pub fn vector_search_in(
     });
     scored.truncate(n_results);
     Ok(scored)
+}
+
+/// Rank in-memory vectors, then read only the top drawers from SQLite.
+fn search_loaded(
+    conn: &Connection,
+    query_vec: &[f32],
+    loaded: &LoadedVectors,
+    n_results: usize,
+) -> Result<Vec<SearchResult>> {
+    let mut scored: Vec<(&str, f64)> = loaded
+        .rows
+        .iter()
+        .filter(|(_, vector)| vector.len() == query_vec.len())
+        .map(|(id, vector)| (id.as_str(), cosine_similarity(query_vec, vector) as f64))
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut results = Vec::with_capacity(n_results);
+    for (id, sim) in scored.into_iter().take(n_results) {
+        if let Some(drawer) = get_drawer(conn, id)? {
+            results.push(SearchResult {
+                id: drawer.id,
+                text: drawer.content,
+                wing: drawer.wing,
+                room: drawer.room,
+                source_file: drawer.source_file,
+                created_at: drawer.created_at,
+                filed_at: drawer.filed_at,
+                similarity: (sim * 1000.0).round() / 1000.0,
+            });
+        }
+    }
+    Ok(results)
 }
 
 /// Search drawers tagged as preferences, ranked by cosine similarity.

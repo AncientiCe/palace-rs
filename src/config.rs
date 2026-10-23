@@ -172,6 +172,11 @@ struct FileConfig {
     remote_api_key: Option<String>,
     /// Usage profile: "coding" (default), "creative", or "personal".
     profile: Option<String>,
+    /// Embedding model id (see `palace embeddings list`). New palaces start
+    /// on it; existing palaces switch only through `palace embeddings migrate`.
+    embedding_model: Option<String>,
+    /// Query-latency budget for `palace embeddings verify`, in milliseconds.
+    embedding_latency_budget_ms: Option<f64>,
 }
 
 /// Normalise a configured endpoint into the palace-server `/mcp` URL.
@@ -333,6 +338,35 @@ impl PalaceConfig {
             .as_deref()
             .and_then(Profile::parse)
             .unwrap_or_default()
+    }
+
+    /// Wanted embedding model id.
+    /// Priority: env `PALACE_EMBEDDING_MODEL` > config.json > none (the default model).
+    pub fn embedding_model(&self) -> Option<String> {
+        if let Ok(v) = std::env::var("PALACE_EMBEDDING_MODEL") {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_lowercase());
+            }
+        }
+        self.file_config
+            .embedding_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_lowercase)
+    }
+
+    /// Query-latency budget for embedding verification, in milliseconds.
+    /// Priority: env `PALACE_EMBEDDING_LATENCY_BUDGET_MS` > config.json > none.
+    pub fn embedding_latency_budget_ms(&self) -> Option<f64> {
+        if let Some(v) = std::env::var("PALACE_EMBEDDING_LATENCY_BUDGET_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+        {
+            return Some(v);
+        }
+        self.file_config.embedding_latency_budget_ms
     }
 
     /// Persist the usage profile into ~/.palace/config.json, preserving other keys.

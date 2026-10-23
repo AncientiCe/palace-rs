@@ -24,6 +24,8 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     )?;
 
     migrate(&conn)?;
+    let wanted = crate::config::PalaceConfig::new().embedding_model();
+    init_embedding_model(&conn, wanted.as_deref())?;
     Ok(conn)
 }
 
@@ -32,7 +34,19 @@ pub fn open_in_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     migrate(&conn)?;
+    init_embedding_model(&conn, None)?;
     Ok(conn)
+}
+
+/// Record the palace's embedding model if it has none, point the embedder
+/// at it, and warn when stored vectors do not fit it. A palace written by a
+/// newer release with an unknown model keeps working on BM25.
+fn init_embedding_model(conn: &Connection, wanted: Option<&str>) -> Result<()> {
+    crate::embedding_migration::ensure_active_model(conn, wanted)?;
+    if let Err(e) = crate::embedding_migration::sync_active_model(conn) {
+        tracing::warn!(error = %e, "Palace: cannot use this palace's embedding model");
+    }
+    crate::embedding_migration::check_vector_dimensions(conn)
 }
 
 /// Run schema migrations — idempotent, safe to call on every startup.
@@ -214,6 +228,40 @@ fn migrate(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_gain_feedback_query ON gain_feedback(query_id);
         CREATE INDEX IF NOT EXISTS idx_gain_feedback_drawer ON gain_feedback(drawer_id);
+
+        -- ── Embedding vectors of non-active models ──────────────────────────
+        -- The hot columns (drawers.embedding, drawers.pref_embedding,
+        -- closets.embedding) hold the active model's vectors. This table holds
+        -- a migration target's vectors while they are built and the previous
+        -- model's after cutover (see embedding_migration.rs). owner_kind is
+        -- 'drawer', 'pref' or 'closet'.
+        CREATE TABLE IF NOT EXISTS embedding_vectors (
+            owner_kind TEXT NOT NULL,
+            owner_id   TEXT NOT NULL,
+            model      TEXT NOT NULL,
+            vec        BLOB NOT NULL,
+            PRIMARY KEY (owner_kind, owner_id, model)
+        );
+        CREATE INDEX IF NOT EXISTS idx_embedding_vectors_model
+            ON embedding_vectors(model, owner_kind);
+        CREATE TRIGGER IF NOT EXISTS trg_drawers_delete_vectors
+        AFTER DELETE ON drawers BEGIN
+            DELETE FROM embedding_vectors
+            WHERE owner_kind IN ('drawer', 'pref') AND owner_id = OLD.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_drawers_content_vectors
+        AFTER UPDATE OF content ON drawers WHEN NEW.content IS NOT OLD.content BEGIN
+            DELETE FROM embedding_vectors
+            WHERE owner_kind IN ('drawer', 'pref') AND owner_id = NEW.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_closets_delete_vectors
+        AFTER DELETE ON closets BEGIN
+            DELETE FROM embedding_vectors WHERE owner_kind = 'closet' AND owner_id = OLD.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_closets_topic_vectors
+        AFTER UPDATE OF topic ON closets WHEN NEW.topic IS NOT OLD.topic BEGIN
+            DELETE FROM embedding_vectors WHERE owner_kind = 'closet' AND owner_id = NEW.id;
+        END;
         "#,
     )
     .context("running schema migrations")?;

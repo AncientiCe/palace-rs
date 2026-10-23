@@ -9,6 +9,7 @@ pub mod db;
 pub mod dialect;
 pub mod embedder;
 pub mod embedding_eval;
+pub mod embedding_migration;
 pub mod embedding_models;
 pub mod entity_detector;
 pub mod export;
