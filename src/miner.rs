@@ -931,6 +931,27 @@ pub fn status(conn: &Connection, palace_path: &Path) -> Result<()> {
     if unembedded > 0 {
         println!("  ║  ⚠ Missing embeddings: {unembedded:<34}║");
     }
+    println!(
+        "  ║  Model    : {:<42}║",
+        crate::embedder::active_model().id
+    );
+    let wanted = crate::config::PalaceConfig::new().embedding_model();
+    if let Ok(state) = crate::embedding_migration::status(conn, wanted.as_deref()) {
+        if let (Some(target), Some(coverage)) = (&state.target, &state.coverage) {
+            println!(
+                "  ║  Migrating: {:<42}║",
+                format!("{target} {:.0}% built", coverage.percent())
+            );
+        } else if state.migration_pending {
+            println!(
+                "  ║  ⚠ Migration pending: {:<33}║",
+                format!(
+                    "palace embeddings migrate {}",
+                    state.wanted.unwrap_or_default()
+                )
+            );
+        }
+    }
     println!("  ╠══════════════════════════════════════════════════════╣");
 
     let mut sorted_wings: Vec<(&String, &i64)> = wings.iter().collect();
