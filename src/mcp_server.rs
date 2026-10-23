@@ -244,6 +244,10 @@ pub fn dispatch_tool_with_usage(
 }
 
 pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args: &Value) -> Value {
+    // A cutover made by another process changes the palace's model; follow it.
+    if let Err(err) = crate::embedding_migration::sync_active_model(conn) {
+        warn!(error = %err, "Palace MCP: cannot use this palace's embedding model");
+    }
     match name {
         "palace_status" => tool_status(conn, config, args),
         "palace_list_wings" => tool_list_wings(conn),
@@ -279,7 +283,7 @@ pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args:
         "palace_diary_write" => tool_diary_write(conn, args),
         "palace_diary_read" => tool_diary_read(conn, args),
         "palace_diary_search" => tool_diary_search(conn, args),
-        "palace_session_context" => tool_session_context(conn, args),
+        "palace_session_context" => tool_session_context(conn, config, args),
         "palace_gain" => tool_gain(conn, args),
         "palace_verify" => tool_verify(conn, config),
         "palace_recall_check" => tool_recall_check(conn, args),
@@ -291,6 +295,7 @@ pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args:
         "palace_export" => tool_export(conn),
         "palace_import" => tool_import(conn, args),
         "palace_upgrade_embeddings" => tool_upgrade_embeddings(conn, args),
+        "palace_embeddings" => tool_embeddings(conn, config, args),
         "palace_prune" => tool_prune(conn, args),
         "palace_memory_report" => tool_memory_report(conn, config, args),
         _ => json!({"error": format!("Unknown tool: {name}")}),
@@ -356,7 +361,11 @@ fn tool_status(conn: &Connection, config: &PalaceConfig, args: &Value) -> Value 
         "wings": wings,
         "palace_path": config.palace_db_path().to_string_lossy(),
         "profile": config.profile().as_str(),
+        "embedding_model": crate::embedder::active_model().id,
     });
+    if let Some(notice) = embedding_notice(conn, config) {
+        response["embedding_migration"] = json!(notice);
+    }
     if verbose {
         let rooms = room_counts(conn, None)
             .unwrap_or_default()
@@ -1502,7 +1511,39 @@ pub(crate) fn recent_diary_drawers(
         .collect()
 }
 
-fn tool_session_context(conn: &Connection, args: &Value) -> Value {
+fn tool_session_context(conn: &Connection, config: &PalaceConfig, args: &Value) -> Value {
+    let mut response = session_context(conn, args);
+    if let (Some(notice), Some(object)) = (embedding_notice(conn, config), response.as_object_mut())
+    {
+        object.insert("embedding_notice".into(), json!(notice));
+    }
+    response
+}
+
+/// One line about a pending or running embedding migration, for status and
+/// session context. `None` when the configured model is the active one.
+fn embedding_notice(conn: &Connection, config: &PalaceConfig) -> Option<String> {
+    let wanted = config.embedding_model();
+    let status = crate::embedding_migration::status(conn, wanted.as_deref()).ok()?;
+    if let (Some(target), Some(coverage)) = (&status.target, &status.coverage) {
+        return Some(format!(
+            "migrating embeddings {} -> {target}: {:.0}% built; search uses {} until cutover",
+            status.active,
+            coverage.percent(),
+            status.active
+        ));
+    }
+    status.migration_pending.then(|| {
+        format!(
+            "migration pending: config wants embedding model {} but this palace uses {}; \
+             run `palace embeddings estimate {0}` then `palace embeddings migrate {0}`",
+            status.wanted.as_deref().unwrap_or_default(),
+            status.active
+        )
+    })
+}
+
+fn session_context(conn: &Connection, args: &Value) -> Value {
     let agent_name = match str_arg(args, "agent_name") {
         Some(n) => n,
         None => return json!({"error": "agent_name is required"}),
@@ -1824,6 +1865,122 @@ fn tool_upgrade_embeddings(conn: &Connection, args: &Value) -> Value {
         "refresh_preferences": refresh_preferences,
         "preferences_refreshed": preferences_refreshed,
     })
+}
+
+/// Background migration started from MCP, so a second `migrate` call reports
+/// progress instead of starting another worker.
+static MIGRATION_WORKER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Pause between backfill batches when migrating inside the MCP server, so
+/// searches served by the same process stay responsive.
+const MCP_BACKFILL_PAUSE: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// `palace_embeddings`: list models, estimate, migrate (in the background),
+/// and inspect or finish a migration.
+fn tool_embeddings(conn: &Connection, config: &PalaceConfig, args: &Value) -> Value {
+    use crate::embedding_migration as migration;
+    let action = str_arg(args, "action").unwrap_or_else(|| "status".to_string());
+    let model_arg = || -> Result<&'static crate::embedding_models::ModelSpec, Value> {
+        let id = str_arg(args, "model").ok_or_else(|| json!({"error": "model is required"}))?;
+        crate::embedding_models::find(&id).ok_or_else(|| {
+            json!({"error": format!(
+                "unknown model '{id}' (known: {})",
+                crate::embedding_models::ids()
+            )})
+        })
+    };
+    let to_json =
+        |result: Result<Value>| result.unwrap_or_else(|e| json!({"error": e.to_string()}));
+    let wanted = config.embedding_model();
+    if !matches!(action.as_str(), "list" | "status") {
+        if let Err(e) = migration::ensure_local(config) {
+            return json!({"error": e.to_string()});
+        }
+    }
+    match action.as_str() {
+        "list" => {
+            let active = crate::embedder::active_model().id;
+            let models: Vec<Value> = crate::embedding_models::MODELS
+                .iter()
+                .map(|spec| {
+                    json!({
+                        "id": spec.id,
+                        "name": spec.name,
+                        "precision": spec.precision,
+                        "dim": spec.dim,
+                        "download_bytes": spec.download_bytes,
+                        "cached": crate::embedding_models::is_cached(spec),
+                        "active": spec.id == active,
+                        "experimental": spec.experimental,
+                        "summary": spec.summary,
+                    })
+                })
+                .collect();
+            json!({"active": active, "models": models})
+        }
+        "status" => to_json(migration::status(conn, wanted.as_deref()).map(|status| {
+            json!({
+                "status": status,
+                "worker_running": MIGRATION_WORKER.load(std::sync::atomic::Ordering::SeqCst),
+            })
+        })),
+        "estimate" => match model_arg() {
+            Ok(spec) => to_json(migration::estimate(conn, spec).map(|e| json!(e))),
+            Err(e) => e,
+        },
+        "migrate" => {
+            let spec = match model_arg() {
+                Ok(spec) => spec,
+                Err(e) => return e,
+            };
+            if let Err(e) = migration::start(conn, spec.id) {
+                return json!({"error": e.to_string()});
+            }
+            if MIGRATION_WORKER.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return json!({"started": false, "target": spec.id, "note": "a migration worker is already running; check action=status"});
+            }
+            let db_path = config.palace_db_path();
+            let budget = config.embedding_latency_budget_ms();
+            let force = bool_arg(args, "force");
+            std::thread::spawn(move || {
+                let outcome = crate::db::open(&db_path).and_then(|conn| {
+                    migration::run(&conn, MCP_BACKFILL_PAUSE, budget, true, force, &mut |_| {})
+                });
+                match outcome {
+                    Ok(report) => tracing::info!(
+                        written = report.written,
+                        passed = report.verify.passed,
+                        switched = report.switched.is_some(),
+                        "Palace: embedding migration finished"
+                    ),
+                    Err(err) => warn!(error = %err, "Palace: embedding migration failed"),
+                }
+                MIGRATION_WORKER.store(false, std::sync::atomic::Ordering::SeqCst);
+            });
+            json!({
+                "started": true,
+                "target": spec.id,
+                "note": "Building vectors in the background; search keeps using the current model. \
+                         The palace switches only if verify passes. Check progress with action=status.",
+            })
+        }
+        "verify" => {
+            let sample = int_arg(args, "sample")
+                .map(|n| n.max(1) as usize)
+                .unwrap_or(migration::VERIFY_SAMPLE);
+            to_json(
+                migration::verify(conn, sample, config.embedding_latency_budget_ms())
+                    .map(|r| json!(r)),
+            )
+        }
+        "cutover" => to_json(migration::cutover(conn, bool_arg(args, "force")).map(|r| json!(r))),
+        "rollback" => to_json(migration::rollback(conn).map(|r| json!(r))),
+        "cleanup" => to_json(migration::cleanup(conn).map(|r| json!(r))),
+        "cancel" => to_json(migration::cancel(conn).map(|target| json!({"cancelled": target}))),
+        other => json!({"error": format!(
+            "unknown action '{other}' (list, status, estimate, migrate, verify, cutover, rollback, cleanup, cancel)"
+        )}),
+    }
 }
 
 /// Delete drawers that have not been accessed and were filed more than
@@ -2474,11 +2631,24 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_upgrade_embeddings",
-            "description": "Re-embed all drawers using the current embedding model. Run after upgrading the model to keep search quality consistent.",
+            "description": "Re-embed all drawers with the palace's active embedding model (batched). To switch models use palace_embeddings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "refresh_preferences": {"type": "boolean", "description": "Also refresh preference-span embeddings"}
+                }
+            }
+        },
+        {
+            "name": "palace_embeddings",
+            "description": "Embedding model management. action=list shows models; status shows the active model and any migration; estimate measures cost of switching to `model` on this machine; migrate rebuilds every vector for `model` in the background while search keeps working, verifies it on this palace, and switches only if it is at least as good; verify/cutover/rollback/cleanup/cancel run single steps.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "status", "estimate", "migrate", "verify", "cutover", "rollback", "cleanup", "cancel"], "description": "What to do (default: status)"},
+                    "model": {"type": "string", "description": "Model id for estimate/migrate (see action=list)"},
+                    "force": {"type": "boolean", "description": "cutover/migrate: switch even if verify failed"},
+                    "sample": {"type": "integer", "description": "verify: number of probes (default 200)"}
                 }
             }
         },

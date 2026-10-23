@@ -1069,3 +1069,114 @@ fn dispatch_tool_mine_still_works_without_a_progress_callback() {
     let result = palace::mcp_server::dispatch_tool(&conn, &config, "palace_mine", &args);
     assert_eq!(result["success"], true, "{result}");
 }
+
+// ── palace_embeddings ──────────────────────────────────────────────────────
+
+fn config_with(json: serde_json::Value) -> (tempfile::TempDir, palace::config::PalaceConfig) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.json"), json.to_string()).unwrap();
+    let config = palace::config::PalaceConfig::with_config_dir(Some(dir.path()));
+    (dir, config)
+}
+
+#[test]
+fn embeddings_list_marks_the_active_model() {
+    let conn = test_db();
+    let (_dir, config) = config_with(serde_json::json!({}));
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_embeddings",
+        &serde_json::json!({"action": "list"}),
+    );
+    let models = result["models"].as_array().expect("models array");
+    assert_eq!(models.len(), palace::embedding_models::MODELS.len());
+    let active: Vec<&str> = models
+        .iter()
+        .filter(|m| m["active"] == true)
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(active, vec![palace::embedding_models::DEFAULT_MODEL_ID]);
+}
+
+#[test]
+fn status_and_session_context_report_a_pending_migration() {
+    let conn = test_db();
+    let (_dir, config) = config_with(serde_json::json!({"embedding_model": "bge-small"}));
+    let status =
+        palace::mcp_server::dispatch_tool(&conn, &config, "palace_status", &serde_json::json!({}));
+    assert_eq!(
+        status["embedding_model"],
+        palace::embedding_models::DEFAULT_MODEL_ID
+    );
+    let notice = status["embedding_migration"].as_str().expect("notice");
+    assert!(notice.contains("migration pending"), "{notice}");
+
+    let context = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_session_context",
+        &serde_json::json!({"agent_name": "tester"}),
+    );
+    assert!(context["embedding_notice"]
+        .as_str()
+        .is_some_and(|n| n.contains("bge-small")));
+
+    let (_dir, plain) = config_with(serde_json::json!({}));
+    let status =
+        palace::mcp_server::dispatch_tool(&conn, &plain, "palace_status", &serde_json::json!({}));
+    assert!(status.get("embedding_migration").is_none());
+}
+
+#[test]
+fn embeddings_changes_are_refused_in_remote_mode() {
+    let conn = test_db();
+    let (_dir, config) = config_with(serde_json::json!({"mcp_mode": "remote"}));
+    if config.mcp_mode() != "remote" {
+        // PALACE_MCP_MODE in the environment overrides config.json.
+        return;
+    }
+    for action in ["migrate", "cutover", "cleanup", "estimate"] {
+        let result = palace::mcp_server::dispatch_tool(
+            &conn,
+            &config,
+            "palace_embeddings",
+            &serde_json::json!({"action": action, "model": "bge-small"}),
+        );
+        let error = result["error"].as_str().unwrap_or_default();
+        assert!(error.contains("remote mode"), "{action}: {result}");
+    }
+    let status = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_embeddings",
+        &serde_json::json!({"action": "status"}),
+    );
+    assert!(status.get("status").is_some());
+}
+
+#[test]
+fn embeddings_rejects_unknown_actions_and_models() {
+    let conn = test_db();
+    let (_dir, config) = config_with(serde_json::json!({}));
+    let bad_action = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_embeddings",
+        &serde_json::json!({"action": "teleport"}),
+    );
+    assert!(bad_action["error"]
+        .as_str()
+        .unwrap()
+        .contains("unknown action"));
+    let bad_model = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_embeddings",
+        &serde_json::json!({"action": "estimate", "model": "gpt-embed"}),
+    );
+    assert!(bad_model["error"]
+        .as_str()
+        .unwrap()
+        .contains("unknown model"));
+}
