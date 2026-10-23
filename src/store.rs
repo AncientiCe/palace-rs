@@ -911,6 +911,62 @@ pub fn update_embedding(conn: &Connection, id: &str, embedding: &[f32]) -> Resul
     Ok(())
 }
 
+/// Drawers embedded per write transaction by [`reembed_drawers`].
+const REEMBED_BATCH: usize = 64;
+
+/// Outcome of [`reembed_drawers`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReembedReport {
+    pub reembedded: usize,
+    pub errors: usize,
+}
+
+/// Re-embed `drawers` (`(id, content)` pairs) with the active model.
+///
+/// Texts go to the embedder in batches and each batch is written in one
+/// transaction, so a large palace is not rewritten one autocommit at a time
+/// and an interrupted run keeps every finished batch. Preference vectors are
+/// left to [`refresh_preference_tags`].
+pub fn reembed_drawers(conn: &Connection, drawers: &[(String, String)]) -> Result<ReembedReport> {
+    let mut report = ReembedReport::default();
+    for batch in drawers.chunks(REEMBED_BATCH) {
+        let texts: Vec<&str> = batch.iter().map(|(_, content)| content.as_str()).collect();
+        let Ok(vectors) = crate::embedder::embed_batch(&texts) else {
+            report.errors += batch.len();
+            continue;
+        };
+        with_write_batch(conn, |conn| {
+            for ((id, _), vector) in batch.iter().zip(&vectors) {
+                match conn.execute(
+                    "UPDATE drawers SET embedding = ?1 WHERE id = ?2",
+                    params![vec_to_blob(vector), id],
+                ) {
+                    Ok(_) => report.reembedded += 1,
+                    Err(_) => report.errors += 1,
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(report)
+}
+
+/// Run `f` inside one transaction, unless the caller already opened one.
+pub(crate) fn with_write_batch<T>(
+    conn: &Connection,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    if !conn.is_autocommit() {
+        return f(conn);
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .context("starting write batch")?;
+    let value = f(&tx)?;
+    tx.commit().context("committing write batch")?;
+    Ok(value)
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn build_where(filter: &DrawerFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {

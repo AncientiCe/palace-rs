@@ -1802,24 +1802,11 @@ fn tool_upgrade_embeddings(conn: &Connection, args: &Value) -> Value {
             Err(e) => return json!({"error": e.to_string()}),
         };
 
-    let mut reembedded = 0usize;
-    let mut errors = 0usize;
-    for (id, content) in &ids_and_content {
-        match crate::embedder::embed_one(content) {
-            Ok(emb) => {
-                let bytes = crate::embedder::vec_to_blob(&emb);
-                let update = conn.execute(
-                    "UPDATE drawers SET embedding = ?1 WHERE id = ?2",
-                    rusqlite::params![bytes, id],
-                );
-                match update {
-                    Ok(_) => reembedded += 1,
-                    Err(_) => errors += 1,
-                }
-            }
-            Err(_) => errors += 1,
-        }
-    }
+    let crate::store::ReembedReport { reembedded, errors } =
+        match crate::store::reembed_drawers(conn, &ids_and_content) {
+            Ok(report) => report,
+            Err(e) => return json!({"error": e.to_string()}),
+        };
     let preferences_refreshed = if refresh_preferences {
         match crate::store::refresh_preference_tags(conn, true) {
             Ok(count) => count,

@@ -893,10 +893,9 @@ pub fn repair(conn: &mut Connection) -> Result<()> {
         unembedded.len()
     );
 
-    for (id, content) in &unembedded {
-        if let Ok(vec) = crate::embedder::embed_one(content) {
-            crate::store::update_embedding(conn, id, &vec)?;
-        }
+    let report = crate::store::reembed_drawers(conn, &unembedded)?;
+    if report.errors > 0 {
+        println!("  {} drawer(s) could not be embedded.", report.errors);
     }
     println!("  Repair complete.");
     Ok(())

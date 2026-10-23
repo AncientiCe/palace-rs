@@ -74,30 +74,38 @@ pub fn export_drawers(conn: &Connection) -> Result<ExportDoc> {
     })
 }
 
+/// Drawers embedded and written per transaction by [`import_drawers`].
+const IMPORT_BATCH: usize = 64;
+
 /// Import drawers from an [`ExportDoc`] into `conn`.
 ///
 /// Drawers whose ID already exists are skipped (idempotent).
 /// Returns the count of newly inserted drawers.
 pub fn import_drawers(conn: &Connection, doc: &ExportDoc) -> Result<usize> {
     let mut inserted = 0usize;
-    for d in &doc.drawers {
-        let embedding = crate::embedder::embed_one(&d.content).ok();
-        let emb_ref = embedding.as_deref();
-        let (new, _id) = add_drawer(
-            conn,
-            &d.wing,
-            &d.room,
-            &d.content,
-            emb_ref,
-            &d.source_file,
-            d.chunk_index as usize,
-            &d.added_by,
-            d.importance,
-        )
-        .with_context(|| format!("importing drawer {}", d.id))?;
-        if new {
-            inserted += 1;
-        }
+    for batch in doc.drawers.chunks(IMPORT_BATCH) {
+        let texts: Vec<&str> = batch.iter().map(|d| d.content.as_str()).collect();
+        let embeddings = crate::embedder::embed_batch(&texts).unwrap_or_default();
+        crate::store::with_write_batch(conn, |conn| {
+            for (index, d) in batch.iter().enumerate() {
+                let (new, _id) = add_drawer(
+                    conn,
+                    &d.wing,
+                    &d.room,
+                    &d.content,
+                    embeddings.get(index).map(Vec::as_slice),
+                    &d.source_file,
+                    d.chunk_index as usize,
+                    &d.added_by,
+                    d.importance,
+                )
+                .with_context(|| format!("importing drawer {}", d.id))?;
+                if new {
+                    inserted += 1;
+                }
+            }
+            Ok(())
+        })?;
     }
     Ok(inserted)
 }

@@ -781,25 +781,8 @@ pub fn run() -> Result<()> {
                 rows
             };
             let total = ids_and_content.len();
-            let mut reembedded = 0usize;
-            let mut errors = 0usize;
-            for (id, content) in &ids_and_content {
-                match crate::embedder::embed_one(content) {
-                    Ok(emb) => {
-                        let bytes = crate::embedder::vec_to_blob(&emb);
-                        let update = conn.execute(
-                            "UPDATE drawers SET embedding = ?1 WHERE id = ?2",
-                            rusqlite::params![bytes, id],
-                        );
-                        if update.is_ok() {
-                            reembedded += 1;
-                        } else {
-                            errors += 1;
-                        }
-                    }
-                    Err(_) => errors += 1,
-                }
-            }
+            let crate::store::ReembedReport { reembedded, errors } =
+                crate::store::reembed_drawers(&conn, &ids_and_content)?;
             println!("  Re-embedded {reembedded}/{total} drawer(s). Errors: {errors}.");
             if refresh_preferences {
                 let refreshed = crate::store::refresh_preference_tags(&conn, true)?;

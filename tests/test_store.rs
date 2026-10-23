@@ -971,3 +971,37 @@ fn refresh_preference_tags_retags_existing_drawers() {
         "idempotent"
     );
 }
+
+#[test]
+fn reembed_drawers_fills_vectors_in_batched_transactions() {
+    let conn = open_test_db();
+    let mut drawers = Vec::new();
+    for i in 0..70 {
+        let content = format!("drawer number {i} about batching re-embeds");
+        let (_, id) = add_drawer(&conn, "w", "r", &content, None, "src", i, "test", 3.0)
+            .expect("drawer should insert");
+        drawers.push((id, content));
+    }
+    drawers.push(("missing-id".to_string(), "no such drawer".to_string()));
+
+    let commits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = commits.clone();
+    conn.commit_hook(Some(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        false
+    }));
+    let report = reembed_drawers(&conn, &drawers).expect("re-embed should run");
+    conn.commit_hook(None::<fn() -> bool>);
+
+    assert_eq!(report.errors, 0);
+    assert_eq!(
+        report.reembedded, 71,
+        "missing ids update zero rows without failing"
+    );
+    assert_eq!(count_unembedded(&conn).unwrap(), 0);
+    assert_eq!(
+        commits.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "71 drawers should commit in two batches"
+    );
+}
