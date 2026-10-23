@@ -382,16 +382,45 @@ pub fn is_ready() -> bool {
     EMBEDDER.get().is_some()
 }
 
+/// Most texts sent to one ONNX call. Bigger batches stop paying off on CPU:
+/// every row is padded to the longest one, so throughput falls as soon as a
+/// batch mixes short and long texts.
+const MAX_BATCH: usize = 8;
+
+/// Embed `texts`, returning vectors in input order.
+///
+/// Texts are tokenized once, sorted by token length and run in sub-batches
+/// of at most `MAX_BATCH`, so each batch pads only to neighbours of similar
+/// length instead of to the longest text in the whole call.
 fn run_inference(embedder: &Embedder, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(vec![]);
     }
 
-    let encodings: Vec<_> = texts
+    let encodings: Vec<EncodedInput> = texts
         .iter()
         .map(|text| embedder.tokenizer.encode(text, MAX_SEQ_LEN))
         .collect();
 
+    let mut order: Vec<usize> = (0..encodings.len()).collect();
+    order.sort_by_key(|&i| encodings[i].input_ids.len());
+
+    let mut results: Vec<Option<Vec<f32>>> = vec![None; encodings.len()];
+    for chunk in order.chunks(MAX_BATCH) {
+        let batch: Vec<&EncodedInput> = chunk.iter().map(|&i| &encodings[i]).collect();
+        let vectors = run_batch(embedder, &batch)?;
+        for (&i, vector) in chunk.iter().zip(vectors) {
+            results[i] = Some(vector);
+        }
+    }
+    results
+        .into_iter()
+        .map(|v| v.ok_or_else(|| anyhow::anyhow!("model returned too few embeddings")))
+        .collect()
+}
+
+/// Run one padded batch through the model.
+fn run_batch(embedder: &Embedder, encodings: &[&EncodedInput]) -> Result<Vec<Vec<f32>>> {
     let max_len = encodings
         .iter()
         .map(|e| e.input_ids.len())
@@ -404,7 +433,7 @@ fn run_inference(embedder: &Embedder, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
     let mut mask_flat = Vec::with_capacity(batch_size * max_len);
     let mut type_ids_flat = Vec::with_capacity(batch_size * max_len);
 
-    for enc in &encodings {
+    for enc in encodings {
         let seq_len = enc.input_ids.len();
         ids_flat.extend_from_slice(&enc.input_ids);
         mask_flat.extend_from_slice(&enc.attention_mask);
