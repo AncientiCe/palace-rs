@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
         "wing_code",
         "backend",
         "We use SQLite with WAL mode for the palace database because it supports concurrent reads.",
-        None, // embedding (None = no vector, use embed_one() for real usage)
+        None, // embedding (None = no vector, use embedder::embed_document() for real usage)
         "architecture.md",
         0,
         "example",
