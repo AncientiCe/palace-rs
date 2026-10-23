@@ -85,7 +85,7 @@ pub fn import_drawers(conn: &Connection, doc: &ExportDoc) -> Result<usize> {
     let mut inserted = 0usize;
     for batch in doc.drawers.chunks(IMPORT_BATCH) {
         let texts: Vec<&str> = batch.iter().map(|d| d.content.as_str()).collect();
-        let embeddings = crate::embedder::embed_batch(&texts).unwrap_or_default();
+        let embeddings = crate::embedder::embed_documents(&texts).unwrap_or_default();
         crate::store::with_write_batch(conn, |conn| {
             for (index, d) in batch.iter().enumerate() {
                 let (new, _id) = add_drawer(

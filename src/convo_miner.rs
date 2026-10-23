@@ -377,7 +377,7 @@ pub fn mine_convos(
                 .iter()
                 .map(|(t, _, _)| t.as_str())
                 .collect();
-            let embeddings = crate::embedder::embed_batch(&chunk_texts).unwrap_or_default();
+            let embeddings = crate::embedder::embed_documents(&chunk_texts).unwrap_or_default();
             for (idx, (chunk_text, chunk_room, chunk_index)) in chunks_with_rooms.iter().enumerate()
             {
                 let embedding = embeddings.get(idx).map(|e| e.as_slice());

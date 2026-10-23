@@ -45,22 +45,22 @@ fn embedding_speed_bakeoff() {
     }
     let texts = corpus();
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    palace::embedder::embed_one("warm up").expect("warm up");
+    palace::embedder::embed_query("warm up").expect("warm up");
 
     let start = Instant::now();
     for text in &refs {
-        palace::embedder::embed_one(text).expect("embed_one");
+        palace::embedder::embed_document(text).expect("embed_document");
     }
     let single = start.elapsed();
 
     let start = Instant::now();
-    palace::embedder::embed_batch(&refs).expect("embed_batch");
+    palace::embedder::embed_documents(&refs).expect("embed_documents");
     let batch = start.elapsed();
 
     let mut query_times: Vec<Duration> = (0..50)
         .map(|i| {
             let start = Instant::now();
-            palace::embedder::embed_one(&format!("why did we pick option {i}?")).expect("query");
+            palace::embedder::embed_query(&format!("why did we pick option {i}?")).expect("query");
             start.elapsed()
         })
         .collect();

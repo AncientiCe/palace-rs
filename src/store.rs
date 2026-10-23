@@ -219,7 +219,7 @@ pub fn update_drawer_content(conn: &Connection, id: &str, content: &str) -> Resu
     let entity_metadata_text =
         serde_json::to_string(&entity_metadata).unwrap_or_else(|_| "{}".to_string());
     let hall = crate::hall_router::detect_hall(content);
-    let embedding = crate::embedder::embed_one(content).ok();
+    let embedding = crate::embedder::embed_document(content).ok();
     let blob = embedding.as_deref().map(vec_to_blob);
     let current = get_drawer(conn, id).ok().flatten();
     let preference_span = current.as_ref().and_then(|drawer| {
@@ -702,7 +702,7 @@ pub fn check_duplicate_filtered(
     threshold: f64,
     filter: &DrawerFilter,
 ) -> Result<Vec<SearchResult>> {
-    let embedding = crate::embedder::embed_one(content)?;
+    let embedding = crate::embedder::embed_document(content)?;
     let results = vector_search(conn, &embedding, filter, 5)?;
     Ok(results
         .into_iter()
@@ -931,7 +931,7 @@ pub fn reembed_drawers(conn: &Connection, drawers: &[(String, String)]) -> Resul
     let mut report = ReembedReport::default();
     for batch in drawers.chunks(REEMBED_BATCH) {
         let texts: Vec<&str> = batch.iter().map(|(_, content)| content.as_str()).collect();
-        let Ok(vectors) = crate::embedder::embed_batch(&texts) else {
+        let Ok(vectors) = crate::embedder::embed_documents(&texts) else {
             report.errors += batch.len();
             continue;
         };
@@ -1043,7 +1043,7 @@ fn preference_embedding_blob(
 ) -> Option<Vec<u8>> {
     let span = preference_span?;
     let fallback = fallback_embedding?;
-    let embedding = crate::embedder::embed_one(span)
+    let embedding = crate::embedder::embed_document(span)
         .ok()
         .unwrap_or_else(|| fallback.to_vec());
     Some(vec_to_blob(&embedding))

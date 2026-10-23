@@ -290,7 +290,7 @@ pub fn chunk_text(content: &str) -> Vec<(String, usize)> {
 }
 
 /// How many chunks to embed per ONNX inference call. The embedder runs
-/// behind a single mutex-guarded session (see `embedder::embed_batch`), so
+/// behind a single mutex-guarded session (see `embedder::embed_documents`), so
 /// per-file batches (often just 1-5 chunks) waste most of the session's
 /// intra-op thread pool on tiny amounts of work. Grouping chunks across many
 /// files into batches this size turns hundreds/thousands of tiny inference
@@ -706,7 +706,7 @@ pub fn mine(
                         chunked[file_index].chunks[chunk_index].0.as_str()
                     })
                     .collect();
-                let embeddings = crate::embedder::embed_batch(&texts).unwrap_or_default();
+                let embeddings = crate::embedder::embed_documents(&texts).unwrap_or_default();
                 for (position, &(file_index, chunk_index)) in batch.iter().enumerate() {
                     if let Some(embedding) = embeddings.get(position) {
                         embeddings_by_file[file_index][chunk_index] = embedding.clone();

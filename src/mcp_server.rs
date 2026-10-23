@@ -536,7 +536,9 @@ fn tool_verify(conn: &Connection, config: &PalaceConfig) -> Value {
             "integrity": db_integrity,
         },
         "model": {
-            "name": "all-MiniLM-L6-v2",
+            "id": crate::embedder::active_model().id,
+            "name": crate::embedder::active_model().name,
+            "precision": crate::embedder::active_model().precision,
             "cached": model_cached,
             "cold_start_note": if model_cached {
                 "model is cached; normal search should avoid download latency"
@@ -946,7 +948,7 @@ fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         format!("drawer_{wing}_{room}_{}", &hash.to_hex()[..16])
     };
 
-    let embedding = crate::embedder::embed_one(&content).ok();
+    let embedding = crate::embedder::embed_document(&content).ok();
     match add_drawer_with_id(
         conn,
         &drawer_id,
@@ -1303,7 +1305,7 @@ fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
         "tags": tags,
     });
 
-    let embedding = crate::embedder::embed_one(&entry).ok();
+    let embedding = crate::embedder::embed_document(&entry).ok();
     match add_drawer_with_id(
         conn,
         &id,
@@ -1632,7 +1634,7 @@ fn tool_remember(conn: &Connection, args: &Value) -> Value {
         _ => {}
     }
 
-    let embedding = crate::embedder::embed_one(&text).ok();
+    let embedding = crate::embedder::embed_document(&text).ok();
     let emb_ref = embedding.as_deref();
 
     // `add_drawer`'s id is derived from (wing, room, source_file, chunk_index),
@@ -1721,7 +1723,7 @@ fn tool_preference_search(conn: &Connection, args: &Value) -> Value {
         room: args.get("room").and_then(|v| v.as_str()).map(String::from),
     };
 
-    let embedding = match crate::embedder::embed_one(&query) {
+    let embedding = match crate::embedder::embed_query(&query) {
         Ok(e) => e,
         Err(e) => return json!({"error": format!("embedding error: {e}")}),
     };
@@ -1842,7 +1844,7 @@ fn tool_prune(conn: &Connection, args: &Value) -> Value {
 }
 
 fn count_corrupted_embeddings(conn: &Connection) -> i64 {
-    let expected_bytes = (crate::embedder::EMBEDDING_DIM * std::mem::size_of::<f32>()) as i64;
+    let expected_bytes = (crate::embedder::active_model().dim * std::mem::size_of::<f32>()) as i64;
     conn.query_row(
         "SELECT COUNT(*) FROM drawers WHERE embedding IS NOT NULL AND length(embedding) != ?1",
         [expected_bytes],
@@ -1852,18 +1854,7 @@ fn count_corrupted_embeddings(conn: &Connection) -> i64 {
 }
 
 fn embedding_model_cached() -> bool {
-    let cache_base = if let Ok(path) = std::env::var("HF_HUB_CACHE") {
-        std::path::PathBuf::from(path)
-    } else if let Some(home) =
-        directories::UserDirs::new().map(|user| user.home_dir().to_path_buf())
-    {
-        home.join(".cache").join("huggingface").join("hub")
-    } else {
-        return false;
-    };
-    cache_base
-        .join("models--Qdrant--all-MiniLM-L6-v2-onnx")
-        .exists()
+    crate::embedding_models::is_cached(crate::embedder::active_model())
 }
 
 fn find_conflicts(conn: &Connection, entity: Option<&str>) -> Result<Vec<Value>> {

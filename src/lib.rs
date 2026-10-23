@@ -8,6 +8,7 @@ pub mod convo_miner;
 pub mod db;
 pub mod dialect;
 pub mod embedder;
+pub mod embedding_models;
 pub mod entity_detector;
 pub mod export;
 pub mod gain;

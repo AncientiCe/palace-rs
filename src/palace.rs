@@ -16,7 +16,7 @@ use rusqlite::Connection;
 use std::path::Path;
 
 use crate::config::PalaceConfig;
-use crate::embedder::embed_one;
+use crate::embedder::{embed_document, embed_query};
 use crate::general_extractor::{extract_memories, Memory};
 use crate::knowledge_graph::{self as kg, KgStats, Triple};
 use crate::layers::{Layer3, MemoryStack};
@@ -236,7 +236,7 @@ impl Palace {
             &sanitized_query
         };
         let intent = classify(effective_query);
-        let embedding = embed_one(effective_query)?;
+        let embedding = embed_query(effective_query)?;
         let filter = DrawerFilter {
             wing: wing.map(String::from),
             room: room.map(String::from),
@@ -300,7 +300,7 @@ impl Palace {
         source: &str,
         importance: f64,
     ) -> Result<(bool, String)> {
-        let embedding = embed_one(content)?;
+        let embedding = embed_document(content)?;
         store::add_drawer(
             &self.conn,
             wing,
@@ -329,7 +329,7 @@ impl Palace {
     pub fn ingest_turn(&self, user_text: &str, assistant_text: &str) -> Result<()> {
         let combined = format!("User: {user_text}\nAssistant: {assistant_text}");
 
-        let embedding = embed_one(&combined)?;
+        let embedding = embed_document(&combined)?;
         store::add_drawer(
             &self.conn,
             CONVO_WING,
@@ -351,7 +351,7 @@ impl Palace {
     }
 
     fn store_extracted_memory(&self, mem: &Memory) -> Result<()> {
-        let embedding = embed_one(&mem.content)?;
+        let embedding = embed_document(&mem.content)?;
         store::add_drawer(
             &self.conn,
             CONVO_WING,

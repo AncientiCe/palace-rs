@@ -389,7 +389,7 @@ pub fn doctor(options: &InstallOptions) -> Result<DoctorReport> {
 
 /// Count drawers whose embedding blob has the wrong number of bytes.
 fn count_corrupted_embeddings(conn: &rusqlite::Connection) -> usize {
-    let expected_bytes = (crate::embedder::EMBEDDING_DIM * std::mem::size_of::<f32>()) as i64;
+    let expected_bytes = (crate::embedder::active_model().dim * std::mem::size_of::<f32>()) as i64;
     conn.query_row(
         "SELECT COUNT(*) FROM drawers WHERE embedding IS NOT NULL AND length(embedding) != ?1",
         rusqlite::params![expected_bytes],
@@ -398,19 +398,9 @@ fn count_corrupted_embeddings(conn: &rusqlite::Connection) -> usize {
     .unwrap_or(0) as usize
 }
 
-/// Check whether the ONNX model file is present in the HuggingFace cache.
+/// Check whether the active model's ONNX file is present in the HuggingFace cache.
 fn check_embedding_model_cached() -> bool {
-    let cache_base = if let Ok(p) = std::env::var("HF_HUB_CACHE") {
-        std::path::PathBuf::from(p)
-    } else if let Some(home) = directories::UserDirs::new().map(|u| u.home_dir().to_path_buf()) {
-        home.join(".cache").join("huggingface").join("hub")
-    } else {
-        return false;
-    };
-
-    // Model is stored as models--Qdrant--all-MiniLM-L6-v2-onnx inside the hub cache.
-    let model_dir = cache_base.join("models--Qdrant--all-MiniLM-L6-v2-onnx");
-    model_dir.exists()
+    crate::embedding_models::is_cached(crate::embedder::active_model())
 }
 
 pub fn print_install_report(action: &str, report: &InstallReport) {
@@ -493,7 +483,11 @@ pub fn print_doctor_report(report: &DoctorReport) {
     } else {
         "not cached (will download on first use)"
     };
-    println!("  Model:    all-MiniLM-L6-v2 — {model_state}");
+    let model = crate::embedder::active_model();
+    println!(
+        "  Model:    {} ({}, {}) — {model_state}",
+        model.id, model.name, model.precision
+    );
 
     println!("  {}", "─".repeat(52));
     for status in &report.clients {

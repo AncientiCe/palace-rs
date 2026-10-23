@@ -1,8 +1,14 @@
-//! Text embedding using ONNX Runtime with all-MiniLM-L6-v2 (384-dim).
+//! Text embedding using ONNX Runtime and the models in [`crate::embedding_models`].
 //!
-//! Uses OnceLock for lazy initialization — commands that don't need embeddings
-//! (e.g. `palace status`) start instantly without loading the model.
-//! The model is downloaded on first use and cached in ~/.cache/huggingface.
+//! Each model loads lazily in its own `OnceCell` — commands that don't need
+//! embeddings (e.g. `palace status`) start instantly, and a migration can hold
+//! the active and the target model at once. Models are downloaded on first
+//! use and cached in ~/.cache/huggingface.
+//!
+//! The *active* model is the one a palace's stored vectors were made with
+//! (`meta.active_embedding_model`); [`crate::db::open`] sets it. Queries and
+//! documents are embedded separately ([`embed_query`], [`embed_documents`])
+//! because retrieval models such as BGE prefix queries with an instruction.
 
 use anyhow::{Context, Result};
 use ndarray::Array;
@@ -17,13 +23,12 @@ use std::thread::available_parallelism;
 use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
 
-/// Embedding dimension for all-MiniLM-L6-v2.
-pub const EMBEDDING_DIM: usize = 384;
+use crate::embedding_models::{ModelSpec, Pooling, MODELS};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-const MODEL_REPO: &str = "Qdrant/all-MiniLM-L6-v2-onnx";
-const MODEL_FILE: &str = "model.onnx";
-const VOCAB_FILE: &str = "vocab.txt";
-const MAX_SEQ_LEN: usize = 512;
+/// Embedding dimension of the default model (all-MiniLM-L6-v2). Other
+/// models differ; use [`active_model`]`().dim` for the palace's real size.
+pub const EMBEDDING_DIM: usize = 384;
 
 // ── Minimal BERT WordPiece tokenizer ────────────────────────────────────────
 
@@ -276,12 +281,18 @@ fn wordpiece_tokenize(
 // ── Embedder ────────────────────────────────────────────────────────────────
 
 struct Embedder {
+    spec: &'static ModelSpec,
     tokenizer: BertTokenizer,
     session: Mutex<Session>,
     need_token_type_ids: bool,
 }
 
-static EMBEDDER: OnceCell<Embedder> = OnceCell::new();
+/// One lazily-built session per entry in [`MODELS`], by position.
+static EMBEDDERS: once_cell::sync::Lazy<Vec<OnceCell<Embedder>>> =
+    once_cell::sync::Lazy::new(|| MODELS.iter().map(|_| OnceCell::new()).collect());
+
+/// Position in [`MODELS`] of the active model.
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// How many times to attempt each model-file download before giving up.
 const DOWNLOAD_ATTEMPTS: usize = 4;
@@ -316,30 +327,38 @@ where
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("retry: no attempts were made")))
 }
 
-fn download_model_files() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
+fn download_model_files(spec: &ModelSpec) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
     use hf_hub::api::sync::Api;
 
     let api = Api::new().context("initializing HuggingFace API")?;
-    let repo = api.model(MODEL_REPO.to_string());
+    let repo = api.model(spec.repo.to_string());
 
     let model_path = retry(DOWNLOAD_ATTEMPTS, DOWNLOAD_BASE_DELAY, || {
-        repo.get(MODEL_FILE).context("downloading ONNX model file")
+        repo.get(spec.model_file)
+            .context("downloading ONNX model file")
     })?;
     let vocab_path = retry(DOWNLOAD_ATTEMPTS, DOWNLOAD_BASE_DELAY, || {
-        repo.get(VOCAB_FILE).context("downloading vocab file")
+        repo.get(spec.vocab_file).context("downloading vocab file")
     })?;
 
     Ok((model_path, vocab_path))
 }
 
-fn init_embedder() -> Result<Embedder> {
-    let (model_path, vocab_path) = download_model_files()?;
+/// ONNX intra-op threads: `PALACE_EMBED_THREADS` when set, else every core.
+fn inference_threads() -> usize {
+    std::env::var("PALACE_EMBED_THREADS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| available_parallelism().map(|n| n.get()).unwrap_or(1))
+}
 
-    let threads = available_parallelism().map(|n| n.get()).unwrap_or(1);
+fn init_embedder(spec: &'static ModelSpec) -> Result<Embedder> {
+    let (model_path, vocab_path) = download_model_files(spec)?;
 
     let session = Session::builder()?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(threads)?
+        .with_intra_threads(inference_threads())?
         .commit_from_file(&model_path)
         .context("loading ONNX session")?;
 
@@ -352,34 +371,63 @@ fn init_embedder() -> Result<Embedder> {
         BertTokenizer::from_vocab_file(&vocab_path).context("loading BERT tokenizer")?;
 
     Ok(Embedder {
+        spec,
         tokenizer,
         session: Mutex::new(session),
         need_token_type_ids,
     })
 }
 
-fn get_embedder() -> Result<&'static Embedder> {
-    EMBEDDER.get_or_try_init(|| init_embedder().context("initializing embedder (all-MiniLM-L6-v2)"))
+fn get_embedder(spec: &'static ModelSpec) -> Result<&'static Embedder> {
+    EMBEDDERS[crate::embedding_models::index_of(spec)].get_or_try_init(|| {
+        init_embedder(spec).with_context(|| format!("initializing embedder ({})", spec.id))
+    })
 }
 
-/// Warm the embedder in a background thread so the model download (~90MB on
-/// a cold HuggingFace cache) and ONNX session build don't happen inside a
-/// client's first `palace_mine` tool call, where they can exceed the
+/// Load `spec` now (downloading it if needed) without embedding anything.
+pub fn load_model(spec: &'static ModelSpec) -> Result<()> {
+    get_embedder(spec).map(|_| ())
+}
+
+/// The model this process embeds with by default.
+pub fn active_model() -> &'static ModelSpec {
+    &MODELS[ACTIVE.load(Ordering::Relaxed).min(MODELS.len() - 1)]
+}
+
+/// Make `id` the active model. Called when a palace is opened, from its
+/// `meta.active_embedding_model`.
+pub fn set_active_model(id: &str) -> Result<&'static ModelSpec> {
+    let spec = crate::embedding_models::find(id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown embedding model '{id}' (known: {})",
+            crate::embedding_models::ids()
+        )
+    })?;
+    ACTIVE.store(crate::embedding_models::index_of(spec), Ordering::Relaxed);
+    Ok(spec)
+}
+
+/// Warm the active embedder in a background thread so the model download
+/// (~90MB on a cold HuggingFace cache) and ONNX session build don't happen
+/// inside a client's first `palace_mine` tool call, where they can exceed the
 /// client's timeout on their own. Idempotent — `get_or_try_init` inside
 /// `get_embedder` makes a redundant call a no-op.
 pub fn warm_up_in_background() {
-    std::thread::spawn(|| {
-        if let Err(e) = get_embedder() {
+    let spec = active_model();
+    std::thread::spawn(move || {
+        if let Err(e) = get_embedder(spec) {
             tracing::warn!(error = %e, "Palace: background embedder warm-up failed");
         }
     });
 }
 
-/// Whether the embedder has finished initializing. `mine()` uses this to
-/// report a distinct "loading embedding model" progress phase instead of
+/// Whether the active embedder has finished initializing. `mine()` uses this
+/// to report a distinct "loading embedding model" progress phase instead of
 /// going silent if a call arrives before warm-up completes.
 pub fn is_ready() -> bool {
-    EMBEDDER.get().is_some()
+    EMBEDDERS[crate::embedding_models::index_of(active_model())]
+        .get()
+        .is_some()
 }
 
 /// Most texts sent to one ONNX call. Bigger batches stop paying off on CPU:
@@ -399,7 +447,7 @@ fn run_inference(embedder: &Embedder, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
 
     let encodings: Vec<EncodedInput> = texts
         .iter()
-        .map(|text| embedder.tokenizer.encode(text, MAX_SEQ_LEN))
+        .map(|text| embedder.tokenizer.encode(text, embedder.spec.max_seq_len))
         .collect();
 
     let mut order: Vec<usize> = (0..encodings.len()).collect();
@@ -497,7 +545,10 @@ fn run_batch(embedder: &Embedder, encodings: &[&EncodedInput]) -> Result<Vec<Vec
             let output_3d = output_array
                 .into_dimensionality::<ndarray::Ix3>()
                 .context("expected a 3-D output tensor")?;
-            mean_pool(output_3d.view(), &mask_flat, max_len)
+            match embedder.spec.pooling {
+                Pooling::Mean => mean_pool(output_3d.view(), &mask_flat, max_len),
+                Pooling::Cls => cls_pool(output_3d.view()),
+            }
         }
         _ => return Err(anyhow::anyhow!("unexpected output tensor shape: {shape:?}")),
     };
@@ -543,6 +594,17 @@ fn mean_pool(output: ndarray::ArrayView3<f32>, mask_flat: &[i64], max_len: usize
         .collect()
 }
 
+/// Take each sequence's first (`[CLS]`) token vector, L2-normalized.
+fn cls_pool(output: ndarray::ArrayView3<f32>) -> Vec<Vec<f32>> {
+    output
+        .outer_iter()
+        .map(|sequence| {
+            let cls: Vec<f32> = sequence.row(0).iter().copied().collect();
+            l2_normalize(&cls)
+        })
+        .collect()
+}
+
 fn l2_normalize(v: &[f32]) -> Vec<f32> {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     let epsilon = 1e-12;
@@ -551,22 +613,64 @@ fn l2_normalize(v: &[f32]) -> Vec<f32> {
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-/// Embed a single piece of text, returning a 384-dimensional vector.
-pub fn embed_one(text: &str) -> Result<Vec<f32>> {
-    let embedder = get_embedder()?;
-    let mut results = run_inference(embedder, &[text]).context("embedding text")?;
-    results
+/// Embed a search query with the active model.
+pub fn embed_query(query: &str) -> Result<Vec<f32>> {
+    embed_query_with(active_model(), query)
+}
+
+/// Embed a search query with `spec`, adding the model's query prefix.
+pub fn embed_query_with(spec: &'static ModelSpec, query: &str) -> Result<Vec<f32>> {
+    let embedder = get_embedder(spec)?;
+    let text = format!("{}{query}", spec.query_prefix);
+    run_inference(embedder, &[text.as_str()])
+        .context("embedding query")?
         .pop()
         .ok_or_else(|| anyhow::anyhow!("embedding returned empty result"))
 }
 
-/// Embed multiple texts in one batch. Returns a Vec<Vec<f32>>.
-pub fn embed_batch(texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+/// Embed one stored document (drawer, preference span, closet topic) with
+/// the active model.
+pub fn embed_document(text: &str) -> Result<Vec<f32>> {
+    embed_documents(&[text])?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("embedding returned empty result"))
+}
+
+/// Embed stored documents with the active model, in input order.
+pub fn embed_documents(texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    embed_documents_with(active_model(), texts)
+}
+
+/// Embed stored documents with `spec`, adding the model's document prefix.
+pub fn embed_documents_with(spec: &'static ModelSpec, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(vec![]);
     }
-    let embedder = get_embedder()?;
-    run_inference(embedder, texts).context("batch embedding")
+    let embedder = get_embedder(spec)?;
+    if spec.doc_prefix.is_empty() {
+        return run_inference(embedder, texts).context("batch embedding");
+    }
+    let prefixed: Vec<String> = texts
+        .iter()
+        .map(|text| format!("{}{text}", spec.doc_prefix))
+        .collect();
+    let refs: Vec<&str> = prefixed.iter().map(String::as_str).collect();
+    run_inference(embedder, &refs).context("batch embedding")
+}
+
+/// Embed a single piece of text with the active model.
+#[deprecated(
+    since = "0.18.0",
+    note = "use embed_query for search text or embed_document for stored text"
+)]
+pub fn embed_one(text: &str) -> Result<Vec<f32>> {
+    embed_document(text)
+}
+
+/// Embed multiple texts in one batch with the active model.
+#[deprecated(since = "0.18.0", note = "use embed_documents")]
+pub fn embed_batch(texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    embed_documents(texts)
 }
 
 /// Serialize a f32 vector to little-endian bytes for SQLite BLOB storage.
@@ -582,9 +686,12 @@ pub fn blob_to_vec(blob: &[u8]) -> Vec<f32> {
 }
 
 /// Cosine similarity between two equal-length f32 vectors.
-/// Returns a value in [-1.0, 1.0]; higher is more similar.
+/// Returns a value in [-1.0, 1.0]; higher is more similar. Vectors of
+/// different lengths come from different models and score 0.0.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len(), "vectors must have equal length");
+    if a.len() != b.len() {
+        return 0.0;
+    }
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();

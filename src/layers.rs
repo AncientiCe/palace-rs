@@ -215,7 +215,7 @@ impl Layer3 {
         room: Option<&str>,
         n_results: usize,
     ) -> String {
-        let embedding = match crate::embedder::embed_one(query) {
+        let embedding = match crate::embedder::embed_query(query) {
             Ok(e) => e,
             Err(e) => return format!("Embedding error: {e}"),
         };
@@ -267,7 +267,7 @@ impl Layer3 {
         room: Option<&str>,
         n_results: usize,
     ) -> Vec<crate::store::SearchResult> {
-        let embedding = match crate::embedder::embed_one(query) {
+        let embedding = match crate::embedder::embed_query(query) {
             Ok(e) => e,
             Err(_) => return vec![],
         };

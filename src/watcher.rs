@@ -138,7 +138,7 @@ fn mine_file(
     let room = detect_room(filepath, &content, rooms, project_path);
     let hash = content_hash(&content);
     let chunk_texts: Vec<&str> = chunks.iter().map(|(t, _)| t.as_str()).collect();
-    let embeddings = crate::embedder::embed_batch(&chunk_texts).unwrap_or_default();
+    let embeddings = crate::embedder::embed_documents(&chunk_texts).unwrap_or_default();
     let chunk_entries: Vec<(String, usize, Vec<f32>)> = chunks
         .into_iter()
         .enumerate()
