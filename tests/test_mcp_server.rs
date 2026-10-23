@@ -1122,6 +1122,13 @@ fn status_and_session_context_report_a_pending_migration() {
         .as_str()
         .is_some_and(|n| n.contains("bge-small")));
 
+    let state = palace::embedding_migration::status(&conn, Some("bge-small")).unwrap();
+    assert!(
+        state.target.is_none(),
+        "a configured model never starts a migration"
+    );
+    assert_eq!(state.active, palace::embedding_models::DEFAULT_MODEL_ID);
+
     let (_dir, plain) = config_with(serde_json::json!({}));
     let status =
         palace::mcp_server::dispatch_tool(&conn, &plain, "palace_status", &serde_json::json!({}));
@@ -1129,31 +1136,34 @@ fn status_and_session_context_report_a_pending_migration() {
 }
 
 #[test]
-fn embeddings_tool_cannot_start_or_change_a_migration() {
+fn embeddings_changes_are_refused_in_remote_mode() {
     let conn = test_db();
-    let (_dir, config) = config_with(serde_json::json!({}));
-    for action in [
-        "estimate", "migrate", "verify", "cutover", "rollback", "cleanup", "cancel",
-    ] {
+    let (_dir, config) = config_with(serde_json::json!({"mcp_mode": "remote"}));
+    if config.mcp_mode() != "remote" {
+        // PALACE_MCP_MODE in the environment overrides config.json.
+        return;
+    }
+    for action in ["migrate", "cutover", "cleanup", "estimate"] {
         let result = palace::mcp_server::dispatch_tool(
             &conn,
             &config,
             "palace_embeddings",
-            &serde_json::json!({"action": action, "model": "bge-small-q8", "force": true}),
+            &serde_json::json!({"action": action, "model": "bge-small"}),
         );
         let error = result["error"].as_str().unwrap_or_default();
-        assert!(
-            error.contains("only when the user asks"),
-            "{action}: {result}"
-        );
+        assert!(error.contains("remote mode"), "{action}: {result}");
     }
-    let status = palace::embedding_migration::status(&conn, None).unwrap();
-    assert!(status.target.is_none(), "no migration was started");
-    assert_eq!(status.active, palace::embedding_models::DEFAULT_MODEL_ID);
+    let status = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_embeddings",
+        &serde_json::json!({"action": "status"}),
+    );
+    assert!(status.get("status").is_some());
 }
 
 #[test]
-fn embeddings_rejects_unknown_actions_and_defaults_to_status() {
+fn embeddings_rejects_unknown_actions_and_models() {
     let conn = test_db();
     let (_dir, config) = config_with(serde_json::json!({}));
     let bad_action = palace::mcp_server::dispatch_tool(
@@ -1166,14 +1176,14 @@ fn embeddings_rejects_unknown_actions_and_defaults_to_status() {
         .as_str()
         .unwrap()
         .contains("unknown action"));
-    let status = palace::mcp_server::dispatch_tool(
+    let bad_model = palace::mcp_server::dispatch_tool(
         &conn,
         &config,
         "palace_embeddings",
-        &serde_json::json!({}),
+        &serde_json::json!({"action": "estimate", "model": "gpt-embed"}),
     );
-    assert!(
-        status.get("status").is_some(),
-        "status is the default action"
-    );
+    assert!(bad_model["error"]
+        .as_str()
+        .unwrap()
+        .contains("unknown model"));
 }

@@ -1867,16 +1867,33 @@ fn tool_upgrade_embeddings(conn: &Connection, args: &Value) -> Value {
     })
 }
 
-/// `palace_embeddings` actions that change, download, or benchmark models.
-/// They run only when the user asks, from the `palace embeddings` CLI; an
-/// agent can report the state but never start a migration.
-const USER_ONLY_EMBEDDING_ACTIONS: &[&str] = &[
-    "estimate", "migrate", "verify", "cutover", "rollback", "cleanup", "cancel",
-];
+/// Background migration started from MCP, so a second `migrate` call reports
+/// progress instead of starting another worker.
+static MIGRATION_WORKER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// `palace_embeddings`: list models and report the palace's embedding state.
+/// `palace_embeddings`: list models, estimate, migrate (in the background),
+/// and inspect or finish a migration. Nothing here runs on its own: an agent
+/// calls the changing actions only when the user asks for them.
 fn tool_embeddings(conn: &Connection, config: &PalaceConfig, args: &Value) -> Value {
+    use crate::embedding_migration as migration;
     let action = str_arg(args, "action").unwrap_or_else(|| "status".to_string());
+    let model_arg = || -> Result<&'static crate::embedding_models::ModelSpec, Value> {
+        let id = str_arg(args, "model").ok_or_else(|| json!({"error": "model is required"}))?;
+        crate::embedding_models::find(&id).ok_or_else(|| {
+            json!({"error": format!(
+                "unknown model '{id}' (known: {})",
+                crate::embedding_models::ids()
+            )})
+        })
+    };
+    let to_json =
+        |result: Result<Value>| result.unwrap_or_else(|e| json!({"error": e.to_string()}));
+    let wanted = config.embedding_model();
+    if !matches!(action.as_str(), "list" | "status") {
+        if let Err(e) = migration::ensure_local(config) {
+            return json!({"error": e.to_string()});
+        }
+    }
     match action.as_str() {
         "list" => {
             let active = crate::embedder::active_model().id;
@@ -1898,20 +1915,67 @@ fn tool_embeddings(conn: &Connection, config: &PalaceConfig, args: &Value) -> Va
                 .collect();
             json!({"active": active, "models": models})
         }
-        "status" => {
-            let wanted = config.embedding_model();
-            match crate::embedding_migration::status(conn, wanted.as_deref()) {
-                Ok(status) => json!({"status": status}),
-                Err(e) => json!({"error": e.to_string()}),
+        "status" => to_json(migration::status(conn, wanted.as_deref()).map(|status| {
+            json!({
+                "status": status,
+                "worker_running": MIGRATION_WORKER.load(std::sync::atomic::Ordering::SeqCst),
+            })
+        })),
+        "estimate" => match model_arg() {
+            Ok(spec) => to_json(migration::estimate(conn, spec).map(|e| json!(e))),
+            Err(e) => e,
+        },
+        "migrate" => {
+            let spec = match model_arg() {
+                Ok(spec) => spec,
+                Err(e) => return e,
+            };
+            if let Err(e) = migration::start(conn, spec.id) {
+                return json!({"error": e.to_string()});
             }
+            if MIGRATION_WORKER.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return json!({"started": false, "target": spec.id, "note": "a migration worker is already running; check action=status"});
+            }
+            let db_path = config.palace_db_path();
+            let budget = config.embedding_latency_budget_ms();
+            let force = bool_arg(args, "force");
+            std::thread::spawn(move || {
+                let outcome = crate::db::open(&db_path)
+                    .and_then(|conn| migration::run(&conn, budget, true, force, &mut |_| {}));
+                match outcome {
+                    Ok(report) => tracing::info!(
+                        written = report.written,
+                        passed = report.verify.passed,
+                        switched = report.switched.is_some(),
+                        "Palace: embedding migration finished"
+                    ),
+                    Err(err) => warn!(error = %err, "Palace: embedding migration failed"),
+                }
+                MIGRATION_WORKER.store(false, std::sync::atomic::Ordering::SeqCst);
+            });
+            json!({
+                "started": true,
+                "target": spec.id,
+                "note": "Building vectors in the background; search keeps using the current model. \
+                         The palace switches only if verify passes. Check progress with action=status.",
+            })
         }
-        other if USER_ONLY_EMBEDDING_ACTIONS.contains(&other) => json!({
-            "error": format!(
-                "`{other}` runs only when the user asks: they run `palace embeddings {other}` \
-                 in a terminal. Do not start it yourself."
-            ),
-        }),
-        other => json!({"error": format!("unknown action '{other}' (list, status)")}),
+        "verify" => {
+            let sample = int_arg(args, "sample")
+                .map(|n| n.max(1) as usize)
+                .unwrap_or(migration::VERIFY_SAMPLE);
+            to_json(
+                migration::verify(conn, sample, config.embedding_latency_budget_ms())
+                    .map(|r| json!(r)),
+            )
+        }
+        "cutover" => to_json(migration::cutover(conn, bool_arg(args, "force")).map(|r| json!(r))),
+        "rollback" => to_json(migration::rollback(conn).map(|r| json!(r))),
+        "cleanup" => to_json(migration::cleanup(conn).map(|r| json!(r))),
+        "cancel" => to_json(migration::cancel(conn).map(|target| json!({"cancelled": target}))),
+        other => json!({"error": format!(
+            "unknown action '{other}' (list, status, estimate, migrate, verify, cutover, rollback, cleanup, cancel)"
+        )}),
     }
 }
 
@@ -2573,11 +2637,14 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_embeddings",
-            "description": "Report embedding models. action=list shows the models and which one this palace uses; status shows the active model and any migration in progress. Switching models is the user's decision: they run `palace embeddings migrate <model>` themselves, so never start one.",
+            "description": "Embedding model management. action=list shows models; status shows the active model and any migration; estimate measures cost of switching to `model` on this machine; migrate rebuilds every vector for `model` in the background while search keeps working, verifies it on this palace, and switches only if it is at least as good; verify/cutover/rollback/cleanup/cancel run single steps. Switching models is the user's choice: run estimate, migrate, cutover, rollback or cleanup only when the user asks for it, never on your own initiative.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "status"], "description": "What to report (default: status)"}
+                    "action": {"type": "string", "enum": ["list", "status", "estimate", "migrate", "verify", "cutover", "rollback", "cleanup", "cancel"], "description": "What to do (default: status)"},
+                    "model": {"type": "string", "description": "Model id for estimate/migrate (see action=list)"},
+                    "force": {"type": "boolean", "description": "cutover/migrate: switch even if verify failed"},
+                    "sample": {"type": "integer", "description": "verify: number of probes (default 200)"}
                 }
             }
         },

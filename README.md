@@ -244,10 +244,10 @@ at least 25 ms. Run `palace embeddings cutover --force` to switch anyway, or
 Setting `embedding_model` in `config.json` (or `PALACE_EMBEDDING_MODEL`)
 picks the model for a new, empty palace. An existing palace never switches
 on its own. `palace status`, `palace_status`, and `palace_session_context`
-report the pending migration until you run `migrate`. Migrations run only
-when you start them from the CLI: the `palace_embeddings` MCP tool reports
-models and status but cannot estimate, migrate, switch, or clean up. In
-remote mode the server owns the model, so these commands run on the server.
+report the pending migration until you run `migrate`. Nothing migrates on
+its own: you run `migrate`, or ask your agent to, which uses the
+`palace_embeddings` MCP tool (it runs the same steps in the background of
+the server). In remote mode the server owns the model, so these commands run on the server.
 
 Agent-generated query dumps are cleaned up before retrieval. Results come back
 with score provenance (`combined`, `cosine`, `bm25`, `coding_boost`,
@@ -585,7 +585,7 @@ to turn recording off.
 | `palace_prune` | Remove stale or low-value drawers |
 | `palace_export` / `palace_import` | Export or import palace data |
 | `palace_upgrade_embeddings` | Re-embed drawers and refresh preference vectors |
-| `palace_embeddings` | Report embedding models and migration status (switching is CLI-only, run by you) |
+| `palace_embeddings` | List models, estimate, and migrate to another embedding model when you ask |
 
 **Knowledge graph**
 
