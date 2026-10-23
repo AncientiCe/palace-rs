@@ -540,6 +540,50 @@ pub fn get_search_result_drawer(conn: &Connection, id: &str) -> Result<Option<Dr
     get_drawer(conn, id)
 }
 
+/// Where drawer vectors are read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorSource<'a> {
+    /// `drawers.embedding`: the active model's vectors.
+    Hot,
+    /// `embedding_vectors` rows of one model (a migration target or an
+    /// archived model).
+    Stored(&'a str),
+}
+
+/// SQL selecting `columns` plus the vector column of `source` for drawers
+/// matching `filter` (aliased `d`), most recently filed first.
+fn vector_query(
+    source: VectorSource,
+    filter: &DrawerFilter,
+    columns: &str,
+) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let (where_clause, mut where_params) = build_where(filter);
+    let extra = if where_clause.is_empty() {
+        String::new()
+    } else {
+        // where_clause already has "WHERE", replace it with AND
+        format!("AND {}", &where_clause[6..])
+    };
+    let sql = match source {
+        VectorSource::Stored(model) => {
+            where_params.push(Box::new(model.to_string()));
+            format!(
+                "SELECT {columns}, v.vec
+                 FROM drawers d
+                 JOIN embedding_vectors v
+                   ON v.owner_kind = 'drawer' AND v.owner_id = d.id AND v.model = ?{}
+                 WHERE 1 = 1 {extra} ORDER BY d.filed_at DESC",
+                where_params.len()
+            )
+        }
+        VectorSource::Hot => format!(
+            "SELECT {columns}, d.embedding
+             FROM drawers d WHERE d.embedding IS NOT NULL {extra} ORDER BY d.filed_at DESC"
+        ),
+    };
+    (sql, where_params)
+}
+
 /// Semantic vector search over drawers.
 ///
 /// Loads embeddings from SQLite (optionally filtered), computes cosine similarity,
@@ -550,16 +594,22 @@ pub fn vector_search(
     filter: &DrawerFilter,
     n_results: usize,
 ) -> Result<Vec<SearchResult>> {
-    let (where_clause, where_params) = build_where(filter);
-    let sql = format!(
-        "SELECT id, wing, room, content, source_file, created_at, filed_at, embedding
-         FROM drawers WHERE embedding IS NOT NULL {extra} ORDER BY filed_at DESC",
-        extra = if where_clause.is_empty() {
-            String::new()
-        } else {
-            // where_clause already has "WHERE", replace it with AND
-            format!("AND {}", &where_clause[6..])
-        }
+    vector_search_in(conn, query_vec, VectorSource::Hot, filter, n_results)
+}
+
+/// [`vector_search`] over vectors from `source`. Stored vectors whose length
+/// differs from `query_vec` were made by another model and are skipped.
+pub fn vector_search_in(
+    conn: &Connection,
+    query_vec: &[f32],
+    source: VectorSource,
+    filter: &DrawerFilter,
+    n_results: usize,
+) -> Result<Vec<SearchResult>> {
+    let (sql, where_params) = vector_query(
+        source,
+        filter,
+        "d.id, d.wing, d.room, d.content, d.source_file, d.created_at, d.filed_at",
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -583,6 +633,9 @@ pub fn vector_search(
         .filter_map(|r| {
             let (id, wing, room, content, source_file, created_at, filed_at, blob) = r.ok()?;
             let emb = blob_to_vec(&blob);
+            if emb.len() != query_vec.len() {
+                return None;
+            }
             let sim = cosine_similarity(query_vec, &emb) as f64;
             Some(SearchResult {
                 id,
