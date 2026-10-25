@@ -65,6 +65,10 @@ pub struct BenchmarkSession {
     pub session_id: String,
     pub date: Option<String>,
     pub content: String,
+    /// The session as the dataset stores it (LongMemEval: a list of
+    /// role/content turns), for chunking modes that need the original turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +208,30 @@ pub struct RunOptions {
     /// Embeds sessions and questions, and sets the cosine floor and
     /// cosine/BM25 weights for ranking. Ignored with `bm25_only`.
     pub model: &'static ModelSpec,
+    pub chunking: Chunking,
+}
+
+/// How sessions become drawers. Chunked modes rank a session by its best chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum Chunking {
+    /// One drawer per session, the usual LongMemEval granularity.
+    #[default]
+    Session,
+    /// The project miner's `chunk_text`: 800-character chunks.
+    Text,
+    /// The conversation miner's path: `normalize_content`, then one chunk per
+    /// user turn and its reply (`chunk_exchanges`).
+    Exchange,
+}
+
+impl Chunking {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Chunking::Session => "session",
+            Chunking::Text => "text",
+            Chunking::Exchange => "exchange",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -254,6 +282,7 @@ pub fn parse_longmemeval(raw: &str) -> Result<Vec<BenchmarkInstance>> {
                 session_id,
                 date: dates.get(index).cloned(),
                 content: session_content(session_value),
+                raw: Some(session_value.clone()),
             });
         }
 
@@ -361,13 +390,18 @@ pub fn run_benchmark(options: &RunOptions) -> Result<BenchmarkSummary> {
     let progress_interval = progress_interval_for(total);
     let started = Instant::now();
     eprintln!(
-        "[{}] starting benchmark: {} questions ({})",
+        "[{}] starting benchmark: {} questions ({}, {})",
         options.benchmark,
         total,
         if options.bm25_only {
             "bm25-only".to_string()
         } else {
             format!("hybrid, {}", options.model.id)
+        },
+        match options.chunking {
+            Chunking::Session => "one drawer per session",
+            Chunking::Text => "text chunks, best chunk per session",
+            Chunking::Exchange => "exchange chunks, best chunk per session",
         }
     );
     let mut cache = EmbeddingCache::default();
@@ -467,21 +501,46 @@ fn run_case(
     let mut source_to_session = HashMap::new();
 
     let ingest_start = Instant::now();
-    let session_embeddings = if options.bm25_only {
+    // (session index, chunk index, text): one entry per drawer.
+    let drawers: Vec<(usize, usize, String)> = instance
+        .sessions
+        .iter()
+        .enumerate()
+        .flat_map(|(session_index, session)| {
+            let chunks = match options.chunking {
+                Chunking::Session => Vec::new(),
+                Chunking::Text => crate::miner::chunk_text(&session.content),
+                Chunking::Exchange => {
+                    let transcript = match &session.raw {
+                        Some(raw) => crate::normalize::normalize_content(&raw.to_string(), "json"),
+                        None => session.content.clone(),
+                    };
+                    crate::convo_miner::chunk_exchanges(&transcript)
+                }
+            };
+            if chunks.is_empty() {
+                // Sessions too short to chunk stay whole.
+                vec![(session_index, 0, session.content.clone())]
+            } else {
+                chunks
+                    .into_iter()
+                    .map(|(text, chunk_index)| (session_index, chunk_index, text))
+                    .collect()
+            }
+        })
+        .collect();
+    let drawer_embeddings = if options.bm25_only {
         Vec::new()
     } else {
-        let texts: Vec<&str> = instance
-            .sessions
-            .iter()
-            .map(|session| session.content.as_str())
-            .collect();
+        let texts: Vec<&str> = drawers.iter().map(|(_, _, text)| text.as_str()).collect();
         cache.embed(options.model, &texts)?
     };
-    for (index, session) in instance.sessions.iter().enumerate() {
+    for (index, (session_index, chunk_index, text)) in drawers.iter().enumerate() {
+        let session = &instance.sessions[*session_index];
         let source_file =
             benchmark_source_file(benchmark, &instance.question_id, &session.session_id);
         source_to_session.insert(source_file.clone(), session.session_id.clone());
-        let embedding = session_embeddings.get(index).map(Vec::as_slice);
+        let embedding = drawer_embeddings.get(index).map(Vec::as_slice);
         let metadata = serde_json::json!({
             "benchmark": benchmark,
             "question_id": instance.question_id,
@@ -491,15 +550,19 @@ fn run_case(
             "session_id": session.session_id,
             "session_date": session.date,
             "turn_count": session.content.lines().count(),
+            "chunk_index": chunk_index,
         });
-        let drawer_id =
-            benchmark_source_file(benchmark, &instance.question_id, &session.session_id);
+        let drawer_id = if options.chunking == Chunking::Session {
+            source_file.clone()
+        } else {
+            format!("{source_file}#{chunk_index}")
+        };
         add_drawer_with_id(
             &conn,
             &drawer_id,
             benchmark,
             &instance.question_type,
-            &session.content,
+            text,
             embedding,
             &source_file,
             "mempalace-bench",
@@ -517,6 +580,14 @@ fn run_case(
         )?)
     };
     let query_start = Instant::now();
+    // Chunked runs rank every chunk so each session can surface through its
+    // best one; results arrive best first, so the first chunk seen per
+    // session is that session's score.
+    let n_results = if options.chunking == Chunking::Session {
+        TOP_K
+    } else {
+        drawers.len()
+    };
     let results = hybrid_search_in(
         &conn,
         &instance.question,
@@ -524,13 +595,16 @@ fn run_case(
         VectorSource::Hot,
         options.model,
         &DrawerFilter::default(),
-        TOP_K,
+        n_results,
     )?;
     let query_ms = query_start.elapsed().as_millis();
 
+    let mut seen = HashSet::new();
     let ranked_session_ids: Vec<String> = results
         .into_iter()
         .filter_map(|result| source_to_session.get(&result.drawer.source_file).cloned())
+        .filter(|session_id| seen.insert(session_id.clone()))
+        .take(TOP_K)
         .collect();
     let scored = !instance.answer_session_ids.is_empty();
     let hits = scored.then(|| evaluate_hits(&ranked_session_ids, &instance.answer_session_ids));
@@ -546,7 +620,7 @@ fn run_case(
         hit_at_10: hits.as_ref().map(|hit| hit.hit_at_10),
         ingest_ms,
         query_ms,
-        drawer_count: instance.sessions.len(),
+        drawer_count: drawers.len(),
         error: None,
     })
 }
@@ -582,6 +656,7 @@ fn parse_beam_instance(value: &Value, line_index: usize) -> Result<BenchmarkInst
                     session_id,
                     date: string_field(session, "date"),
                     content,
+                    raw: session.get("turns").cloned(),
                 }
             })
             .collect()
@@ -590,6 +665,7 @@ fn parse_beam_instance(value: &Value, line_index: usize) -> Result<BenchmarkInst
             session_id: "chat".to_string(),
             date: None,
             content: session_content(chat),
+            raw: Some(chat.clone()),
         }]
     } else {
         anyhow::bail!("BEAM instance missing sessions/chat");

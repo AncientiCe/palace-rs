@@ -2,7 +2,7 @@
 
 use palace::benchmarks::{
     benchmark_source_file, evaluate_hits, parse_beam_jsonl, parse_longmemeval, run_benchmark,
-    BenchmarkSummary, RunOptions,
+    BenchmarkSummary, Chunking, RunOptions,
 };
 use std::fs;
 use std::io::Write;
@@ -160,6 +160,7 @@ fn run_benchmark_processes_multiple_questions_in_bm25_only_mode() {
         limit: None,
         bm25_only: true,
         model: palace::embedding_models::default_model(),
+        chunking: Chunking::Session,
     })
     .expect("benchmark should run end-to-end in bm25-only mode");
 
@@ -179,4 +180,109 @@ fn run_benchmark_processes_multiple_questions_in_bm25_only_mode() {
     let summary_path = output_dir.join("longmemeval_summary.json");
     let summary_on_disk = fs::read_to_string(&summary_path).expect("reading summary output");
     assert!(summary_on_disk.contains("\"evaluated_questions\": 2"));
+}
+
+#[test]
+fn chunked_mode_ranks_each_session_once_by_its_best_chunk() {
+    // Every chunk of both sessions mentions Maya, so many chunks match; only
+    // the last chunk of s1 also says where she will move.
+    let filler = "Maya talked about the weather and nothing else of note.\n\n".repeat(40);
+    let raw = serde_json::json!([{
+        "question_id": "q1",
+        "question_type": "single-session-user",
+        "question": "Where will Maya move?",
+        "haystack_session_ids": ["s1", "s2"],
+        "haystack_dates": ["2025-01-01", "2025-01-02"],
+        "haystack_sessions": [
+            [{"role": "user", "content": format!("{filler}Maya will move to Lisbon next spring.")}],
+            [{"role": "user", "content": filler}]
+        ],
+        "answer_session_ids": ["s1"]
+    }])
+    .to_string();
+
+    let tmp = tempfile::tempdir().expect("creating tempdir");
+    let input_path = tmp.path().join("longmemeval_fixture.json");
+    let output_dir = tmp.path().join("out");
+    fs::write(&input_path, raw).expect("writing fixture");
+
+    let summary = run_benchmark(&RunOptions {
+        benchmark: "longmemeval".to_string(),
+        input_path,
+        output_dir: output_dir.clone(),
+        limit: None,
+        bm25_only: true,
+        model: palace::embedding_models::default_model(),
+        chunking: Chunking::Text,
+    })
+    .expect("chunked benchmark should run");
+
+    assert!(
+        summary.drawers_indexed > 2,
+        "long sessions should be split into several chunk drawers"
+    );
+    assert_eq!(summary.hits_at_1, 1, "the late answer chunk should win");
+
+    let cases = fs::read_to_string(output_dir.join("longmemeval_cases.jsonl"))
+        .expect("reading cases output");
+    let case: serde_json::Value =
+        serde_json::from_str(cases.lines().next().expect("one case")).expect("case json");
+    let ranked: Vec<&str> = case["ranked_session_ids"]
+        .as_array()
+        .expect("ranked ids")
+        .iter()
+        .filter_map(|id| id.as_str())
+        .collect();
+    assert_eq!(ranked, ["s1", "s2"], "each session appears once");
+}
+
+#[test]
+fn exchange_mode_chunks_sessions_the_way_the_conversation_miner_does() {
+    let turn = |role: &str, content: &str| serde_json::json!({"role": role, "content": content});
+    let raw = serde_json::json!([{
+        "question_id": "q1",
+        "question_type": "single-session-user",
+        "question": "Where will Maya move?",
+        "haystack_session_ids": ["s1", "s2"],
+        "haystack_dates": ["2025-01-01", "2025-01-02"],
+        "haystack_sessions": [
+            [
+                turn("user", "Maya asked about the weather this week."),
+                turn("assistant", "Sunny with light wind most days."),
+                turn("user", "Maya also wanted a good book."),
+                turn("assistant", "Try a mystery novel for the train."),
+                turn("user", "Maya says she will move to Lisbon next spring."),
+                turn("assistant", "Lisbon is lovely in spring; plan the move early.")
+            ],
+            [
+                turn("user", "Maya asked about lunch ideas today."),
+                turn("assistant", "A salad or a warm soup would work."),
+                turn("user", "Maya also asked about dinner."),
+                turn("assistant", "Pasta with fresh tomatoes is quick.")
+            ]
+        ],
+        "answer_session_ids": ["s1"]
+    }])
+    .to_string();
+
+    let tmp = tempfile::tempdir().expect("creating tempdir");
+    let input_path = tmp.path().join("longmemeval_fixture.json");
+    fs::write(&input_path, raw).expect("writing fixture");
+
+    let summary = run_benchmark(&RunOptions {
+        benchmark: "longmemeval".to_string(),
+        input_path,
+        output_dir: tmp.path().join("out"),
+        limit: None,
+        bm25_only: true,
+        model: palace::embedding_models::default_model(),
+        chunking: Chunking::Exchange,
+    })
+    .expect("exchange benchmark should run");
+
+    assert_eq!(
+        summary.drawers_indexed, 5,
+        "one drawer per user turn and its reply: 3 + 2"
+    );
+    assert_eq!(summary.hits_at_1, 1);
 }

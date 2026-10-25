@@ -130,6 +130,18 @@ mempalace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
   data/out/longmemeval/s_cleaned --model all
 ```
 
+`--chunking` sets how sessions become drawers: `session` (default, one drawer
+per session), `text` (the project miner's 800-character chunks) or `exchange`
+(the conversation miner's path: `normalize_content`, then one chunk per user
+turn and its reply). Chunked modes rank a session by its best chunk and write
+to `<output_dir>/<model-id>-<mode>/`. `exchange` is how Palace stores mined
+chats, and gives the README's exchange-pair row (~20 min on 16 threads):
+
+```bash
+mempalace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
+  data/out/longmemeval/s_cleaned --model minilm-l6-v2-q8 --chunking exchange
+```
+
 ```bash
 # LongMemEval — fast
 mempalace-bench long-mem-eval data/longmemeval/longmemeval_oracle.json \

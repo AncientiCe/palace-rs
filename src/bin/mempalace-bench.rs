@@ -3,7 +3,9 @@ use anyhow::Result;
 #[cfg(feature = "benchmarks")]
 use clap::{Args, Parser, Subcommand};
 #[cfg(feature = "benchmarks")]
-use palace::benchmarks::{prepare_beam_jsonl, run_benchmark, BenchmarkSummary, RunOptions};
+use palace::benchmarks::{
+    prepare_beam_jsonl, run_benchmark, BenchmarkSummary, Chunking, RunOptions,
+};
 #[cfg(feature = "benchmarks")]
 use palace::embedding_models::{self, ModelSpec};
 #[cfg(feature = "benchmarks")]
@@ -38,6 +40,10 @@ struct RunArgs {
     /// Embedding model ids, comma-separated, or `all` for every model.
     #[arg(long, value_delimiter = ',', default_value = embedding_models::DEFAULT_MODEL_ID)]
     model: Vec<String>,
+    /// How sessions become drawers; chunked modes rank a session by its best
+    /// chunk. Non-session modes write to <output_dir>/<model-id>-<mode>/.
+    #[arg(long, value_enum, default_value_t = Chunking::Session)]
+    chunking: Chunking,
 }
 
 #[cfg(feature = "benchmarks")]
@@ -80,10 +86,16 @@ fn run(benchmark: &str, args: RunArgs) -> Result<()> {
     };
     let mut summaries = Vec::new();
     for model in models {
-        let output_dir = if args.bm25_only {
-            args.output_dir.join("bm25-only")
+        let name = if args.bm25_only {
+            "bm25-only"
         } else {
-            args.output_dir.join(model.id)
+            model.id
+        };
+        let output_dir = if args.chunking == Chunking::Session {
+            args.output_dir.join(name)
+        } else {
+            args.output_dir
+                .join(format!("{name}-{}", args.chunking.as_str()))
         };
         let summary = run_benchmark(&RunOptions {
             benchmark: benchmark.to_string(),
@@ -92,6 +104,7 @@ fn run(benchmark: &str, args: RunArgs) -> Result<()> {
             limit: args.limit,
             bm25_only: args.bm25_only,
             model,
+            chunking: args.chunking,
         })?;
         println!("{}", serde_json::to_string_pretty(&summary)?);
         summaries.push(summary);
