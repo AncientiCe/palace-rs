@@ -5,41 +5,60 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::Instant;
 
-use crate::ranker::hybrid_search;
-use crate::store::{add_drawer_with_id, DrawerFilter};
-
-fn embed_in_chunks(texts: &[&str], chunk_size: usize) -> Result<Vec<Vec<f32>>> {
-    if texts.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::with_capacity(texts.len());
-    for chunk in texts.chunks(chunk_size.max(1)) {
-        let embeddings = crate::embedder::embed_batch(chunk)?;
-        if embeddings.len() != chunk.len() {
-            anyhow::bail!(
-                "embed_batch returned {} vectors for {} inputs",
-                embeddings.len(),
-                chunk.len()
-            );
-        }
-        out.extend(embeddings);
-    }
-    Ok(out)
-}
+use crate::embedding_models::ModelSpec;
+use crate::ranker::hybrid_search_in;
+use crate::store::{add_drawer_with_id, DrawerFilter, VectorSource};
 
 const TOP_K: usize = 10;
 
-/// Maximum number of texts pushed through `embedder::embed_batch` in a single
-/// ONNX call. Sized to amortize per-call overhead while keeping the padded
-/// `batch * max_seq_len` tensor footprint bounded for sessions that approach
-/// the 512-token MiniLM limit.
-const EMBED_BATCH_SIZE: usize = 16;
+/// Session vectors for one model, keyed by a hash of the session text.
+/// LongMemEval haystacks share about a fifth of their sessions, so each
+/// distinct session is embedded once per run.
+#[derive(Default)]
+struct EmbeddingCache {
+    vectors: HashMap<u64, Vec<f32>>,
+}
+
+impl EmbeddingCache {
+    fn embed(&mut self, model: &'static ModelSpec, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let keys: Vec<u64> = texts.iter().map(|text| text_key(text)).collect();
+        let mut missing_keys = Vec::new();
+        let mut missing_texts = Vec::new();
+        for (key, text) in keys.iter().zip(texts) {
+            if !self.vectors.contains_key(key) && !missing_keys.contains(key) {
+                missing_keys.push(*key);
+                missing_texts.push(*text);
+            }
+        }
+        if !missing_texts.is_empty() {
+            let embeddings = crate::embedder::embed_documents_with(model, &missing_texts)?;
+            if embeddings.len() != missing_texts.len() {
+                anyhow::bail!(
+                    "embed_documents_with returned {} vectors for {} inputs",
+                    embeddings.len(),
+                    missing_texts.len()
+                );
+            }
+            self.vectors
+                .extend(missing_keys.into_iter().zip(embeddings));
+        }
+        Ok(keys.iter().map(|key| self.vectors[key].clone()).collect())
+    }
+}
+
+fn text_key(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkSession {
@@ -112,6 +131,8 @@ impl TypeSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkSummary {
     pub benchmark: String,
+    /// Embedding model id, or `bm25-only`.
+    pub model: String,
     pub evaluated_questions: usize,
     pub skipped_questions: usize,
     pub unscored_questions: usize,
@@ -132,6 +153,7 @@ impl BenchmarkSummary {
     pub fn new(benchmark: impl Into<String>) -> Self {
         Self {
             benchmark: benchmark.into(),
+            model: String::new(),
             evaluated_questions: 0,
             skipped_questions: 0,
             unscored_questions: 0,
@@ -179,6 +201,9 @@ pub struct RunOptions {
     pub output_dir: std::path::PathBuf,
     pub limit: Option<usize>,
     pub bm25_only: bool,
+    /// Embeds sessions and questions, and sets the cosine floor and
+    /// cosine/BM25 weights for ranking. Ignored with `bm25_only`.
+    pub model: &'static ModelSpec,
 }
 
 #[derive(Debug, Serialize)]
@@ -319,6 +344,11 @@ pub fn run_benchmark(options: &RunOptions) -> Result<BenchmarkSummary> {
     }
 
     let mut summary = BenchmarkSummary::new(&options.benchmark);
+    summary.model = if options.bm25_only {
+        "bm25-only".to_string()
+    } else {
+        options.model.id.to_string()
+    };
     summary.skipped_questions = skipped_questions;
     let cases_path = options
         .output_dir
@@ -331,17 +361,18 @@ pub fn run_benchmark(options: &RunOptions) -> Result<BenchmarkSummary> {
     let progress_interval = progress_interval_for(total);
     let started = Instant::now();
     eprintln!(
-        "[{}] starting benchmark: {} questions ({} mode)",
+        "[{}] starting benchmark: {} questions ({})",
         options.benchmark,
         total,
         if options.bm25_only {
-            "bm25-only"
+            "bm25-only".to_string()
         } else {
-            "hybrid"
+            format!("hybrid, {}", options.model.id)
         }
     );
+    let mut cache = EmbeddingCache::default();
     for (index, instance) in instances.iter().enumerate() {
-        let case = match run_case(instance, &options.benchmark, options.bm25_only) {
+        let case = match run_case(instance, options, &mut cache) {
             Ok(case) => {
                 summary.drawers_indexed += case.drawer_count;
                 summary.ingest_ms += case.ingest_ms;
@@ -389,8 +420,9 @@ pub fn run_benchmark(options: &RunOptions) -> Result<BenchmarkSummary> {
                 0
             };
             eprintln!(
-                "[{}] {}/{}  recall@5={:.3}  failed={}  unscored={}  {:.1}q/s  eta={}",
+                "[{} {}] {}/{}  recall@5={:.3}  failed={}  unscored={}  {:.1}q/s  eta={}",
                 options.benchmark,
+                summary.model,
                 done,
                 total,
                 summary.recall_at_5,
@@ -425,12 +457,17 @@ pub fn prepare_beam_jsonl(input_path: &Path, output_path: &Path) -> Result<usize
     Ok(parse_beam_jsonl(&fs::read_to_string(output_path)?)?.len())
 }
 
-fn run_case(instance: &BenchmarkInstance, benchmark: &str, bm25_only: bool) -> Result<CaseOutput> {
+fn run_case(
+    instance: &BenchmarkInstance,
+    options: &RunOptions,
+    cache: &mut EmbeddingCache,
+) -> Result<CaseOutput> {
+    let benchmark = options.benchmark.as_str();
     let conn = crate::db::open_in_memory()?;
     let mut source_to_session = HashMap::new();
 
     let ingest_start = Instant::now();
-    let session_embeddings = if bm25_only {
+    let session_embeddings = if options.bm25_only {
         Vec::new()
     } else {
         let texts: Vec<&str> = instance
@@ -438,7 +475,7 @@ fn run_case(instance: &BenchmarkInstance, benchmark: &str, bm25_only: bool) -> R
             .iter()
             .map(|session| session.content.as_str())
             .collect();
-        embed_in_chunks(&texts, EMBED_BATCH_SIZE)?
+        cache.embed(options.model, &texts)?
     };
     for (index, session) in instance.sessions.iter().enumerate() {
         let source_file =
@@ -471,16 +508,21 @@ fn run_case(instance: &BenchmarkInstance, benchmark: &str, bm25_only: bool) -> R
     }
     let ingest_ms = ingest_start.elapsed().as_millis();
 
-    let query_embedding = if bm25_only {
+    let query_embedding = if options.bm25_only {
         None
     } else {
-        Some(crate::embedder::embed_one(&instance.question)?)
+        Some(crate::embedder::embed_query_with(
+            options.model,
+            &instance.question,
+        )?)
     };
     let query_start = Instant::now();
-    let results = hybrid_search(
+    let results = hybrid_search_in(
         &conn,
         &instance.question,
         query_embedding.as_deref(),
+        VectorSource::Hot,
+        options.model,
         &DrawerFilter::default(),
         TOP_K,
     )?;

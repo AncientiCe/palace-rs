@@ -114,9 +114,21 @@ mempalace-bench beam data/beam/canonical/beam_1M.jsonl \
 
 ---
 
-## 4. Full hybrid sweep (BM25 + MiniLM embeddings — slow)
+## 4. Full hybrid sweep (BM25 + embeddings — slow)
 
-Run these one at a time and let them finish. **No progress output during the run** — see "Monitoring" below to confirm liveness.
+Run these one at a time and let them finish. Each model writes its outputs to
+`<output_dir>/<model-id>/` (`bm25-only/` with `--bm25-only`).
+
+`--model` picks the embedding model (default `minilm-l6-v2`). It takes a
+comma-separated list or `all`; models run one after another and a markdown
+table comparing them prints at the end. Each model ranks with its own cosine
+floor and cosine/BM25 weights from `embedding_models`.
+
+```bash
+# Every embedding model on LongMemEval s_cleaned (~1–1.5 h on 16 threads)
+mempalace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
+  data/out/longmemeval/s_cleaned --model all
+```
 
 ```bash
 # LongMemEval — fast

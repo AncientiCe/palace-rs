@@ -1,9 +1,11 @@
 #[cfg(feature = "benchmarks")]
 use anyhow::Result;
 #[cfg(feature = "benchmarks")]
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 #[cfg(feature = "benchmarks")]
-use palace::benchmarks::{prepare_beam_jsonl, run_benchmark, RunOptions};
+use palace::benchmarks::{prepare_beam_jsonl, run_benchmark, BenchmarkSummary, RunOptions};
+#[cfg(feature = "benchmarks")]
+use palace::embedding_models::{self, ModelSpec};
 #[cfg(feature = "benchmarks")]
 use std::path::PathBuf;
 
@@ -20,34 +22,31 @@ struct Cli {
 }
 
 #[cfg(feature = "benchmarks")]
+#[derive(Args)]
+struct RunArgs {
+    /// Input file: LongMemEval JSON or canonical BEAM JSONL.
+    input: PathBuf,
+    /// Directory for outputs; each model writes *_cases.jsonl and
+    /// *_summary.json under <output_dir>/<model-id>/.
+    output_dir: PathBuf,
+    /// Maximum questions to evaluate.
+    #[arg(long)]
+    limit: Option<usize>,
+    /// Use BM25-only retrieval without embedding model downloads.
+    #[arg(long)]
+    bm25_only: bool,
+    /// Embedding model ids, comma-separated, or `all` for every model.
+    #[arg(long, value_delimiter = ',', default_value = embedding_models::DEFAULT_MODEL_ID)]
+    model: Vec<String>,
+}
+
+#[cfg(feature = "benchmarks")]
 #[derive(Subcommand)]
 enum Command {
     /// Run LongMemEval retrieval recall over an official JSON file.
-    LongMemEval {
-        /// Path to longmemeval_oracle.json or longmemeval_s_cleaned.json.
-        input: PathBuf,
-        /// Directory for *_cases.jsonl and *_summary.json outputs.
-        output_dir: PathBuf,
-        /// Maximum questions to evaluate.
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Use BM25-only retrieval without embedding model downloads.
-        #[arg(long)]
-        bm25_only: bool,
-    },
+    LongMemEval(RunArgs),
     /// Run BEAM retrieval recall over canonical JSONL.
-    Beam {
-        /// Path to canonical BEAM JSONL.
-        input: PathBuf,
-        /// Directory for *_cases.jsonl and *_summary.json outputs.
-        output_dir: PathBuf,
-        /// Maximum questions to evaluate.
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Use BM25-only retrieval without embedding model downloads.
-        #[arg(long)]
-        bm25_only: bool,
-    },
+    Beam(RunArgs),
     /// Normalize a JSONL BEAM export into the canonical MemPalace benchmark shape.
     PrepareBeam {
         /// Input JSONL exported from BEAM/Hugging Face tooling.
@@ -58,39 +57,96 @@ enum Command {
 }
 
 #[cfg(feature = "benchmarks")]
+fn models(ids: &[String]) -> Result<Vec<&'static ModelSpec>> {
+    if ids.iter().any(|id| id == "all") {
+        return Ok(embedding_models::MODELS.iter().collect());
+    }
+    ids.iter()
+        .map(|id| {
+            embedding_models::find(id).ok_or_else(|| {
+                let known: Vec<&str> = embedding_models::MODELS.iter().map(|m| m.id).collect();
+                anyhow::anyhow!("unknown model {id}; known: {}", known.join(", "))
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "benchmarks")]
+fn run(benchmark: &str, args: RunArgs) -> Result<()> {
+    let models = if args.bm25_only {
+        vec![embedding_models::default_model()]
+    } else {
+        models(&args.model)?
+    };
+    let mut summaries = Vec::new();
+    for model in models {
+        let output_dir = if args.bm25_only {
+            args.output_dir.join("bm25-only")
+        } else {
+            args.output_dir.join(model.id)
+        };
+        let summary = run_benchmark(&RunOptions {
+            benchmark: benchmark.to_string(),
+            input_path: args.input.clone(),
+            output_dir,
+            limit: args.limit,
+            bm25_only: args.bm25_only,
+            model,
+        })?;
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        summaries.push(summary);
+    }
+    if summaries.len() > 1 {
+        println!("{}", summary_table(&summaries));
+    }
+    Ok(())
+}
+
+/// Markdown table of aggregate and per-question-type recall@1/@5/@10.
+#[cfg(feature = "benchmarks")]
+fn summary_table(summaries: &[BenchmarkSummary]) -> String {
+    let mut out = String::from(
+        "| Model | R@1 | R@5 | R@10 | Ingest | Query |\n|---|---:|---:|---:|---:|---:|\n",
+    );
+    for s in summaries {
+        out.push_str(&format!(
+            "| `{}` | {:.3} | {:.3} | {:.3} | {}s | {}ms |\n",
+            s.model,
+            s.recall_at_1,
+            s.recall_at_5,
+            s.recall_at_10,
+            s.ingest_ms / 1000,
+            s.query_ms
+        ));
+    }
+    let types: Vec<&String> = summaries
+        .iter()
+        .flat_map(|s| s.per_question_type.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    for question_type in types {
+        out.push_str(&format!(
+            "\n{question_type}\n\n| Model | R@1 | R@5 | R@10 |\n|---|---:|---:|---:|\n"
+        ));
+        for s in summaries {
+            if let Some(t) = s.per_question_type.get(question_type) {
+                out.push_str(&format!(
+                    "| `{}` | {:.3} | {:.3} | {:.3} |\n",
+                    s.model, t.recall_at_1, t.recall_at_5, t.recall_at_10
+                ));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(feature = "benchmarks")]
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::LongMemEval {
-            input,
-            output_dir,
-            limit,
-            bm25_only,
-        } => {
-            let summary = run_benchmark(&RunOptions {
-                benchmark: "longmemeval".to_string(),
-                input_path: input,
-                output_dir,
-                limit,
-                bm25_only,
-            })?;
-            println!("{}", serde_json::to_string_pretty(&summary)?);
-        }
-        Command::Beam {
-            input,
-            output_dir,
-            limit,
-            bm25_only,
-        } => {
-            let summary = run_benchmark(&RunOptions {
-                benchmark: "beam".to_string(),
-                input_path: input,
-                output_dir,
-                limit,
-                bm25_only,
-            })?;
-            println!("{}", serde_json::to_string_pretty(&summary)?);
-        }
+        Command::LongMemEval(args) => run("longmemeval", args)?,
+        Command::Beam(args) => run("beam", args)?,
         Command::PrepareBeam { input, output } => {
             let rows = prepare_beam_jsonl(&input, &output)?;
             println!("Prepared {rows} BEAM rows into {}", output.display());

@@ -1,6 +1,6 @@
 #![cfg(feature = "benchmarks")]
 
-use mempalace::benchmarks::{
+use palace::benchmarks::{
     benchmark_source_file, evaluate_hits, parse_beam_jsonl, parse_longmemeval, run_benchmark,
     BenchmarkSummary, RunOptions,
 };
@@ -159,10 +159,12 @@ fn run_benchmark_processes_multiple_questions_in_bm25_only_mode() {
         output_dir: output_dir.clone(),
         limit: None,
         bm25_only: true,
+        model: palace::embedding_models::default_model(),
     })
     .expect("benchmark should run end-to-end in bm25-only mode");
 
     assert_eq!(summary.benchmark, "longmemeval");
+    assert_eq!(summary.model, "bm25-only");
     assert_eq!(summary.evaluated_questions, 2);
     assert_eq!(summary.failed_questions, 0);
     assert_eq!(summary.unscored_questions, 0);
