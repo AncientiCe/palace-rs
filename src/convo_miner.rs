@@ -29,6 +29,11 @@ const SKIP_DIRS: &[&str] = &[
     "memory",
 ];
 const MIN_CHUNK_SIZE: usize = 30;
+/// Longest exchange chunk, roughly what fits the embedder's 512-token window.
+/// Longer replies continue in further chunks that repeat the user turn.
+const MAX_EXCHANGE_CHARS: usize = 2000;
+/// Reply room left in a chunk whose user turn is itself very long.
+const MIN_REPLY_CHARS: usize = 500;
 
 static TOPIC_KEYWORDS: &[(&str, &[&str])] = &[
     (
@@ -138,20 +143,23 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<(String, usize)> {
                     ai_lines.push(next);
                 }
                 i += 1;
-                if ai_lines.len() >= 8 {
-                    break;
-                }
             }
 
-            let ai_response = ai_lines.join(" ");
-            let content = if ai_response.is_empty() {
-                user_turn
+            let budget = MAX_EXCHANGE_CHARS
+                .saturating_sub(user_turn.len() + 1)
+                .max(MIN_REPLY_CHARS);
+            let parts = split_reply(&ai_lines, budget);
+            if parts.is_empty() {
+                if user_turn.len() > MIN_CHUNK_SIZE {
+                    chunks.push((user_turn, chunks.len()));
+                }
             } else {
-                format!("{user_turn}\n{ai_response}")
-            };
-
-            if content.trim().len() > MIN_CHUNK_SIZE {
-                chunks.push((content, chunks.len()));
+                for part in parts {
+                    let content = format!("{user_turn}\n{part}");
+                    if content.trim().len() > MIN_CHUNK_SIZE {
+                        chunks.push((content, chunks.len()));
+                    }
+                }
             }
         } else {
             i += 1;
@@ -159,6 +167,26 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<(String, usize)> {
     }
 
     chunks
+}
+
+/// Join reply lines with spaces into parts of at most `budget` bytes, breaking
+/// between words; a single word longer than `budget` stays whole.
+fn split_reply(lines: &[&str], budget: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    for word in lines.iter().flat_map(|line| line.split_whitespace()) {
+        if !current.is_empty() && current.len() + 1 + word.len() > budget {
+            parts.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
 }
 
 fn chunk_by_paragraph(content: &str) -> Vec<(String, usize)> {

@@ -159,3 +159,55 @@ fn mine_convos_rerun_skips_already_mined_files() {
         "re-mining the same conversation directory should not duplicate drawers"
     );
 }
+
+#[test]
+fn chunk_exchanges_keeps_every_line_of_a_long_reply() {
+    // The reply has 20 lines; exchange chunking used to keep the first 8 and
+    // silently drop the rest.
+    let reply: Vec<String> = (1..=20)
+        .map(|n| format!("Step {n}: whisk ingredient number {n} into the basil sauce."))
+        .collect();
+    let transcript = format!(
+        "> How do I make basil sauce?\n{}\n\n> Thanks, and the mint dip?\nBlend mint with yogurt.\n\n> And dessert?\nServe fresh berries.\n",
+        reply.join("\n")
+    );
+
+    let chunks = palace::convo_miner::chunk_exchanges(&transcript);
+    let all_text: String = chunks.iter().map(|(text, _)| text.as_str()).collect();
+
+    for line in &reply {
+        assert!(all_text.contains(line.as_str()), "lost reply line: {line}");
+    }
+    assert!(all_text.contains("Blend mint with yogurt."));
+    for (text, _) in &chunks {
+        assert!(
+            text.starts_with("> "),
+            "each chunk keeps its user turn: {text}"
+        );
+    }
+}
+
+#[test]
+fn chunk_exchanges_splits_a_reply_too_long_to_embed() {
+    let reply = "Use fresh basil leaves and good olive oil for this sauce. ".repeat(80);
+    let transcript = format!(
+        "> How do I make basil sauce?\n{reply}\n\n> Next?\nBlend mint with yogurt.\n\n> And dessert?\nServe fresh berries.\n"
+    );
+
+    let chunks = palace::convo_miner::chunk_exchanges(&transcript);
+    let basil: Vec<&String> = chunks
+        .iter()
+        .map(|(text, _)| text)
+        .filter(|text| text.starts_with("> How do I make basil sauce?"))
+        .collect();
+
+    assert!(
+        basil.len() > 1,
+        "a ~4,700-char reply should span several chunks"
+    );
+    let kept: usize = basil
+        .iter()
+        .map(|text| text.matches("fresh basil leaves").count())
+        .sum();
+    assert_eq!(kept, 80, "every sentence of the reply is kept exactly once");
+}
