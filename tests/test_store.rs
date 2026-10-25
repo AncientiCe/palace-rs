@@ -319,6 +319,182 @@ fn file_already_mined_check() {
     assert!(file_already_mined(&conn, "unique_file.txt").unwrap());
 }
 
+// ── Incremental re-mining tracking (`mined_files`) ──────────────────────────
+
+#[test]
+fn upsert_mined_file_tracks_hash_and_is_queryable() {
+    let conn = open_test_db();
+    assert!(get_mined_file_hash(&conn, "a.txt").unwrap().is_none());
+
+    upsert_mined_file(&conn, "a.txt", "wing_a", "hash1", 2).unwrap();
+    assert_eq!(
+        get_mined_file_hash(&conn, "a.txt").unwrap().as_deref(),
+        Some("hash1")
+    );
+
+    upsert_mined_file(&conn, "a.txt", "wing_a", "hash2", 3).unwrap();
+    assert_eq!(
+        get_mined_file_hash(&conn, "a.txt").unwrap().as_deref(),
+        Some("hash2"),
+        "re-upserting the same file should refresh its hash, not duplicate it"
+    );
+}
+
+#[test]
+fn mined_files_for_wing_lists_only_that_wing() {
+    let conn = open_test_db();
+    upsert_mined_file(&conn, "a.txt", "wing_a", "h1", 1).unwrap();
+    upsert_mined_file(&conn, "b.txt", "wing_b", "h2", 1).unwrap();
+
+    let files = mined_files_for_wing(&conn, "wing_a").unwrap();
+    assert_eq!(files, vec!["a.txt".to_string()]);
+}
+
+#[test]
+fn delete_drawers_for_file_removes_chunks_bm25_rows_and_tracking() {
+    let conn = open_test_db();
+    for idx in 0..3 {
+        add_drawer(
+            &conn,
+            "wing_x",
+            "room_x",
+            &format!("chunk {idx} unique content marker delete-target"),
+            None,
+            "multi.txt",
+            idx,
+            "test",
+            3.0,
+        )
+        .unwrap();
+    }
+    upsert_mined_file(&conn, "multi.txt", "wing_x", "somehash", 3).unwrap();
+
+    let removed = delete_drawers_for_file(&conn, "multi.txt").unwrap();
+    assert_eq!(removed, 3);
+
+    let remaining_drawers: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM drawers WHERE source_file = 'multi.txt'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining_drawers, 0);
+
+    let bm25_terms: i64 = conn
+        .query_row("SELECT COUNT(*) FROM bm25_terms", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        bm25_terms, 0,
+        "bm25 terms should cascade-delete with their drawers"
+    );
+
+    assert!(get_mined_file_hash(&conn, "multi.txt").unwrap().is_none());
+}
+
+#[test]
+fn replace_file_drawers_updates_content_instead_of_appending() {
+    let conn = open_test_db();
+    let chunks_v1 = vec![(
+        "first version content unique marker one".to_string(),
+        0usize,
+        vec![],
+    )];
+    replace_file_drawers(
+        &conn, "wing_a", "room_a", "note.txt", "hash1", &chunks_v1, "test", 3.0,
+    )
+    .unwrap();
+
+    let drawers_v1 = list_drawers(&conn, &DrawerFilter::default(), 10).unwrap();
+    assert_eq!(drawers_v1.len(), 1);
+    assert!(drawers_v1[0].content.contains("first version"));
+
+    let chunks_v2 = vec![(
+        "second version content unique marker two".to_string(),
+        0usize,
+        vec![],
+    )];
+    replace_file_drawers(
+        &conn, "wing_a", "room_a", "note.txt", "hash2", &chunks_v2, "test", 3.0,
+    )
+    .unwrap();
+
+    let drawers_v2 = list_drawers(&conn, &DrawerFilter::default(), 10).unwrap();
+    assert_eq!(
+        drawers_v2.len(),
+        1,
+        "the old chunk should be replaced, not appended alongside the new one"
+    );
+    assert!(drawers_v2[0].content.contains("second version"));
+    assert_eq!(
+        get_mined_file_hash(&conn, "note.txt").unwrap().as_deref(),
+        Some("hash2")
+    );
+}
+
+#[test]
+fn replace_file_drawers_drops_stale_high_index_chunks_when_shrinking() {
+    let conn = open_test_db();
+    let chunks_v1 = vec![
+        (
+            "chunk zero content unique marker zero".to_string(),
+            0usize,
+            vec![],
+        ),
+        (
+            "chunk one content unique marker one".to_string(),
+            1usize,
+            vec![],
+        ),
+        (
+            "chunk two content unique marker two".to_string(),
+            2usize,
+            vec![],
+        ),
+    ];
+    replace_file_drawers(
+        &conn,
+        "wing_a",
+        "room_a",
+        "shrinking.txt",
+        "hash1",
+        &chunks_v1,
+        "test",
+        3.0,
+    )
+    .unwrap();
+    assert_eq!(
+        list_drawers(&conn, &DrawerFilter::default(), 10)
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let chunks_v2 = vec![(
+        "just one chunk now unique marker solo".to_string(),
+        0usize,
+        vec![],
+    )];
+    replace_file_drawers(
+        &conn,
+        "wing_a",
+        "room_a",
+        "shrinking.txt",
+        "hash2",
+        &chunks_v2,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let remaining = list_drawers(&conn, &DrawerFilter::default(), 10).unwrap();
+    assert_eq!(
+        remaining.len(),
+        1,
+        "stale high-index chunks must be dropped, not left behind"
+    );
+}
+
 #[test]
 fn vector_search_returns_results() {
     let conn = open_test_db();
@@ -393,9 +569,45 @@ fn source_context_returns_adjacent_chunks() {
         .unwrap();
     }
 
-    let context = source_context(&conn, "shared.txt", 2, 1).unwrap();
+    let context = source_context(&conn, "wing", "room", "shared.txt", 2, 1).unwrap();
     let chunks: Vec<_> = context.iter().map(|drawer| drawer.chunk_index).collect();
     assert_eq!(chunks, vec![1, 2, 3]);
+}
+
+#[test]
+fn source_context_does_not_leak_across_wings() {
+    let conn = open_test_db();
+    // Hand-filed drawers commonly share an empty source_file and chunk_index 0
+    // (palace_add_drawer / palace_remember both default this way). Without
+    // wing/room scoping, a neighbor lookup for one would match the other.
+    add_drawer(
+        &conn,
+        "wing_a",
+        "room",
+        "fact from wing a",
+        None,
+        "",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+    add_drawer(
+        &conn,
+        "wing_b",
+        "room",
+        "fact from wing b",
+        None,
+        "",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let context = source_context(&conn, "wing_a", "room", "", 0, 1).unwrap();
+    assert_eq!(context.len(), 1);
+    assert_eq!(context[0].wing, "wing_a");
 }
 
 #[test]
@@ -442,4 +654,354 @@ fn taxonomy_works() {
     assert_eq!(tax["wing_code"]["backend"], 1);
     assert_eq!(tax["wing_code"]["frontend"], 1);
     assert_eq!(tax["wing_docs"]["readme"], 1);
+}
+
+// ── Wings registry ──────────────────────────────────────────────────────────
+
+#[test]
+fn upsert_wing_creates_and_is_idempotent() {
+    let conn = open_test_db();
+    upsert_wing(&conn, "sales", "topic", "Sales notes", None).unwrap();
+    upsert_wing(&conn, "sales", "topic", "Sales notes", None).unwrap();
+
+    let record = get_wing(&conn, "sales").unwrap().expect("wing exists");
+    assert_eq!(record.name, "sales");
+    assert_eq!(record.kind, "topic");
+    assert_eq!(record.description, "Sales notes");
+    assert_eq!(record.project_path, None);
+    assert_eq!(record.drawer_count, 0);
+}
+
+#[test]
+fn upsert_wing_does_not_clobber_with_blank_values() {
+    let conn = open_test_db();
+    upsert_wing(
+        &conn,
+        "acme",
+        "project",
+        "Important repo",
+        Some("/code/acme"),
+    )
+    .unwrap();
+    // A later blank upsert must not erase the richer record.
+    upsert_wing(&conn, "acme", "topic", "", None).unwrap();
+
+    let record = get_wing(&conn, "acme").unwrap().expect("wing exists");
+    // project kind must win over topic (no demotion).
+    assert_eq!(record.kind, "project");
+    assert_eq!(record.description, "Important repo");
+    assert_eq!(record.project_path.as_deref(), Some("/code/acme"));
+}
+
+#[test]
+fn set_wing_mined_promotes_and_stamps() {
+    let conn = open_test_db();
+    ensure_wing_registered(&conn, "myrepo").unwrap();
+    let before = get_wing(&conn, "myrepo").unwrap().unwrap();
+    assert_eq!(before.kind, "topic");
+    assert!(before.last_mined_at.is_none());
+
+    set_wing_mined(&conn, "myrepo", "/code/myrepo").unwrap();
+    let after = get_wing(&conn, "myrepo").unwrap().unwrap();
+    assert_eq!(after.kind, "project");
+    assert_eq!(after.project_path.as_deref(), Some("/code/myrepo"));
+    assert!(after.last_mined_at.is_some());
+}
+
+#[test]
+fn ensure_wing_registered_never_overwrites() {
+    let conn = open_test_db();
+    set_wing_mined(&conn, "repo", "/code/repo").unwrap();
+    ensure_wing_registered(&conn, "repo").unwrap();
+
+    let record = get_wing(&conn, "repo").unwrap().unwrap();
+    assert_eq!(record.kind, "project");
+    assert_eq!(record.project_path.as_deref(), Some("/code/repo"));
+}
+
+#[test]
+fn find_wing_by_path_matches_project() {
+    let conn = open_test_db();
+    set_wing_mined(&conn, "repo", "/code/repo").unwrap();
+    let found = find_wing_by_path(&conn, "/code/repo")
+        .unwrap()
+        .expect("found by path");
+    assert_eq!(found.name, "repo");
+    assert!(find_wing_by_path(&conn, "/nope").unwrap().is_none());
+}
+
+#[test]
+fn list_wings_registry_includes_drawer_counts() {
+    let conn = open_test_db();
+    upsert_wing(&conn, "topic_only", "topic", "", None).unwrap();
+    add_drawer(
+        &conn,
+        "with_data",
+        "general",
+        "c",
+        None,
+        "f.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+    ensure_wing_registered(&conn, "with_data").unwrap();
+
+    let wings = list_wings_registry(&conn).unwrap();
+    let with_data = wings
+        .iter()
+        .find(|w| w.name == "with_data")
+        .expect("with_data registered");
+    assert_eq!(with_data.drawer_count, 1);
+    let topic_only = wings
+        .iter()
+        .find(|w| w.name == "topic_only")
+        .expect("topic_only registered");
+    assert_eq!(topic_only.drawer_count, 0);
+}
+
+#[test]
+fn backfill_registers_existing_wings_with_inferred_kind() {
+    let conn = open_test_db();
+    add_drawer(
+        &conn,
+        "mempalace_rs",
+        "src",
+        "c",
+        None,
+        "a.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+    add_drawer(
+        &conn,
+        "wing_diary__cursor",
+        "diary",
+        "c",
+        None,
+        "b.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+    add_drawer(
+        &conn, "general", "general", "c", None, "c.txt", 0, "test", 3.0,
+    )
+    .unwrap();
+
+    let inserted = palace::migrate::backfill_wings_registry(&conn).unwrap();
+    assert!(inserted >= 3);
+
+    assert_eq!(
+        get_wing(&conn, "mempalace_rs").unwrap().unwrap().kind,
+        "project"
+    );
+    assert_eq!(
+        get_wing(&conn, "wing_diary__cursor").unwrap().unwrap().kind,
+        "topic"
+    );
+    assert_eq!(get_wing(&conn, "general").unwrap().unwrap().kind, "topic");
+
+    // Idempotent: a second backfill inserts nothing new.
+    let again = palace::migrate::backfill_wings_registry(&conn).unwrap();
+    assert_eq!(again, 0);
+}
+
+// ── source-aware preference tagging ───────────────────────────────────────
+
+const MEMORY_RULE: &str = "Standing instruction from Ionut Riza: use ONLY Palace for persistent \
+     memory. Do NOT write to the Claude Code file-memory directory.";
+
+fn pref_embedding_is_set(conn: &Connection, id: &str) -> bool {
+    conn.query_row(
+        "SELECT pref_embedding IS NOT NULL FROM drawers WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn mined_code_is_not_tagged_on_phrase_matches() {
+    let conn = open_test_db();
+    let chunks = vec![(
+        "// Always use the facade. I prefer this; never use raw SQL.".to_string(),
+        0usize,
+        vec![0.1f32; 384],
+    )];
+    replace_file_drawers(
+        &conn,
+        "proj",
+        "src",
+        "/repo/src/db.rs",
+        "hash",
+        &chunks,
+        "palace",
+        3.0,
+    )
+    .unwrap();
+    let drawer = &list_drawers(&conn, &DrawerFilter::default(), 1).unwrap()[0];
+    assert!(drawer.metadata.get("preference").is_none(), "{drawer:?}");
+    assert!(!pref_embedding_is_set(&conn, &drawer.id));
+}
+
+#[test]
+fn refresh_treats_miner_recorded_files_as_code_whatever_the_extension() {
+    let conn = open_test_db();
+    let chunks = vec![(
+        "Agents: never use default exports. I want named ones.".to_string(),
+        0usize,
+        vec![0.1f32; 384],
+    )];
+    replace_file_drawers(
+        &conn,
+        "proj",
+        "docs",
+        "/repo/AGENTS.md",
+        "hash",
+        &chunks,
+        "palace",
+        3.0,
+    )
+    .unwrap();
+    let id = list_drawers(&conn, &DrawerFilter::default(), 1).unwrap()[0]
+        .id
+        .clone();
+    conn.execute(
+        "UPDATE drawers SET metadata = '{\"preference\":true}', pref_embedding = embedding",
+        [],
+    )
+    .unwrap();
+    assert_eq!(refresh_preference_tags(&conn, false).unwrap(), 1);
+    assert!(!pref_embedding_is_set(&conn, &id));
+}
+
+#[test]
+fn scoped_preference_search_finds_third_person_rules() {
+    let conn = open_test_db();
+    let config = palace::config::PalaceConfig::new();
+    let filed = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &serde_json::json!({"text": MEMORY_RULE, "wing": "general", "room": "preferences"}),
+    );
+    let rule_id = filed["id"]
+        .as_str()
+        .expect("remember returns an id")
+        .to_string();
+    assert!(pref_embedding_is_set(&conn, &rule_id));
+    palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &serde_json::json!({
+            "text": "Editor preference from Ionut Riza: dark theme, 4-space indentation.",
+            "wing": "general",
+            "room": "preferences"
+        }),
+    );
+
+    let found = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_preference_search",
+        &serde_json::json!({
+            "wing": "general",
+            "query": "which memory system should I use for persistent memory"
+        }),
+    );
+    assert_eq!(found["results"][0]["id"], rule_id.as_str(), "{found}");
+}
+
+#[test]
+fn refresh_preference_tags_retags_existing_drawers() {
+    let conn = open_test_db();
+    let embedding = vec![0.1f32; 384];
+    // A mined code chunk tagged under the old rules, and a third-person rule
+    // filed before the room counted.
+    let (_, code_id) = add_drawer(
+        &conn,
+        "proj",
+        "src",
+        "fn helper() {} // i prefer this",
+        Some(&embedding),
+        "/repo/src/lib.rs",
+        0,
+        "palace",
+        3.0,
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE drawers SET metadata = '{\"preference\":true}', pref_embedding = embedding
+         WHERE id = ?1",
+        [&code_id],
+    )
+    .unwrap();
+    let (_, rule_id) = add_drawer(
+        &conn,
+        "general",
+        "preferences",
+        MEMORY_RULE,
+        Some(&embedding),
+        "palace_remember/x",
+        0,
+        "mcp",
+        5.0,
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE drawers SET metadata = '{}', pref_embedding = NULL WHERE id = ?1",
+        [&rule_id],
+    )
+    .unwrap();
+
+    assert_eq!(refresh_preference_tags(&conn, false).unwrap(), 2);
+    assert!(!pref_embedding_is_set(&conn, &code_id));
+    assert!(pref_embedding_is_set(&conn, &rule_id));
+    let rule = get_drawer(&conn, &rule_id).unwrap().unwrap();
+    assert_eq!(rule.metadata["preference"], true);
+    assert_eq!(
+        refresh_preference_tags(&conn, false).unwrap(),
+        0,
+        "idempotent"
+    );
+}
+
+#[test]
+fn reembed_drawers_fills_vectors_in_batched_transactions() {
+    let conn = open_test_db();
+    let mut drawers = Vec::new();
+    for i in 0..70 {
+        let content = format!("drawer number {i} about batching re-embeds");
+        let (_, id) = add_drawer(&conn, "w", "r", &content, None, "src", i, "test", 3.0)
+            .expect("drawer should insert");
+        drawers.push((id, content));
+    }
+    drawers.push(("missing-id".to_string(), "no such drawer".to_string()));
+
+    let commits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = commits.clone();
+    conn.commit_hook(Some(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        false
+    }));
+    let report = reembed_drawers(&conn, &drawers).expect("re-embed should run");
+    conn.commit_hook(None::<fn() -> bool>);
+
+    assert_eq!(report.errors, 0);
+    assert_eq!(
+        report.reembedded, 71,
+        "missing ids update zero rows without failing"
+    );
+    assert_eq!(count_unembedded(&conn).unwrap(), 0);
+    assert_eq!(
+        commits.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "71 drawers should commit in two batches"
+    );
 }

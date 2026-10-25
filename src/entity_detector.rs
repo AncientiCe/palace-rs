@@ -95,6 +95,39 @@ fn classify_name(name: &str) -> EntityKind {
 fn compile_regex(pattern: &str) -> Regex {
     match Regex::new(pattern) {
         Ok(regex) => regex,
-        Err(err) => panic!("invalid built-in entity regex {pattern}: {err}"),
+        Err(err) => {
+            // Built-in patterns are static and verified by tests below; if one
+            // is ever invalid, degrade to a never-matching regex instead of
+            // crashing the whole CLI/MCP process.
+            eprintln!("warning: invalid built-in entity regex {pattern}: {err}");
+            #[allow(clippy::unwrap_used)]
+            Regex::new(r"[^\s\S]").unwrap()
+        }
+    }
+}
+
+#[cfg(test)]
+mod regex_tests {
+    use super::*;
+
+    #[test]
+    fn built_in_entity_patterns_compile() {
+        for pattern in [
+            r"\b[A-Z][A-Za-z0-9]+(?:[A-Z][A-Za-z0-9]+)+\b",
+            r"(?m)^([A-Z][\p{L}][\p{L}0-9_-]{1,40}):\s",
+            r"\b[A-Z][\p{L}]{2,}(?:\s+[A-Z][\p{L}]{2,})?\b",
+            r"[^\s\S]",
+        ] {
+            assert!(
+                Regex::new(pattern).is_ok(),
+                "built-in regex must compile: {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn compile_regex_falls_back_to_never_matching() {
+        let regex = compile_regex(r"([unclosed");
+        assert!(!regex.is_match("anything at all"));
     }
 }

@@ -4,6 +4,572 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [0.18.0] - 2026-10-23
+
+### Added
+
+- **Switchable embedding models.** `palace embeddings` lists models,
+  estimates the cost of switching on this machine (download, time, disk,
+  query latency), and migrates a palace to another model:
+  `minilm-l6-v2-q8` (int8 MiniLM) and, as experimental, `bge-small`,
+  `bge-small-q8` and `bge-base-q8`. `migrate` builds the new vectors in
+  resumable batches while search keeps using the current model, verifies
+  the new model on 200 known-item probes from the palace, and switches only
+  if recall@5 drops by at most 0.01 and p95 query latency stays within
+  budget. The old vectors stay until `cleanup`, so `rollback` is instant
+  and byte-identical. Nothing migrates on its own: you run `migrate`, or
+  ask your agent to through the MCP tool `palace_embeddings`, which runs
+  the same steps in the background of the server.
+- **`embedding_model` setting** (`PALACE_EMBEDDING_MODEL`): the model a new
+  palace starts on. Existing palaces never switch on their own;
+  `palace status`, `palace_status` and `palace_session_context` report the
+  pending migration instead. `embedding_latency_budget_ms`
+  (`PALACE_EMBEDDING_LATENCY_BUDGET_MS`) sets the verify latency budget, and
+  `PALACE_EMBED_THREADS` caps ONNX threads.
+- **Embedding bake-off** (`tests/embedding_bakeoff.rs`, opt-in with
+  `PALACE_RUN_BAKEOFF=1`): recall and speed per model on the coding-agent
+  eval and on probes from a real palace, plus a ranking-weight grid with
+  `PALACE_BAKEOFF_TUNE=1`. Measured on a 10,700-drawer palace:
+
+  | Model | Coding eval R@1 | Palace probes R@1 | Indexing | Query p95 |
+  |---|---:|---:|---:|---:|
+  | `minilm-l6-v2` | 0.902 | 0.850 | 112 drawers/s | 2.3 ms |
+  | `minilm-l6-v2-q8` | 0.922 | 0.860 | 204 drawers/s | 2.6 ms |
+  | `bge-small` | 0.863 | 0.910 | 55 drawers/s | 7.2 ms |
+  | `bge-small-q8` | 0.863 | 0.915 | 103 drawers/s | 5.5 ms |
+  | `bge-base-q8` | 0.863 | 0.920 | 39 drawers/s | 11.0 ms |
+
+### Changed
+
+- **Batch embedding is 3-4x faster.** Batches padded every text to the
+  longest one and ran slower than one-at-a-time embedding (29 vs 90
+  drawers/s). Texts are now sorted by length and run 8 at a time: 107-115
+  drawers/s with MiniLM. `repair`, `upgrade-embeddings` and `import` embed in
+  batches and write each batch in one transaction.
+- **The palace records its embedding model** in `meta.active_embedding_model`.
+  Existing palaces are marked `minilm-l6-v2` on first open; no vector is
+  rewritten. Stored vectors of another length are skipped by search instead
+  of being compared, so a mismatch degrades to keyword search.
+- **Library API:** `embedder::embed_query` and `embed_documents` replace
+  `embed_one` and `embed_batch`, which remain as deprecated wrappers.
+  Query embedding adds the model's instruction prefix (BGE).
+  `palace doctor` and `palace_verify` report the active model.
+
+## [0.17.1] - 2026-10-20
+
+### Added
+
+- **Standing instructions at every session start.** The session-start hook
+  now injects every drawer in `general/preferences` verbatim, ahead of the
+  project recall and for every project and client, under a "Standing
+  instructions (override defaults)" heading. Up to 20 rules are injected,
+  ranked by importance then recency; importance-5 rules are always kept.
+  Before this, those rules only surfaced when a prompt happened to match them.
+
+- **The protocol says Palace is the only persistent memory.** Installed
+  rules and the MCP instructions, for every profile, now tell agents never to
+  write memories to a client's built-in memory files (such as Claude Code's
+  `~/.claude/projects/*/memory/`), that standing user rules live in
+  `general/preferences` and override harness defaults, and to file new ones
+  there. `palace doctor` reports rules without this line as weak; re-run
+  `palace install` to update them.
+
+### Fixed
+
+- **`palace_preference_search` finds filed rules.** Preference tagging now
+  depends on where a drawer came from. Anything filed into a `preferences`
+  room is a preference whatever its wording; agent-filed drawers also match
+  third-person and imperative rules ("Standing instruction from ...", "do
+  not use", "must never"); mined project files are never tagged, so code that
+  happens to say "always use" no longer crowds the results; mined
+  conversations keep first-person matching. Existing drawers are re-tagged
+  once when the palace is first opened by this version.
+  `upgrade-embeddings --refresh-preferences` uses the same rules.
+
+## [0.17.0] - 2026-10-15
+
+### Changed
+
+- **`palace doctor` flags rules without the tool-search load step.** A rule
+  installed before 0.16.1 is now reported as weak, with a hint to re-run
+  `palace install`.
+- **`palace_status` is compact by default.** It no longer returns per-room
+  counts, the protocol text, or the AAAK spec, cutting its output by more
+  than half; agents call it at the start of every session, and the protocol
+  already arrives through MCP instructions and rule files. Pass
+  `verbose: true` to get the old fields back. `palace_get_aaak_spec` still
+  serves the AAAK spec.
+- **Hooks now track Palace use per agent session.** Palace's MCP usage log
+  is keyed by server process, so it could not tell whether *this* session
+  consulted memory. The prompt and after-tool hooks now record each
+  session's prompts, tool calls, and Palace use in a new `hook_sessions`
+  table (pruned after 7 days). Claude Code's after-tool hook also matches
+  `mcp__palace__.*` for this; it no longer runs recall on Palace's own
+  calls. `palace doctor` reports a Claude hook with the old matcher as
+  missing, so re-run `palace install` after upgrading.
+
+### Added
+
+- **Prompt reminder until a session uses Palace (Claude Code).** While a
+  session has not called any Palace tool, the prompt hook adds a one-line
+  reminder to load the palace tools, run the session-start calls, and search
+  before answering questions about past work. It stops as soon as any
+  Palace tool runs, and skips slash commands and very short prompts.
+- **Stop nudge for sessions that never used Palace (Claude Code).** The stop
+  hook now judges Claude Code sessions on their own activity instead of any
+  Palace use in the last 6 hours. A session with real work (2+ prompts or 3+
+  tracked tool calls) that saved nothing is asked to record it, including
+  sessions that never touched Palace. Trivial sessions stay silent, and
+  another session's activity no longer silences or triggers the nudge.
+
+## [0.16.2] - 2026-10-15
+
+### Security
+
+- **Bumped `rustls` to 0.23.46** for RUSTSEC-2026-0346, -0347, -0348 and
+  -0349, and dropped the temporary ignores from `.cargo/audit.toml`.
+
+## [0.16.1] - 2026-10-15
+
+### Fixed
+
+- **Protocol rule now tells deferring clients to load the palace tools
+  first.** The Claude desktop app ignores the `anthropic/alwaysLoad` hint
+  and lists `palace_*` tools by name only, so sessions skipped SESSION
+  START. Every profile's rule now opens SESSION START with a step to load
+  the nine protocol tools in one batch via tool search. Re-run
+  `palace install` to pick up the new rule text.
+
+### Security
+
+- **Temporarily ignoring RUSTSEC-2026-0346, -0347, -0348 and -0349** in
+  `.cargo/audit.toml`. They affect `rustls` 0.23.45 (pulled in by `hf-hub`
+  through `ureq`); the fix, 0.23.46, is not on crates.io yet. The ignores
+  will be dropped once `rustls` can be bumped.
+
+## [0.16.0] - 2026-10-12
+
+### Added
+
+- **Gemini CLI, VS Code (Copilot), OpenCode and Windsurf.** `palace install`
+  now wires four more agents: MCP server, memory protocol rule, and the
+  automatic memory hooks where the agent supports them.
+  - Gemini CLI: `SessionStart`, `BeforeAgent`, `AfterTool` and `AfterAgent`
+    hooks in `~/.gemini/settings.json`. Gemini runs hooks only in trusted
+    folders.
+  - VS Code: `~/.copilot/hooks/palace.json` with session-start, post-tool
+    recall and the stop save nudge. VS Code's prompt hook cannot inject
+    context, so there is no prompt-time recall.
+  - OpenCode: a generated plugin at `~/.config/opencode/plugins/palace.js`
+    bridges OpenCode's events to `palace hook --client opencode`. The rule is
+    added through `instructions`, leaving the global `AGENTS.md` slot (and
+    OpenCode's `~/.claude/CLAUDE.md` fallback) alone.
+  - Windsurf: MCP and global rules only. Cascade hooks cannot inject context;
+    Devin Local already reads the Claude Code hooks.
+- **Cline, Zed and Goose.**
+  - Cline: shared `cline_mcp_settings.json`, an always-on rule in
+    `~/.cline/rules/`, and `UserPromptSubmit`/`PostToolUse` hook scripts in
+    `Documents/Cline/Hooks`. A hook script you wrote yourself is never
+    overwritten or removed.
+  - Zed: `context_servers` in `settings.json` and Zed's global `AGENTS.md`.
+    Zed's agent has no hooks.
+  - Goose: a stdio extension in `config.yaml`, `.goosehints`, and a Stop-only
+    plugin in `~/.agents/plugins/palace` that nudges Goose to save its work.
+- `--client all` includes the new agents only when their config folder
+  exists.
+
+### Fixed
+
+- JSON configs with comments or trailing commas (JSONC, as Zed, VS Code and
+  Cursor allow) no longer make `palace install` fail. They are rewritten as
+  plain JSON; the original stays in the `.bak` backup.
+
+## [0.15.0] - 2026-09-27
+
+### Added
+
+- **Prompt-time recall hook.** `palace install` now registers a
+  `UserPromptSubmit` hook for Claude Code and Codex that searches Palace with
+  the submitted question and injects the relevant drawers before the agent
+  answers. A history-style question with no hits gets a one-line nudge to call
+  `palace_search`. Trivial prompts and slash commands stay silent. Re-run
+  `palace install` to pick it up.
+
+### Changed
+
+- **Auto-recall is scoped to the current project.** Hook recall drops drawers
+  from other mined project wings, plus diary entries recorded for another
+  project (by `project_path` metadata or the AAAK `PROJ:` tag). Topic wings
+  still surface. The relevance threshold rose from 0.3 to 0.4, and each
+  recalled line now cites its drawer id.
+
+## [0.14.2] - 2026-09-23
+
+### Security
+
+- **Bumped `rustls` to 0.23.45** for RUSTSEC-2026-0285 (TLS 1.3 handshake
+  messages accepted across encryption level boundaries).
+- **Bumped `anyhow` to 1.0.104** for RUSTSEC-2026-0190 (unsoundness in
+  `Error::downcast_mut()`).
+- **Bumped `der` to 0.8.2**, replacing a yanked version.
+- **Bumped `notify` to 8**, which drops the unmaintained `instant` crate
+  (RUSTSEC-2024-0384).
+
+### Changed
+
+- **CI now runs `cargo audit --deny warnings`**, so unmaintained, unsound,
+  and yanked advisories fail the build instead of passing silently.
+
+## [0.14.1] - 2026-09-01
+
+### Fixed
+
+- **`palace_diary_read`, `palace_diary_search`, and `palace_recall_check` MCP
+  tool schemas didn't document `agent_name` as required**, even though the
+  server enforces it — a client generating calls from the schema alone had
+  no signal to include it. Added a `"Your agent name (required)"`
+  description to each.
+
+## [0.14.0] - 2026-08-26
+
+### Fixed
+
+- **`palace_mine` timed out on larger active repos even with `dry_run` or
+  `--limit`** — the file walk was single-threaded and descended into `.git`
+  (100k-1M+ objects on a long-lived repo) before any filtering happened;
+  `dry_run` still ran the full embedding pass and only skipped the DB write;
+  and `--limit` truncated the walk result *before* checking which files had
+  actually changed, so it bounded nothing and reprocessed the same first N
+  files on every call. The walk is now parallel (`ignore::WalkBuilder::build_parallel`)
+  with an explicit directory deny-list (`.git`, `node_modules`, `target`,
+  `build`, `dist`, `vendor`, etc.) and a max file size; `dry_run` skips
+  embedding entirely; and `mine()` now processes candidates in
+  `MINE_BATCH_SIZE`-file windows (read → hash → chunk → embed → write →
+  commit) with `--limit` bounding actual new/updated files processed, making
+  limited calls resumable — a later call picks up exactly where the last one
+  left off instead of reprocessing the same files.
+- **`palace_remember` silently dropped every fact after the first per
+  wing/room** — the drawer id was derived from a hardcoded `source_file`
+  ("palace_remember") and `chunk_index` (0), so distinct remembered facts in
+  the same wing/room collided onto the same id and `INSERT OR IGNORE`
+  dropped everything but the first, with no error surfaced. `source_file` is
+  now derived from the fact's content hash.
+- **`palace_search` could return far more than `limit`'s worth of data** —
+  `source_context` (fetches neighboring chunks for a hit) had no wing/room
+  scope and no row limit. Hand-filed drawers (`palace_add_drawer`,
+  `palace_remember`) commonly share an empty `source_file` and `chunk_index`
+  0, and a hit like that matched every such drawer across the *entire*
+  palace rather than just its neighbors — observed inflating a `limit: 5`
+  search to ~500KB. Now scoped to the hit's wing/room with a hard `LIMIT`,
+  and skipped entirely when `source_file` is empty.
+
+### Changed
+
+- **MCP `palace_mine` progress now reports from every phase**, not just
+  while writing — walking, hashing, chunking, embedding, writing, and
+  pruning each send their own `notifications/progress` update (with a
+  `message` field naming the phase), so a slow mine no longer goes silent
+  during the parts that used to take the longest.
+- **The embedding model now warms up in the background at MCP server
+  start** instead of loading lazily inside the first tool call that needs
+  it, so a cold HuggingFace download no longer risks exceeding that call's
+  timeout.
+- Mining's write path bulk-loads previously-mined file hashes once per run
+  instead of one query per file, widens SQLite's page cache/temp store for
+  the duration of a mine, batches BM25 term inserts into a single statement
+  per drawer instead of one per term, and skips a redundant `DELETE` on the
+  fresh-insert path.
+
+## [0.13.0] - 2026-08-17
+
+### Added
+
+- **`mine` is now a sync, not a one-shot ingest** — re-running `palace mine`
+  (or the MCP `palace_mine` tool) against a project you already mined used to
+  skip every file that already had drawers, forever, even after you edited
+  it. `mine` now content-hashes each file (tracked in a new `mined_files`
+  table) and: re-mines files whose hash changed, replacing their old drawers
+  with fresh ones instead of leaving stale content in place; leaves
+  unchanged files untouched; and removes drawers for previously-mined files
+  that no longer exist on disk (bounded by an on-disk existence check, so
+  `--limit` or a widened `.gitignore` can never be mistaken for mass
+  deletion). `palace watch`'s file watcher got the same fix — editing a
+  watched file now updates its drawer content instead of being silently
+  ignored by the old insert-only behaviour, and deleting a watched file now
+  removes its drawers. `mine()`'s return value changed from `()` to a
+  `MineSummary` (new/updated/unchanged/removed file counts, drawers
+  added/removed), surfaced in the CLI's mine report and in the MCP
+  `palace_mine` result's new `summary` field.
+
+### Fixed
+
+- **CLI and MCP text still said "MemPalace"** — the `init`, `mine`,
+  `mine-convos`, and onboarding banners, the AAAK dialect spec returned by
+  `palace_get_aaak_spec`/`palace_status`, and the usage-telemetry module doc
+  now use the current **Palace** branding. Legacy `mempalace` migration
+  handling in `install` (0.1.x config/rule cleanup) is intentionally
+  unchanged.
+
+## [0.12.0] - 2026-08-03
+
+### Fixed
+
+- **`palace mine` hangs/timeouts on larger-but-not-huge projects** — mining
+  wrote every drawer, and every unique BM25 term within it, as its own
+  separate SQLite autocommit transaction with no cached prepared statements.
+  A project with a few thousand chunks turned into hundreds of thousands of
+  individual DB round-trips, which could stall for minutes and breach an MCP
+  client's timeout. Writes are now batched into chunked transactions (~200
+  files per commit) using `prepare_cached` statements for the hot insert
+  paths (`add_drawer`, `index_bm25_terms`); `convo_miner::mine_convos` got the
+  identical fix. Embedding was also reworked to keep file reading/chunking
+  parallel (Rayon) but embed sequentially in larger cross-file batches
+  instead of one tiny ONNX call per file, removing contention on the shared
+  embedding session.
+
+### Changed
+
+- **MCP `palace_mine` reports live progress** — `miner::mine` now accepts an
+  optional progress callback invoked after each file is written. When an MCP
+  client requests progress via `_meta.progressToken` on the `tools/call`
+  request, the stdio server streams `notifications/progress` messages as
+  mining proceeds instead of staying silent for the whole call, so a slow
+  mine no longer looks indistinguishable from a hung server.
+
+## [0.11.0] - 2026-07-07
+
+### Added
+
+- **Memory protocol via MCP `initialize` instructions** — the server now sends
+  the profile-aware Palace Memory Protocol in `InitializeResult.instructions`.
+  Clients that honor the field (Claude Desktop/Cowork, Claude Code, and others)
+  inject it into the agent's system prompt at session start, so memory use is
+  automatic in every project even on clients with no hook system and where
+  tools are deferred behind tool search (which also ignores
+  `anthropic/alwaysLoad`). The text includes a note telling tool-deferring
+  clients to batch-load the nine protocol tools in one tool-search call.
+
+## [0.10.0] - 2026-07-03
+
+### Added
+
+- **Non-developer profiles** — a usage profile (`coding` (default), `creative`,
+  or `personal`) now shapes Palace for its audience. Set it with
+  `palace install --profile <name>`; it persists to `~/.palace/config.json` and
+  can be overridden per process with `PALACE_PROFILE`.
+  - The injected agent rule (`RULE_BODY`) and the MCP `palace_status` protocol
+    text are now persona-shaped: worldbuilding/canon wording for `creative`,
+    notes/people/continuity wording for `personal`. `coding` is unchanged.
+  - Room auto-detection uses topic-first maps per profile — characters, places,
+    lore, factions, sessions, timeline for `creative`; people, health, finances,
+    home, schedule, notes for `personal`.
+- **MCP prompts** — the server now implements `prompts/list` and `prompts/get`
+  (advertised via the `prompts` capability) with `continue-session` and
+  `save-session` prompts, giving Claude Desktop users one-click session
+  continuity without hooks.
+- **`palace_memory_report` tool** — a human-readable inventory of what the palace
+  remembers (active profile, per-wing/room counts, recent activity), for
+  inspecting memory without a UI.
+
+## [0.9.1] - 2026-07-02
+
+### Added
+
+- **MCP Bundle (`.mcpb`) release artifact** — the release workflow now assembles a
+  single `palace-<version>.mcpb` bundle containing the Linux x86_64, macOS
+  arm64, and Windows x86_64 binaries plus an MCPB `manifest.json` (binary server
+  type with per-platform overrides). The bundle and its SHA-256 are uploaded as
+  release assets, enabling one-click install in MCPB-aware hosts.
+- **Official MCP registry auto-publish** — a `server.json` (namespace
+  `io.github.ancientice/palace-rs`, MCPB package pointing at the release bundle)
+  is published to `registry.modelcontextprotocol.io` on every tagged release. The
+  release workflow authenticates via GitHub Actions OIDC (no stored secret) and
+  fills in the version, download URL, and bundle hash automatically.
+
+## [0.9.0] - 2026-06-29
+
+### Added
+
+- **Ambient warm-start recall at session start** — the `SessionStart` hook now
+  injects real recalled memory alongside the protocol text: recent diary entries
+  for the session's project (cross-agent, so a different agent the next day still
+  benefits) plus the top drawers of the wing the `cwd` maps to. Prior
+  investigations land in context deterministically, without the agent having to
+  call any palace tool. Fail-open: a missing or empty palace yields the protocol
+  text alone. Applies to every client with a `SessionStart` hook (Claude Code,
+  Codex, Cursor).
+
+### Fixed
+
+- **Read recall gap** — `PostToolUse` auto-recall fired for the `Read` tool (it is
+  in the installed matcher) but never surfaced anything, because the query
+  extractor did not read Claude's `file_path` field. Reads now surface relevant
+  prior memory. The Cursor `postToolUse` matcher was also aligned to
+  `Grep|Read|Glob` for parity with Claude.
+- **UTF-8 truncation panic in memory layers** — snippet truncation in the L1/L2/L3
+  layer renderers sliced on a byte index (`&s[..197]` / `&s[..297]`), panicking
+  when a multibyte character (e.g. `─`, `—`) straddled the boundary — reachable
+  via `palace wake-up`, `palace recall`, and `palace search` on real mined
+  content. Truncation is now char-boundary safe.
+
+## [0.8.0] - 2026-06-19
+
+### Added
+
+- **First-class protocol tools** — the nine memory-protocol-critical MCP tools
+  (`palace_status`, `palace_session_context`, `palace_diary_search`,
+  `palace_project_status`, `palace_search`, `palace_kg_query`,
+  `palace_preference_search`, `palace_diary_write`, `palace_kg_add`) now emit
+  `_meta."anthropic/alwaysLoad" = true` in `tools/list`. Clients that honor the
+  hint (Claude Code >= 2.1.121) keep these resident at session start instead of
+  deferring them behind tool search, so the mandatory three-trigger protocol
+  (SESSION START / BEFORE ANSWERING / AFTER WORK) no longer depends on the agent
+  remembering to load the tools first. All other tools remain deferrable to keep
+  standing context cost low.
+
+### Fixed
+
+- **Docs** — updated remaining contributor, mission, and Claude notes references
+  from the old `mempalace-rs` / `mempalace mcp` names to `palace-rs` /
+  `palace mcp`.
+
+## [0.7.0] - 2026-06-13
+
+### Added
+
+- **First-class wings registry** — a new `wings` table is now the source of truth
+  for every wing (both code repos and non-repo topics), recording `kind`
+  (`project`/`topic`), `description`, `project_path`, and `last_mined_at`. It is
+  populated idempotently on every database open by backfilling distinct wings
+  already present on drawers (`wing_diary__*`/`general`/`conversations` are
+  inferred as topics, everything else as projects), so existing palaces upgrade
+  automatically without touching drawer data.
+- **MCP project-awareness and on-demand mining** — three new MCP tools:
+  `palace_project_status` (reports whether the current repo is `mined` /
+  `registered_not_mined` / `unknown`, with a recommendation), `palace_mine`
+  (mines a code repository on demand after the user agrees, auto-initialising
+  `palace.yaml` for first-time repos and running with its own short-lived
+  connection so the server's shared connection is untouched), and
+  `palace_create_wing` (declares a topic wing for non-repo users such as sales
+  or PMs). `palace_remember` and `palace_add_drawer` now auto-register an unknown
+  wing as a topic, and `palace_list_wings` returns full registry records.
+- **`palace wings` CLI subcommand** — lists registered wings with their kind,
+  drawer counts, and last mined time.
+- **Session-start PROJECT CHECK guidance** — the bundled memory protocol now
+  tells agents to call `palace_project_status` when entering a workspace, ask the
+  user before mining a repo (mining is repo-only and implicitly initialises it),
+  and offer `palace_create_wing` for non-repo topics.
+
+### Changed
+
+- **Mining records registry state** — `miner::mine` marks the wing as mined
+  (`set_wing_mined`) on success, the watcher refreshes mined state, and `mine`
+  gained a `quiet` flag so MCP-triggered mining does not write progress to the
+  JSON-RPC stdout stream.
+
+## [0.6.1] - 2026-06-13
+
+### Removed
+
+- **Dead `llm` module and `--no-llm` flag** — the unused local LLM refinement
+  scaffolding (`src/llm.rs`), its `pub mod llm;` export, the empty `llm` Cargo
+  feature, and the `palace init --no-llm` flag have been removed. Nothing in the
+  default path used them.
+
+### Fixed
+
+- **No more panic on an invalid built-in entity pattern** — `compile_regex` in
+  the entity detector no longer `panic!`s if a built-in regex fails to compile;
+  it logs to stderr and falls back to a never-matching pattern so detection
+  degrades gracefully instead of crashing. Covered by new tests that verify the
+  built-in patterns compile and the fallback behaves.
+
+### Changed
+
+- **Crate metadata** — removed the broken `docs.rs/palace-rs` documentation link
+  (the crate is not published there) and pointed `homepage` at
+  `https://palacememory.com`.
+- **Docs** — corrected stale `MEMPALACE_*` / `mempalace.yaml` migration claims in
+  the README (those names were removed in 0.3.0) and linked `palacememory.com`
+  for remote mode.
+- **CI/release** — the install smoke matrix now targets `aarch64-apple-darwin`
+  to match the actual macOS runner architecture, and the release workflow runs an
+  `install-smoke` job that downloads the freshly published asset on macOS and
+  Linux and verifies an end-to-end install.
+
+## [0.6.0] - 2026-06-09
+
+### Added
+
+- **Remote MCP mode (shared palace-server client)** — `palace mcp` can now run as
+  a transparent stdio→HTTP bridge to a shared remote `palace-server` instead of the
+  local palace. Every AI client keeps its existing stdio registration; when remote
+  mode is on, each JSON-RPC request is forwarded to the server's `/mcp` endpoint
+  with a `Bearer` API key and the response is streamed back verbatim
+  (`application/json` and `text/event-stream` both handled). This lets a whole team
+  share one memory backend in their own infrastructure without per-client URL/header
+  wiring.
+  - **`palace remote set --endpoint <url> [--api-key <key>]`** — store the remote
+    endpoint and `ps_…` API key. The endpoint accepts a bare host, a base URL, or a
+    full `/mcp` URL (normalised automatically). Omit `--api-key` to be prompted on
+    stdin so the key never lands in shell history.
+  - **`palace remote on` / `palace remote off`** — switch the MCP server between the
+    remote palace-server and the local palace.
+  - **`palace local`** — alias for `palace remote off`.
+  - **`palace remote status`** — show the current MCP mode, normalised endpoint, and
+    masked API key.
+  - **`palace remote test`** — one-shot connectivity + auth probe that runs the MCP
+    `initialize` handshake and reports the number of tools the remote exposes.
+  - New configuration surface: `PALACE_MCP_MODE`, `PALACE_REMOTE_ENDPOINT`, and
+    `PALACE_API_KEY` environment variables, plus the `mcp_mode`, `remote_endpoint`,
+    and `remote_api_key` keys in `~/.palace/config.json` (written with owner-only
+    `0600` permissions since the file holds the API key).
+  - For non-standard responses, the proxy unwraps palace-server's text envelope for
+    `initialize` and `tools/list` so any spec-compliant MCP client understands the
+    handshake, while passing `tools/call` and error responses through unchanged.
+
+## [0.5.0] - 2026-06-02
+
+### Added
+
+- **Automatic memory hooks (all clients)** — `palace install` now registers
+  user-scope `session start`, `post tool use`, and `stop` hooks for every client
+  that supports them, enforcing memory use in every project without per-project
+  rules. `post tool use` auto-recalls relevant memory while the agent
+  investigates; `stop` nudges the agent to record its work when it engaged Palace
+  but saved nothing. Coverage:
+  - **Cursor** — `~/.cursor/hooks.json` (recall matched to `Grep`/`Read`).
+  - **Claude Code** — `~/.claude/settings.json` nested hooks (recall matched to
+    `Grep`/`Read`/`Glob`).
+  - **Codex** — `~/.codex/hooks.json` nested hooks (recall matched to `Bash`,
+    since Codex investigates through the shell; run `/hooks` once to trust them).
+  - **Claude Desktop** — no hook system, so it remains rules-only (`CLAUDE.md`).
+
+  Claude Code and Codex share a "Claude-style" output dialect
+  (`hookSpecificOutput.additionalContext`; `decision: "block"` + `reason` on
+  stop), selected via `palace hook <event> --client <cursor|claude|codex>`. The
+  `palace::hooks` module exposes the pure, client-aware response builders.
+- **Cross-agent recall** — `palace_diary_search` accepts `all_agents` and
+  `project_path` to surface investigations recorded by any agent, and
+  `palace_session_context` falls back to another agent's recent project work when
+  the caller has none, so a different agent the next day still benefits from
+  prior work.
+
+### Changed
+
+- **Write-path dedup** — `palace_diary_write` (scoped per agent) and
+  `palace_remember` now skip near-duplicate content, preventing diary/fact bloat
+  from repeated similar writes. Durable decisions still belong in the
+  deduplicated knowledge graph.
+
+### Fixed
+
+- **Resilient model download** — the embedding model fetch now retries with
+  exponential backoff, so transient HuggingFace failures (notably HTTP 429 rate
+  limiting) no longer fail the first embedding call or CI. CI also caches the
+  downloaded model (`~/.cache/huggingface`) across runs to avoid repeated
+  downloads.
+
 ## [0.4.0] - 2026-05-22
 
 ### Added

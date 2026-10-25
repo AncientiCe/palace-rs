@@ -5,11 +5,12 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::embedder::{blob_to_vec, cosine_similarity, vec_to_blob};
+use crate::preference::PreferenceSource;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Drawer {
@@ -73,43 +74,73 @@ pub fn add_drawer(
     added_by: &str,
     importance: f64,
 ) -> Result<(bool, String)> {
+    insert_drawer(
+        conn,
+        wing,
+        room,
+        content,
+        embedding,
+        source_file,
+        chunk_index,
+        added_by,
+        importance,
+        PreferenceSource::infer(source_file),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_drawer(
+    conn: &Connection,
+    wing: &str,
+    room: &str,
+    content: &str,
+    embedding: Option<&[f32]>,
+    source_file: &str,
+    chunk_index: usize,
+    added_by: &str,
+    importance: f64,
+    source: PreferenceSource,
+) -> Result<(bool, String)> {
     let id = drawer_id(wing, room, source_file, chunk_index);
     let blob = embedding.map(vec_to_blob);
-    let pref_blob = preference_embedding_blob(content, embedding);
+    let preference_span = crate::preference::drawer_preference_span(content, room, source);
+    let pref_blob = preference_embedding_blob(preference_span.as_deref(), embedding);
     let filed_at = Utc::now().to_rfc3339();
     let entity_metadata = crate::entity_detector::entity_metadata(content);
     let entity_metadata_text =
         serde_json::to_string(&entity_metadata).unwrap_or_else(|_| "{}".to_string());
     let hall = crate::hall_router::detect_hall(content);
-    let metadata_text = serde_json::to_string(&metadata_for_content(None, content))
-        .unwrap_or_else(|_| "{}".to_string());
+    let metadata_text =
+        serde_json::to_string(&metadata_for_content(None, preference_span.as_deref()))
+            .unwrap_or_else(|_| "{}".to_string());
 
     let rows = conn
-        .execute(
+        .prepare_cached(
             "INSERT OR IGNORE INTO drawers
              (id, wing, room, content, embedding, source_file, chunk_index, added_by, filed_at,
               importance, created_at, entity_metadata, hall, metadata, pref_embedding)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?9, ?11, ?12, ?13, ?14)",
-            params![
-                id,
-                wing,
-                room,
-                content,
-                blob,
-                source_file,
-                chunk_index as i64,
-                added_by,
-                filed_at,
-                importance,
-                entity_metadata_text,
-                hall,
-                metadata_text,
-                pref_blob
-            ],
         )
+        .context("preparing drawer insert")?
+        .execute(params![
+            id,
+            wing,
+            room,
+            content,
+            blob,
+            source_file,
+            chunk_index as i64,
+            added_by,
+            filed_at,
+            importance,
+            entity_metadata_text,
+            hall,
+            metadata_text,
+            pref_blob
+        ])
         .context("inserting drawer")?;
     if rows > 0 {
-        index_bm25_terms(conn, &id, content)?;
+        index_bm25_terms_fresh(conn, &id, content)?;
     }
 
     Ok((rows > 0, id))
@@ -129,9 +160,14 @@ pub fn add_drawer_with_id(
     extra_meta: Option<&serde_json::Value>,
 ) -> Result<bool> {
     let blob = embedding.map(vec_to_blob);
-    let pref_blob = preference_embedding_blob(content, embedding);
+    let preference_span = crate::preference::drawer_preference_span(
+        content,
+        room,
+        PreferenceSource::infer(source_file),
+    );
+    let pref_blob = preference_embedding_blob(preference_span.as_deref(), embedding);
     let filed_at = Utc::now().to_rfc3339();
-    let metadata = metadata_for_content(extra_meta, content);
+    let metadata = metadata_for_content(extra_meta, preference_span.as_deref());
     let metadata_text = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
     let hall = metadata
         .get("hall")
@@ -165,7 +201,7 @@ pub fn add_drawer_with_id(
         )
         .context("inserting drawer with id")?;
     if rows > 0 {
-        index_bm25_terms(conn, id, content)?;
+        index_bm25_terms_fresh(conn, id, content)?;
     }
     Ok(rows > 0)
 }
@@ -183,17 +219,25 @@ pub fn update_drawer_content(conn: &Connection, id: &str, content: &str) -> Resu
     let entity_metadata_text =
         serde_json::to_string(&entity_metadata).unwrap_or_else(|_| "{}".to_string());
     let hall = crate::hall_router::detect_hall(content);
-    let embedding = crate::embedder::embed_one(content).ok();
+    let embedding = crate::embedder::embed_document(content).ok();
     let blob = embedding.as_deref().map(vec_to_blob);
-    let pref_blob = preference_embedding_blob(content, embedding.as_deref());
-    let current_metadata = get_drawer(conn, id)
-        .ok()
-        .flatten()
+    let current = get_drawer(conn, id).ok().flatten();
+    let preference_span = current.as_ref().and_then(|drawer| {
+        crate::preference::drawer_preference_span(
+            content,
+            &drawer.room,
+            stored_preference_source(conn, &drawer.source_file),
+        )
+    });
+    let pref_blob = preference_embedding_blob(preference_span.as_deref(), embedding.as_deref());
+    let current_metadata = current
         .map(|drawer| drawer.metadata)
         .unwrap_or_else(|| serde_json::json!({}));
-    let metadata_text =
-        serde_json::to_string(&metadata_for_content(Some(&current_metadata), content))
-            .unwrap_or_else(|_| "{}".to_string());
+    let metadata_text = serde_json::to_string(&metadata_for_content(
+        Some(&current_metadata),
+        preference_span.as_deref(),
+    ))
+    .unwrap_or_else(|_| "{}".to_string());
     let rows = conn
         .execute(
             "UPDATE drawers
@@ -227,6 +271,182 @@ pub fn file_already_mined(conn: &Connection, source_file: &str) -> Result<bool> 
         )
         .unwrap_or(0);
     Ok(count > 0)
+}
+
+/// Deterministic content hash used to detect whether a mined file changed
+/// since it was last synced. Hashed over the same (trimmed) text that gets
+/// chunked, so a hash match means the chunks would come out identical.
+pub fn content_hash(content: &str) -> String {
+    blake3::hash(content.as_bytes()).to_hex().to_string()
+}
+
+/// The content hash recorded the last time `source_file` was synced via
+/// `replace_file_drawers`, or `None` if it has never gone through the
+/// `mined_files` tracking table (including files mined before that table
+/// existed).
+pub fn get_mined_file_hash(conn: &Connection, source_file: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT content_hash FROM mined_files WHERE source_file = ?1",
+        params![source_file],
+        |r| r.get(0),
+    )
+    .optional()
+    .context("reading mined_files hash")
+}
+
+/// All `(source_file, content_hash)` pairs currently tracked for `wing`, in a
+/// single query. `mine()` uses this to hash-check every walked candidate
+/// against what's already synced without one `SELECT` per file.
+pub fn mined_file_hashes_for_wing(
+    conn: &Connection,
+    wing: &str,
+) -> Result<HashMap<String, String>> {
+    let mut stmt =
+        conn.prepare("SELECT source_file, content_hash FROM mined_files WHERE wing = ?1")?;
+    let rows = stmt.query_map(params![wing], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    rows.map(|r| r.context("mined_files hash row")).collect()
+}
+
+/// Widen SQLite's page cache and use in-memory temp storage for the duration
+/// of a mine. Connection-scoped (`PRAGMA`s here have no persistent effect on
+/// the DB file), so safe to call unconditionally on a fresh connection.
+pub fn apply_mine_pragmas(conn: &Connection) -> Result<()> {
+    conn.pragma_update(None, "cache_size", -65536)
+        .context("setting cache_size pragma")?;
+    conn.pragma_update(None, "temp_store", "MEMORY")
+        .context("setting temp_store pragma")?;
+    conn.pragma_update(None, "mmap_size", 268_435_456i64)
+        .context("setting mmap_size pragma")?;
+    Ok(())
+}
+
+/// Drop the BM25 term-lookup index so a large mine's bulk term inserts aren't
+/// paying for B-tree maintenance on every row; pair with
+/// `rebuild_bm25_term_index` once the run finishes.
+pub fn drop_bm25_term_index(conn: &Connection) -> Result<()> {
+    conn.execute("DROP INDEX IF EXISTS idx_bm25_terms_term", [])
+        .context("dropping BM25 term index")?;
+    Ok(())
+}
+
+pub fn rebuild_bm25_term_index(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bm25_terms_term ON bm25_terms(term)",
+        [],
+    )
+    .context("rebuilding BM25 term index")?;
+    Ok(())
+}
+
+/// Record (or refresh) that `source_file` was synced with `content_hash`,
+/// producing `chunk_count` drawers.
+pub fn upsert_mined_file(
+    conn: &Connection,
+    source_file: &str,
+    wing: &str,
+    content_hash: &str,
+    chunk_count: usize,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.prepare_cached(
+        "INSERT INTO mined_files (source_file, wing, content_hash, mined_at, chunk_count)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(source_file) DO UPDATE SET
+             wing = excluded.wing,
+             content_hash = excluded.content_hash,
+             mined_at = excluded.mined_at,
+             chunk_count = excluded.chunk_count",
+    )
+    .context("preparing mined_files upsert")?
+    .execute(params![
+        source_file,
+        wing,
+        content_hash,
+        now,
+        chunk_count as i64
+    ])
+    .context("upserting mined_files row")?;
+    Ok(())
+}
+
+/// All source files currently tracked as mined for `wing`. Used to find
+/// files that have since been deleted from disk so their drawers can be
+/// pruned.
+pub fn mined_files_for_wing(conn: &Connection, wing: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT source_file FROM mined_files WHERE wing = ?1")?;
+    let rows = stmt.query_map(params![wing], |r| r.get::<_, String>(0))?;
+    rows.map(|r| r.context("mined_files row")).collect()
+}
+
+/// Delete every drawer for `source_file` (BM25 index rows cascade via
+/// `ON DELETE CASCADE`) along with its `mined_files` tracking row. Returns
+/// the number of drawers removed.
+pub fn delete_drawers_for_file(conn: &Connection, source_file: &str) -> Result<usize> {
+    let deleted = conn
+        .execute(
+            "DELETE FROM drawers WHERE source_file = ?1",
+            params![source_file],
+        )
+        .context("deleting drawers for file")?;
+    conn.execute(
+        "DELETE FROM mined_files WHERE source_file = ?1",
+        params![source_file],
+    )
+    .context("deleting mined_files row")?;
+    Ok(deleted)
+}
+
+/// Replace all drawers for `source_file` with freshly mined `chunks`, then
+/// record `content_hash` in `mined_files`. Used for both new and changed
+/// files: unlike the plain `INSERT OR IGNORE` in `add_drawer`, this makes a
+/// re-mine actually pick up edited content instead of leaving the stale
+/// drawer in place. Also correctly drops now-stale high-index chunks when a
+/// file shrinks (e.g. 5 chunks down to 2 removes the old chunks 2-4).
+#[allow(clippy::too_many_arguments)]
+pub fn replace_file_drawers(
+    conn: &Connection,
+    wing: &str,
+    room: &str,
+    source_file: &str,
+    content_hash: &str,
+    chunks: &[(String, usize, Vec<f32>)],
+    added_by: &str,
+    importance: f64,
+) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM drawers WHERE source_file = ?1",
+        params![source_file],
+    )
+    .context("clearing stale drawers before re-mine")?;
+
+    let mut added = 0usize;
+    for (text, chunk_index, embedding) in chunks {
+        let emb = if embedding.is_empty() {
+            None
+        } else {
+            Some(embedding.as_slice())
+        };
+        let (inserted, _) = insert_drawer(
+            conn,
+            wing,
+            room,
+            text,
+            emb,
+            source_file,
+            *chunk_index,
+            added_by,
+            importance,
+            PreferenceSource::Code,
+        )?;
+        if inserted {
+            added += 1;
+        }
+    }
+
+    upsert_mined_file(conn, source_file, wing, content_hash, chunks.len())?;
+    Ok(added)
 }
 
 /// Total number of drawers in the palace.
@@ -273,26 +493,43 @@ pub fn get_drawer(conn: &Connection, id: &str) -> Result<Option<Drawer>> {
 }
 
 /// Return drawers adjacent to a chunk from the same source file.
+///
+/// Scoped to `wing`/`room` in addition to `source_file`: hand-filed drawers
+/// (`palace_add_drawer`, `palace_remember`) commonly share `source_file = ""`,
+/// and without the wing/room scope this would match every empty-source_file
+/// drawer across the whole palace instead of just neighbors of this one. The
+/// `LIMIT` is a hard backstop — it should never exceed `radius * 2 + 1` given
+/// the scoping above, but a `chunk_index` collision across many drawers should
+/// never be able to return unbounded rows.
 pub fn source_context(
     conn: &Connection,
+    wing: &str,
+    room: &str,
     source_file: &str,
     center_chunk_index: i64,
     radius: usize,
 ) -> Result<Vec<Drawer>> {
     let radius = radius as i64;
+    let limit = (radius * 2 + 1).max(1);
     let mut stmt = conn.prepare(
         "SELECT id, wing, room, content, source_file, chunk_index, added_by, filed_at, created_at,
                 importance, entity_metadata, hall, normalize_version, metadata
          FROM drawers
-         WHERE source_file = ?1
-           AND chunk_index BETWEEN ?2 AND ?3
-         ORDER BY chunk_index",
+         WHERE wing = ?1
+           AND room = ?2
+           AND source_file = ?3
+           AND chunk_index BETWEEN ?4 AND ?5
+         ORDER BY chunk_index
+         LIMIT ?6",
     )?;
     let rows = stmt.query_map(
         params![
+            wing,
+            room,
             source_file,
             center_chunk_index.saturating_sub(radius),
-            center_chunk_index.saturating_add(radius)
+            center_chunk_index.saturating_add(radius),
+            limit
         ],
         drawer_from_row,
     )?;
@@ -301,6 +538,96 @@ pub fn source_context(
 
 pub fn get_search_result_drawer(conn: &Connection, id: &str) -> Result<Option<Drawer>> {
     get_drawer(conn, id)
+}
+
+/// Where drawer vectors are read from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VectorSource<'a> {
+    /// `drawers.embedding`: the active model's vectors.
+    Hot,
+    /// `embedding_vectors` rows of one model (a migration target or an
+    /// archived model).
+    Stored(&'a str),
+    /// Vectors already read into memory with [`load_vectors`], for running
+    /// many searches without rescanning the table each time. The filter
+    /// given to [`load_vectors`] applies; the one passed to the search does not.
+    Loaded(&'a LoadedVectors),
+}
+
+/// Drawer vectors held in memory. See [`VectorSource::Loaded`].
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct LoadedVectors {
+    rows: Vec<(String, Vec<f32>)>,
+}
+
+impl LoadedVectors {
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// Read the `(drawer id, vector)` pairs of `source` that match `filter`.
+pub fn load_vectors(
+    conn: &Connection,
+    source: VectorSource,
+    filter: &DrawerFilter,
+) -> Result<LoadedVectors> {
+    if let VectorSource::Loaded(loaded) = source {
+        return Ok(loaded.clone());
+    }
+    let (sql, where_params) = vector_query(source, filter, "d.id");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params_from_iter(where_params.iter().map(|p| p.as_ref())),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    blob_to_vec(&r.get::<_, Vec<u8>>(1)?),
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("loading drawer vectors")?;
+    Ok(LoadedVectors { rows })
+}
+
+/// SQL selecting `columns` plus the vector column of `source` for drawers
+/// matching `filter` (aliased `d`), most recently filed first.
+fn vector_query(
+    source: VectorSource,
+    filter: &DrawerFilter,
+    columns: &str,
+) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let (where_clause, mut where_params) = build_where(filter);
+    let extra = if where_clause.is_empty() {
+        String::new()
+    } else {
+        // where_clause already has "WHERE", replace it with AND
+        format!("AND {}", &where_clause[6..])
+    };
+    let sql = match source {
+        VectorSource::Stored(model) => {
+            where_params.push(Box::new(model.to_string()));
+            format!(
+                "SELECT {columns}, v.vec
+                 FROM drawers d
+                 JOIN embedding_vectors v
+                   ON v.owner_kind = 'drawer' AND v.owner_id = d.id AND v.model = ?{}
+                 WHERE 1 = 1 {extra} ORDER BY d.filed_at DESC",
+                where_params.len()
+            )
+        }
+        VectorSource::Hot | VectorSource::Loaded(_) => format!(
+            "SELECT {columns}, d.embedding
+             FROM drawers d WHERE d.embedding IS NOT NULL {extra} ORDER BY d.filed_at DESC"
+        ),
+    };
+    (sql, where_params)
 }
 
 /// Semantic vector search over drawers.
@@ -313,16 +640,25 @@ pub fn vector_search(
     filter: &DrawerFilter,
     n_results: usize,
 ) -> Result<Vec<SearchResult>> {
-    let (where_clause, where_params) = build_where(filter);
-    let sql = format!(
-        "SELECT id, wing, room, content, source_file, created_at, filed_at, embedding
-         FROM drawers WHERE embedding IS NOT NULL {extra} ORDER BY filed_at DESC",
-        extra = if where_clause.is_empty() {
-            String::new()
-        } else {
-            // where_clause already has "WHERE", replace it with AND
-            format!("AND {}", &where_clause[6..])
-        }
+    vector_search_in(conn, query_vec, VectorSource::Hot, filter, n_results)
+}
+
+/// [`vector_search`] over vectors from `source`. Stored vectors whose length
+/// differs from `query_vec` were made by another model and are skipped.
+pub fn vector_search_in(
+    conn: &Connection,
+    query_vec: &[f32],
+    source: VectorSource,
+    filter: &DrawerFilter,
+    n_results: usize,
+) -> Result<Vec<SearchResult>> {
+    if let VectorSource::Loaded(loaded) = source {
+        return search_loaded(conn, query_vec, loaded, n_results);
+    }
+    let (sql, where_params) = vector_query(
+        source,
+        filter,
+        "d.id, d.wing, d.room, d.content, d.source_file, d.created_at, d.filed_at",
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -346,6 +682,9 @@ pub fn vector_search(
         .filter_map(|r| {
             let (id, wing, room, content, source_file, created_at, filed_at, blob) = r.ok()?;
             let emb = blob_to_vec(&blob);
+            if emb.len() != query_vec.len() {
+                return None;
+            }
             let sim = cosine_similarity(query_vec, &emb) as f64;
             Some(SearchResult {
                 id,
@@ -367,6 +706,38 @@ pub fn vector_search(
     });
     scored.truncate(n_results);
     Ok(scored)
+}
+
+/// Rank in-memory vectors, then read only the top drawers from SQLite.
+fn search_loaded(
+    conn: &Connection,
+    query_vec: &[f32],
+    loaded: &LoadedVectors,
+    n_results: usize,
+) -> Result<Vec<SearchResult>> {
+    let mut scored: Vec<(&str, f64)> = loaded
+        .rows
+        .iter()
+        .filter(|(_, vector)| vector.len() == query_vec.len())
+        .map(|(id, vector)| (id.as_str(), cosine_similarity(query_vec, vector) as f64))
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut results = Vec::with_capacity(n_results);
+    for (id, sim) in scored.into_iter().take(n_results) {
+        if let Some(drawer) = get_drawer(conn, id)? {
+            results.push(SearchResult {
+                id: drawer.id,
+                text: drawer.content,
+                wing: drawer.wing,
+                room: drawer.room,
+                source_file: drawer.source_file,
+                created_at: drawer.created_at,
+                filed_at: drawer.filed_at,
+                similarity: (sim * 1000.0).round() / 1000.0,
+            });
+        }
+    }
+    Ok(results)
 }
 
 /// Search drawers tagged as preferences, ranked by cosine similarity.
@@ -451,8 +822,22 @@ pub fn check_duplicate(
     content: &str,
     threshold: f64,
 ) -> Result<Vec<SearchResult>> {
-    let embedding = crate::embedder::embed_one(content)?;
-    let results = vector_search(conn, &embedding, &DrawerFilter::default(), 5)?;
+    check_duplicate_filtered(conn, content, threshold, &DrawerFilter::default())
+}
+
+/// Check for near-duplicate content within a wing/room scope.
+///
+/// Used to keep dedup tight: diary entries are deduplicated only against the
+/// same agent's diary, so two agents recording the same observation each keep
+/// their own continuity record.
+pub fn check_duplicate_filtered(
+    conn: &Connection,
+    content: &str,
+    threshold: f64,
+    filter: &DrawerFilter,
+) -> Result<Vec<SearchResult>> {
+    let embedding = crate::embedder::embed_document(content)?;
+    let results = vector_search(conn, &embedding, filter, 5)?;
     Ok(results
         .into_iter()
         .filter(|r| r.similarity >= threshold)
@@ -464,6 +849,123 @@ pub fn wing_counts(conn: &Connection) -> Result<HashMap<String, i64>> {
     let mut stmt = conn.prepare("SELECT wing, COUNT(*) FROM drawers GROUP BY wing")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
     rows.map(|r| r.context("wing counts")).collect()
+}
+
+/// A row from the `wings` registry, enriched with the wing's drawer count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WingRecord {
+    pub name: String,
+    /// `project` or `topic`.
+    pub kind: String,
+    pub description: String,
+    /// Canonical on-disk path for project wings; `None` for topics.
+    pub project_path: Option<String>,
+    /// RFC3339 timestamp of the last successful mine; `None` if never mined.
+    pub last_mined_at: Option<String>,
+    pub created_at: String,
+    pub drawer_count: i64,
+}
+
+const WING_SELECT: &str = "SELECT w.name, w.kind, w.description, w.project_path, w.last_mined_at, \
+     w.created_at, (SELECT COUNT(*) FROM drawers d WHERE d.wing = w.name) AS drawer_count \
+     FROM wings w";
+
+fn wing_record_from_row(row: &rusqlite::Row) -> rusqlite::Result<WingRecord> {
+    Ok(WingRecord {
+        name: row.get(0)?,
+        kind: row.get(1)?,
+        description: row.get(2)?,
+        project_path: row.get(3)?,
+        last_mined_at: row.get(4)?,
+        created_at: row.get(5)?,
+        drawer_count: row.get(6)?,
+    })
+}
+
+/// Insert or update a wing registry entry.
+///
+/// Non-empty incoming values win; empty values preserve whatever is already
+/// stored, so this never clobbers a richer record with blanks. A `project` kind
+/// always wins over `topic` (a wing can be promoted but not demoted).
+pub fn upsert_wing(
+    conn: &Connection,
+    name: &str,
+    kind: &str,
+    description: &str,
+    project_path: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO wings (name, kind, description, project_path)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(name) DO UPDATE SET
+             kind = CASE
+                 WHEN excluded.kind = 'project' OR wings.kind = 'project' THEN 'project'
+                 ELSE excluded.kind
+             END,
+             description = CASE
+                 WHEN excluded.description != '' THEN excluded.description
+                 ELSE wings.description
+             END,
+             project_path = COALESCE(NULLIF(excluded.project_path, ''), wings.project_path)",
+        params![name, kind, description, project_path],
+    )
+    .context("upserting wing")?;
+    Ok(())
+}
+
+/// Fetch a single wing registry entry by name.
+pub fn get_wing(conn: &Connection, name: &str) -> Result<Option<WingRecord>> {
+    let sql = format!("{WING_SELECT} WHERE w.name = ?1");
+    match conn.query_row(&sql, params![name], wing_record_from_row) {
+        Ok(record) => Ok(Some(record)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Find a project wing by its canonical on-disk path.
+pub fn find_wing_by_path(conn: &Connection, project_path: &str) -> Result<Option<WingRecord>> {
+    let sql = format!("{WING_SELECT} WHERE w.project_path = ?1");
+    match conn.query_row(&sql, params![project_path], wing_record_from_row) {
+        Ok(record) => Ok(Some(record)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// List all registered wings, most-populated first.
+pub fn list_wings_registry(conn: &Connection) -> Result<Vec<WingRecord>> {
+    let sql = format!("{WING_SELECT} ORDER BY drawer_count DESC, w.name ASC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], wing_record_from_row)?;
+    rows.map(|r| r.context("listing wings registry")).collect()
+}
+
+/// Mark a wing as a mined project: set kind=project, path, and last_mined_at.
+pub fn set_wing_mined(conn: &Connection, name: &str, project_path: &str) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO wings (name, kind, project_path, last_mined_at)
+         VALUES (?1, 'project', ?2, ?3)
+         ON CONFLICT(name) DO UPDATE SET
+             kind = 'project',
+             project_path = ?2,
+             last_mined_at = ?3",
+        params![name, project_path, now],
+    )
+    .context("marking wing as mined")?;
+    Ok(())
+}
+
+/// Register a wing as a topic if it isn't already known. Never modifies an
+/// existing entry, so project wings keep their richer metadata.
+pub fn ensure_wing_registered(conn: &Connection, name: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO wings (name, kind) VALUES (?1, 'topic')",
+        params![name],
+    )
+    .context("ensuring wing registered")?;
+    Ok(())
 }
 
 /// Room-level drawer counts (optionally filtered by wing).
@@ -543,6 +1045,62 @@ pub fn update_embedding(conn: &Connection, id: &str, embedding: &[f32]) -> Resul
     Ok(())
 }
 
+/// Drawers embedded per write transaction by [`reembed_drawers`].
+const REEMBED_BATCH: usize = 64;
+
+/// Outcome of [`reembed_drawers`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReembedReport {
+    pub reembedded: usize,
+    pub errors: usize,
+}
+
+/// Re-embed `drawers` (`(id, content)` pairs) with the active model.
+///
+/// Texts go to the embedder in batches and each batch is written in one
+/// transaction, so a large palace is not rewritten one autocommit at a time
+/// and an interrupted run keeps every finished batch. Preference vectors are
+/// left to [`refresh_preference_tags`].
+pub fn reembed_drawers(conn: &Connection, drawers: &[(String, String)]) -> Result<ReembedReport> {
+    let mut report = ReembedReport::default();
+    for batch in drawers.chunks(REEMBED_BATCH) {
+        let texts: Vec<&str> = batch.iter().map(|(_, content)| content.as_str()).collect();
+        let Ok(vectors) = crate::embedder::embed_documents(&texts) else {
+            report.errors += batch.len();
+            continue;
+        };
+        with_write_batch(conn, |conn| {
+            for ((id, _), vector) in batch.iter().zip(&vectors) {
+                match conn.execute(
+                    "UPDATE drawers SET embedding = ?1 WHERE id = ?2",
+                    params![vec_to_blob(vector), id],
+                ) {
+                    Ok(_) => report.reembedded += 1,
+                    Err(_) => report.errors += 1,
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(report)
+}
+
+/// Run `f` inside one transaction, unless the caller already opened one.
+pub(crate) fn with_write_batch<T>(
+    conn: &Connection,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    if !conn.is_autocommit() {
+        return f(conn);
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .context("starting write batch")?;
+    let value = f(&tx)?;
+    tx.commit().context("committing write batch")?;
+    Ok(value)
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn build_where(filter: &DrawerFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
@@ -590,12 +1148,20 @@ fn parse_json_object(text: &str) -> serde_json::Value {
     serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!({}))
 }
 
-fn metadata_for_content(existing: Option<&serde_json::Value>, content: &str) -> serde_json::Value {
+/// `preference_span` is computed once by the caller and threaded through here
+/// (and into `preference_embedding_blob`) rather than recomputed — scanning
+/// an ~800-char chunk for a preference span allocates several lowercase
+/// copies and runs dozens of substring searches, and doing it twice per
+/// drawer added up during large mines.
+fn metadata_for_content(
+    existing: Option<&serde_json::Value>,
+    preference_span: Option<&str>,
+) -> serde_json::Value {
     let mut metadata = existing.cloned().unwrap_or_else(|| serde_json::json!({}));
     if !metadata.is_object() {
         metadata = serde_json::json!({});
     }
-    if let Some(span) = crate::preference::preference_span(content) {
+    if let Some(span) = preference_span {
         metadata["preference"] = serde_json::json!(true);
         metadata["preference_span"] = serde_json::json!(span);
     } else if let Some(object) = metadata.as_object_mut() {
@@ -605,16 +1171,130 @@ fn metadata_for_content(existing: Option<&serde_json::Value>, content: &str) -> 
     metadata
 }
 
-fn preference_embedding_blob(content: &str, fallback_embedding: Option<&[f32]>) -> Option<Vec<u8>> {
-    let span = crate::preference::preference_span(content)?;
+fn preference_embedding_blob(
+    preference_span: Option<&str>,
+    fallback_embedding: Option<&[f32]>,
+) -> Option<Vec<u8>> {
+    let span = preference_span?;
     let fallback = fallback_embedding?;
-    let embedding = crate::embedder::embed_one(&span)
+    let embedding = crate::embedder::embed_document(span)
         .ok()
         .unwrap_or_else(|| fallback.to_vec());
     Some(vec_to_blob(&embedding))
 }
 
+/// The preference source of a stored drawer: a file the project miner
+/// recorded is code whatever its extension; otherwise infer from the path.
+fn stored_preference_source(conn: &Connection, source_file: &str) -> PreferenceSource {
+    let mined = conn
+        .query_row(
+            "SELECT 1 FROM mined_files WHERE source_file = ?1",
+            params![source_file],
+            |_| Ok(()),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .is_some();
+    if mined {
+        PreferenceSource::Code
+    } else {
+        PreferenceSource::infer(source_file)
+    }
+}
+
+/// Bump when the preference-tagging rules change, so `db::migrate` re-tags
+/// existing drawers once.
+pub const PREFERENCE_TAGGING_VERSION: &str = "2";
+
+/// Re-tag every drawer under the current preference rules: set or clear the
+/// `preference` metadata and `pref_embedding`. Only drawers whose tag changed
+/// are written, unless `reembed` is set, which also re-embeds every tagged
+/// span (after an embedding-model upgrade). Returns how many drawers changed.
+pub fn refresh_preference_tags(conn: &Connection, reembed: bool) -> Result<usize> {
+    let mut pending: Vec<(String, Option<String>, serde_json::Value)> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, room, source_file, content, metadata, pref_embedding IS NOT NULL,
+                    source_file IN (SELECT source_file FROM mined_files)
+             FROM drawers ORDER BY rowid",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let room: String = row.get(1)?;
+            let source_file: String = row.get(2)?;
+            let source = if row.get(6)? {
+                PreferenceSource::Code
+            } else {
+                PreferenceSource::infer(&source_file)
+            };
+            let content: String = row.get(3)?;
+            let metadata = parse_json_object(&row.get::<_, String>(4)?);
+            let has_pref_embedding: bool = row.get(5)?;
+            let span = crate::preference::drawer_preference_span(&content, &room, source);
+            let tagged = metadata.get("preference").and_then(|v| v.as_bool()) == Some(true);
+            let unchanged = match &span {
+                None => !tagged && !has_pref_embedding,
+                Some(span) => {
+                    !reembed
+                        && tagged
+                        && has_pref_embedding
+                        && metadata.get("preference_span").and_then(|v| v.as_str())
+                            == Some(span.as_str())
+                }
+            };
+            if !unchanged {
+                pending.push((row.get(0)?, span, metadata));
+            }
+        }
+    }
+
+    for (id, span, metadata) in &pending {
+        let pref_blob = match span {
+            Some(_) => {
+                let stored: Option<Vec<u8>> = conn
+                    .query_row(
+                        "SELECT embedding FROM drawers WHERE id = ?1",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                let fallback = stored.as_deref().map(blob_to_vec);
+                preference_embedding_blob(span.as_deref(), fallback.as_deref())
+            }
+            None => None,
+        };
+        let metadata_text =
+            serde_json::to_string(&metadata_for_content(Some(metadata), span.as_deref()))
+                .unwrap_or_else(|_| "{}".to_string());
+        conn.execute(
+            "UPDATE drawers SET metadata = ?1, pref_embedding = ?2 WHERE id = ?3",
+            params![metadata_text, pref_blob, id],
+        )
+        .context("refreshing drawer preference tag")?;
+    }
+    Ok(pending.len())
+}
+
+/// Re-index BM25 terms for a drawer whose content just changed in place
+/// (`update_drawer_content`) — the drawer already existed, so any previous
+/// term rows must be cleared first.
 fn index_bm25_terms(conn: &Connection, drawer_id: &str, content: &str) -> Result<()> {
+    conn.prepare_cached("DELETE FROM bm25_terms WHERE drawer_id = ?1")
+        .context("preparing BM25 term clear")?
+        .execute(params![drawer_id])
+        .context("clearing old BM25 terms")?;
+    index_bm25_terms_fresh(conn, drawer_id, content)
+}
+
+/// Index BM25 terms for a drawer that was just freshly inserted
+/// (`add_drawer`, `add_drawer_with_id`, both of which only call this when the
+/// `INSERT OR IGNORE` actually added a row). No DELETE needed: a brand-new
+/// drawer id can't already have term rows — they're only ever created here,
+/// and if this id was just replaced (`replace_file_drawers`'s upfront
+/// `DELETE FROM drawers`), `ON DELETE CASCADE` already cleared them.
+fn index_bm25_terms_fresh(conn: &Connection, drawer_id: &str, content: &str) -> Result<()> {
     let terms = crate::ranker::tokenize(content);
     let doc_len = terms.len() as i64;
     let mut counts: HashMap<String, i64> = HashMap::new();
@@ -622,29 +1302,44 @@ fn index_bm25_terms(conn: &Connection, drawer_id: &str, content: &str) -> Result
         *counts.entry(term).or_default() += 1;
     }
 
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO bm25_doc_stats (drawer_id, doc_len)
          VALUES (?1, ?2)
          ON CONFLICT(drawer_id) DO UPDATE SET
             doc_len = excluded.doc_len,
             updated_at = CURRENT_TIMESTAMP",
-        params![drawer_id, doc_len],
     )
+    .context("preparing BM25 doc stats upsert")?
+    .execute(params![drawer_id, doc_len])
     .context("upserting BM25 doc stats")?;
 
-    conn.execute(
-        "DELETE FROM bm25_terms WHERE drawer_id = ?1",
-        params![drawer_id],
-    )
-    .context("clearing old BM25 terms")?;
+    insert_bm25_terms(conn, drawer_id, &counts)
+}
 
-    for (term, tf) in counts {
-        conn.execute(
-            "INSERT INTO bm25_terms (drawer_id, term, tf) VALUES (?1, ?2, ?3)",
-            params![drawer_id, term, tf],
-        )
-        .context("inserting BM25 term")?;
+/// Insert BM25 term rows for `drawer_id` in a single multi-row statement
+/// instead of one `INSERT` per unique term — a ~800-char chunk commonly has
+/// 50-150 unique terms, so this turns that many separate random B-tree
+/// inserts (against `idx_bm25_terms_term`) into one.
+fn insert_bm25_terms(
+    conn: &Connection,
+    drawer_id: &str,
+    counts: &HashMap<String, i64>,
+) -> Result<()> {
+    if counts.is_empty() {
+        return Ok(());
     }
-
+    let placeholders = vec!["(?, ?, ?)"; counts.len()].join(", ");
+    let sql = format!("INSERT INTO bm25_terms (drawer_id, term, tf) VALUES {placeholders}");
+    let mut bound: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(counts.len() * 3);
+    for (term, tf) in counts {
+        bound.push(Box::new(drawer_id.to_string()));
+        bound.push(Box::new(term.clone()));
+        bound.push(Box::new(*tf));
+    }
+    let params_refs: Vec<&dyn rusqlite::ToSql> = bound.iter().map(|b| b.as_ref()).collect();
+    conn.prepare(&sql)
+        .context("preparing batched BM25 term insert")?
+        .execute(params_refs.as_slice())
+        .context("inserting BM25 terms")?;
     Ok(())
 }

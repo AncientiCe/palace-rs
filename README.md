@@ -1,256 +1,525 @@
-# palace-rs
+<p align="center">
+  <img src="docs/images/banner.svg" alt="palace banner: decisions, commands, and preferences from today's session go into a local palace, so the agent's next session remembers them" width="100%">
+</p>
 
-[![CI](https://github.com/AncientiCe/palace-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/AncientiCe/palace-rs/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust 1.82+](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org)
+<p align="center">
+  <a href="https://github.com/AncientiCe/palace-rs/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/AncientiCe/palace-rs/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/AncientiCe/palace-rs/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AncientiCe/palace-rs?sort=semver"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <img alt="Platforms: Linux, macOS, Windows" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-informational">
+  <img alt="Rust 1.82+" src="https://img.shields.io/badge/rust-1.82%2B-orange?logo=rust">
+  <a href="https://registry.modelcontextprotocol.io"><img alt="Listed in the MCP registry" src="https://img.shields.io/badge/MCP-registry-8250df"></a>
+  <img alt="Works with Claude Code, Codex, Cursor, Gemini CLI, VS Code, OpenCode, Cline, Zed, Goose, Windsurf and Claude Desktop" src="https://img.shields.io/badge/works%20with-11%20AI%20agents-8A2BE2">
+</p>
 
-A local-first memory retrieval engine for coding agents, implemented in Rust.
+<p align="center">
+  <b>Local-first memory for coding agents.</b><br>
+  Your agent remembers decisions, fixes, commands, and preferences between sessions.<br>
+  One binary, one SQLite file, no API keys, no cloud.
+</p>
 
-This project stores verbatim project and conversation memory, embeds it locally,
-and retrieves source-grounded context through MCP. It is built for coding agents
-that need to remember decisions, prior fixes, commands, project conventions, and
-user preferences across sessions without running a separate vector database.
-
-## What It Does
-
-- Stores project files and conversation turns in a local SQLite database.
-- Generates local embeddings with ONNX Runtime and `all-MiniLM-L6-v2`.
-- Retrieves memories with hybrid semantic/BM25 search plus coding-agent intent boosts.
-- Tags preference-shaped drawers and runs a dedicated preference recall pass for
-  fuzzy "what do I prefer?" and convention questions.
-- Stores preference spans with optional secondary embeddings and exposes a
-  `preference_match` score for preference-shaped queries.
-- Classifies search intent (`preference`, `decision`, `how_to`, `definition`,
-  `temporal`, `unknown`) and can optionally rerank top results with a local
-  interaction reranker.
-- Sanitizes agent-generated query dumps before retrieval.
-- Returns source-grounded results with score provenance and nearby source context.
-- Warms up agents from recent diary entries with project, topic, timestamp, tags,
-  and compact session text.
-- Provides a knowledge graph for temporal entity relationships.
-- Measures real-world usefulness through `palace gain` precision metrics and
-  optional folded feedback on the existing `palace_gain` MCP tool.
-- Exposes MCP tools for assistants that support Model Context Protocol.
-- Offers a small Rust library API for embedding memory into other services.
-
-## Agent Memory Reliability
-
-Version `0.4.0` focuses on the retrieval cases that matter most during coding
-work: preferences, project conventions, recent session continuity,
-source-grounded answers, and measurable usefulness in real agent sessions.
-Drawers that look like user preferences or conventions are tagged in metadata
-during writes and updates, record the matched preference span, and can store a
-secondary preference embedding. Preference-shaped queries receive a dedicated
-`preference_match` score alongside hybrid semantic/BM25 search.
-
-MCP search responses expose score provenance (`combined`, `cosine`, `bm25`, and
-`coding_boost`, `preference_match`, optional `rerank_score`, and `intent`) plus
-adjacent source context so agents can cite why a memory was returned. Diary tools
-provide warm-start context for recent sessions, including project path, topic,
-timestamp, session ID, tags, and compact text.
-
-Library consumers can use `Palace::search_with_provenance` when they need the
-same structured score details that MCP tools return.
-
-## Storage
-
-Collapses Python's dual-store (ChromaDB + SQLite) into **one file** at `~/.palace/palace.db`:
-
-| Table | Purpose |
-|---|---|
-| `drawers` | Text content + embedding BLOB + metadata |
-| `entities` | KG entity nodes |
-| `triples` | KG temporal relationship edges |
-
-Embeddings are stored as `f32` vectors from `all-MiniLM-L6-v2`. Search uses local cosine similarity over the stored vectors.
+<p align="center">
+  <a href="#-quick-start">Quick start</a> ·
+  <a href="#-install">Install</a> ·
+  <a href="#-how-it-works">How it works</a> ·
+  <a href="#-supported-clients">Clients</a> ·
+  <a href="#-cli-reference">CLI</a> ·
+  <a href="#-mcp-tools">MCP tools</a> ·
+  <a href="#-faq">FAQ</a>
+</p>
 
 ---
 
-## Benchmarks
+Palace gives Claude Code, Codex, Cursor, Gemini CLI, VS Code, OpenCode,
+Cline, Zed, Goose, Windsurf, and Claude Desktop a memory that
+lasts between sessions. It stores what happened verbatim, recalls it
+automatically when it's relevant, and cites where each answer came from.
 
-### Coding-Agent Memory Eval
-
-The repository includes a focused eval fixture for practical coding-agent memory
-questions. It stores realistic memories about project decisions, prior failures,
-commands, conventions, user preferences, and current direction, then asks 40
-questions such as:
-
-- why did we choose bundled sqlite?
-- how did we fix the migration test failure last time?
-- what clippy command should I run?
-- what is the project convention for search results?
-- what changed in the current product direction?
-
-Run it with:
-
-```bash
-cargo test --test coding_agent_eval -- --nocapture
+```text
+You:    why did we switch the queue to SQLite last month?
+Agent:  [palace_search → wing my_api, room decisions, filed 2026-09-03]
+        You dropped Redis because the deploy target had no persistent volume.
+        The benchmark you ran is in the same drawer.
 ```
 
-The test reports `recall@1` and `recall@5` and fails if retrieval drops below the
-stable threshold. This is the product-shaped proof: not broad memory theater,
-but whether a coding agent can recover the right project context when it matters.
+---
 
-### LongMemEval
+## 🧭 Why Palace
 
-Retrieval recall on the LongMemEval `s_cleaned` split — 500 questions over conversational haystacks of ~50 sessions / ~115k tokens each (30 abstention questions are filtered out per the standard convention, leaving 470 evaluated).
+Every new agent session starts with no memory. You explain the architecture
+again. The agent repeats a fix you rejected last week. It greps the whole repo
+to rediscover a convention you settled months ago.
 
-The recipe behind the numbers below:
+Palace fixes that by:
 
-- **Granularity**: one drawer per session.
-- **Indexed content**: the **full session** — both user and assistant turns are stored and embedded together. No user-turn filtering, no summarization, no LLM extraction.
-- **Embedder**: `all-MiniLM-L6-v2` (384-dim, ONNX), 512-token cap, run locally — no API calls.
-- **Retrieval**: **hybrid baseline** — BM25 (k1=1.5, b=0.75, weight 0.35) fused with cosine similarity (weight 0.65), top-K = 10. These reported LongMemEval numbers used pure score fusion, before the coding-agent intent boosts used by current project-memory search.
-- **No LLM at any stage**: no extraction, no rerank, no answer generation. The recall numbers measure the retriever in isolation.
-- **Metric**: `recall_any@K` at session granularity — does any gold session appear in the top-K results?
-- **Hardware**: Apple M1 Pro, 10 cores (8P + 2E), 32 GB RAM.
+- **Storing text verbatim.** Code, notes, and conversations are stored as
+  written, not as an LLM summary that loses detail.
+- **Running locally.** Embeddings come from `all-MiniLM-L6-v2` (or another
+  [supported model](#embedding-models)) on ONNX Runtime, on your CPU. Nothing leaves your machine unless you turn on
+  [remote mode](#remote-mode-shared-team-memory).
+- **Recalling without being asked.** Hooks inject relevant memory when a
+  session starts, when you send a prompt, and while the agent investigates.
+  The agent does not need to remember to search.
+- **Citing sources.** Every result carries its wing, room, source file, drawer
+  id, and score breakdown, so you can check where an answer came from.
+- **Shipping as one binary.** No Python, no vector database, no Docker. One
+  `palace` executable and one `palace.db` file.
 
-| Split | R@1 | R@5 | R@10 |
-|---|---:|---:|---:|
-| `longmemeval_oracle` (sanity check) | 1.000 | 1.000 | 1.000 |
-| `longmemeval_s_cleaned` | **0.889** | **0.981** | **0.991** |
-
-Per-question-type on `s_cleaned`:
-
-| Question type | R@1 | R@5 | R@10 |
-|---|---:|---:|---:|
-| knowledge-update | 0.944 | 1.000 | 1.000 |
-| multi-session | 0.909 | 0.983 | 1.000 |
-| single-session-assistant | 1.000 | 1.000 | 1.000 |
-| single-session-preference | 0.633 | 0.867 | 0.933 |
-| single-session-user | 0.922 | 1.000 | 1.000 |
-| temporal-reasoning | 0.835 | 0.976 | 0.984 |
-
-### Reading the numbers
-
-- **`oracle` is a sanity check, not a real result.** That split hands the retriever only the sessions known to contain the answer, so perfect recall just confirms the pipeline is wired up correctly.
-- **`s_cleaned` is the real test.** ~50 sessions / ~115k tokens of conversational haystack per question, no hints. R@5 = 0.981 means that for 461 of 470 evaluated questions, a gold session appears somewhere in the top 5 retrieved.
-- **R@1 → R@5 → R@10 tells you where the failures cluster.** The jump from 0.889 to 0.981 means most "misses" at top-1 are near-misses — the right session is usually rank 2–5, displaced by a lexically similar distractor. The further jump to 0.991 at top-10 means only ~9 questions out of 470 fall outside the top-10 entirely; those are the genuinely hard cases.
-- **Per-question-type breakdown is where the model's blind spots show.**
-  - `single-session-assistant`, `single-session-user`, `knowledge-update`: ≥0.94 at R@1, ≈1.0 at R@5. The retriever handles direct questions where the answer is stated verbatim in one session.
-  - `multi-session` and `temporal-reasoning`: strong at R@5 (~0.98) but lower at R@1 (~0.83–0.91). Multiple sessions are relevant and the "best" one is a judgement call — top-1 ranking among near-equivalents is genuinely ambiguous.
-  - `single-session-preference`: the visible weak spot at 0.633 / 0.867 / 0.933. Preference questions ("what's my favorite X") are answered by sentences like *"I like…"* / *"I prefer…"* that don't share keywords with the question. Pure BM25 + frozen MiniLM has no signal for preference-shaped sentences specifically; closing this gap would require either an LLM-extracted preference index or a hand-rolled pattern booster.
-- **What's deliberately *not* in these LongMemEval numbers.** No LLM at any stage — no extraction during ingest, no query rewriting, no rerank, no answer generation. No per-dataset hyperparameter tuning. No GPU. The result is the baseline retriever in isolation, on a single CPU, with fixed defaults.
+It also works outside software projects. The `creative` and `personal`
+[profiles](#profiles) adapt it for worldbuilding, fiction, coaching, or
+household notes.
 
 ---
 
-## Installation
+## 📦 Install
 
-### macOS / Linux
+Pick one. Each method installs the `palace` binary. Run `palace install`
+afterwards to connect your agents.
+
+**macOS / Linux**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AncientiCe/palace-rs/main/scripts/install.sh | sh
 ```
 
-### Windows
+**Windows (PowerShell)**
 
 ```powershell
 irm https://raw.githubusercontent.com/AncientiCe/palace-rs/main/scripts/install.ps1 | iex
 ```
 
-The installer downloads the matching GitHub Release binary, verifies its SHA-256
-checksum, installs it locally, and registers the MCP server with Cursor, Codex,
-and Claude Code.
+The scripts download the matching GitHub Release binary, verify its SHA-256
+checksum, and install it. To upgrade later, run the same command again.
 
-Development install:
-
-```bash
-cargo install --path .
-palace install
-```
-
-The first time you run `mine`, the embedding model is downloaded automatically from HuggingFace and cached.
-
-> **Upgrading from `mempalace` (≤ 0.1.9)?** See [Migrating from `mempalace` to `palace`](#migrating-from-mempalace-to-palace). The 0.2.x line ships a `mempalace` shim binary that forwards to `palace` for one release; it is removed in 0.3.0.
-
----
-
-## Quick Start
+**Homebrew (macOS Apple Silicon / Linux)**
 
 ```bash
-cargo install --path .       # development install; release installers do this for you
-palace install               # configures Cursor + Codex + Claude Code
-palace doctor                # verifies MCP config, rules, binary, and drawer count
-palace seed-adoption-facts   # seed KG facts that make agent recall measurable
-palace init ~/my-project     # detect rooms and write palace.yaml
-palace mine ~/my-project     # populate the palace
+brew tap AncientiCe/palace
+brew install palace
 ```
 
-Then restart your agent app so it reloads MCP configuration. Search manually with
-`palace search "how did we decide on the database schema"` or let your agent
-call the MCP tools when its installed rule tells it to consult memory.
+To upgrade, refresh the tap first. Without `brew update`, Homebrew can keep
+reporting the old version as already installed:
 
----
+```bash
+brew update && brew upgrade palace
+```
 
-## CLI Reference
+When a release changes the memory protocol rule (the CHANGELOG says so), run
+`palace install` again afterwards so your agents get the new rule text.
 
-| Command | Description |
+**MCP registry / MCPB bundle.** Palace is listed in the official
+[MCP registry](https://registry.modelcontextprotocol.io) as
+`io.github.ancientice/palace-rs`. Each release also ships a `palace-<version>.mcpb`
+bundle (Linux x86_64, macOS arm64, Windows x86_64) for one-click install in
+MCPB-aware hosts such as Claude Desktop.
+
+**From source**
+
+```bash
+git clone https://github.com/AncientiCe/palace-rs && cd palace-rs
+cargo build --release   # binary at target/release/palace
+```
+
+| Platform | Status |
 |---|---|
-| `palace init <dir>` | Detect rooms from folder structure, write `palace.yaml` |
-| `palace mine <dir>` | Chunk, embed, and store project files |
-| `palace mine-convos <dir>` | Ingest conversation exports |
-| `palace search <query>` | Semantic search with similarity scores |
-| `palace wake-up` | Print L0 (identity) + L1 (essential story) context |
-| `palace status` | Palace overview: drawer counts by wing/room |
-| `palace gain` | Show MCP usage gains, estimated savings, and per-project value |
-| `palace split` | Split Claude Code mega-transcripts by session |
-| `palace repair` | Re-embed any drawers missing vectors |
-| `palace install` | Register the MCP server with Cursor, Codex, and Claude Code |
-| `palace uninstall` | Remove palace from MCP client configs |
-| `palace doctor` | Inspect binary path, palace DB, and MCP config status |
-| `palace seed-adoption-facts` | Seed durable KG facts for Palace adoption and quality gates |
-| `palace upgrade-embeddings` | Re-embed drawers; add `--refresh-preferences` to refresh preference-span vectors |
-| `palace mcp` | Start the MCP stdio server |
+| Linux x86_64 | Supported |
+| macOS Apple Silicon | Supported |
+| Windows x86_64 | Supported |
+| macOS Intel | Not supported (no ONNX Runtime build) |
 
-### `mine` flags
+The embedding model (~90 MB) downloads from Hugging Face the first time you
+mine or search, then stays cached in `~/.cache/huggingface`.
+
+---
+
+## ⚡ Quick start
+
+```bash
+palace install            # connect every supported agent on this machine
+palace doctor             # check that every client is wired up
+palace init ~/my-project --yes --auto-mine   # detect rooms, write palace.yaml, mine
+```
+
+Restart your agent app so it reloads its MCP config. Then try:
+
+> "What do we know about how this project handles database migrations?"
+
+The agent should call `palace_search` and answer from memory, citing the
+drawer it used. You can also search from the terminal:
+
+```bash
+palace search "how did we decide on the database schema"
+```
+
+From then on, the agent writes a diary entry after substantial work and stores
+durable decisions as facts. Tomorrow's session, from any of your agents, picks
+up where today's left off.
+
+---
+
+## 🔍 How it works
+
+### The palace
+
+Memory is organised like a building, which keeps search focused:
+
+<p align="center">
+  <img src="docs/images/structure.svg" alt="Inside a palace: a project wing my_api with rooms backend, decisions, and testing full of drawers; a topic wing sales_notes; a knowledge graph fact my_api uses_queue SQLite; and agent diaries from claude and codex" width="100%">
+</p>
+
+<sub><i>Figure 1. One palace holds many wings. Rooms group drawers, and the knowledge graph and diaries sit alongside them.</i></sub>
+
+| Concept | What it is | Example |
+|---|---|---|
+| **Wing** | A project or a topic | `my_api`, `sales_notes` |
+| **Room** | An area inside a wing | `backend`, `testing`, `decisions` |
+| **Drawer** | One chunk of verbatim text plus its embedding and metadata | a paragraph of `db.rs`, a diary entry |
+| **Knowledge graph** | Time-stamped facts: subject → predicate → object | `my_api → uses_queue → SQLite` (valid from 2026-09-03) |
+| **Diary** | Per-agent session notes for continuity | "Fixed the flaky migration test by…" |
+| **Tunnel** | A link between rooms in different wings | `my_api/auth` ↔ `my_web/login` |
+
+Wings are either **project** wings (a folder on disk, created by `palace mine`)
+or **topic** wings (no folder, such as chat history or meeting notes, created
+with `palace_create_wing`).
+
+### Retrieval
+
+```mermaid
+flowchart LR
+    Q["💬 Question<br/>from you or the agent"] --> S["Sanitize<br/>strip pasted dumps"]
+    S --> I["Classify intent<br/>decision · how_to · preference …"]
+    I --> H["Hybrid search<br/>BM25 + cosine"]
+    H --> B["Coding boosts<br/>+ preference pass"]
+    B --> R{"Rerank?<br/>optional"}
+    R --> OUT["📎 Results<br/>scores + source + neighbours"]
+    DB[("palace.db<br/>local embeddings")] -.-> H
+```
+
+<sub><i>Figure 2. What happens to a query. Everything runs locally on your CPU.</i></sub>
+
+Search fuses BM25 keyword scoring with cosine similarity over local
+embeddings. It then applies intent boosts for coding questions. Each query is
+classified as `preference`, `decision`, `how_to`, `definition`, `temporal`, or
+`unknown`. Preference-shaped questions ("how do I like my commits?") get a
+dedicated pass against tagged preference spans. A local cross-encoder
+reranker is available as an option (`--rerank` or `PALACE_RERANK=1`).
+
+### Embedding models
+
+Palace ships with `all-MiniLM-L6-v2` and can switch a palace to another
+local model. Every vector is rebuilt from the stored text, so switching never
+loses memory.
+
+| Model id | Model | Precision | Notes |
+|---|---|---|---|
+| `minilm-l6-v2` | all-MiniLM-L6-v2 | fp32 | Default |
+| `minilm-l6-v2-q8` | all-MiniLM-L6-v2 | int8 | About 2x faster indexing, same recall in the bake-off |
+| `bge-small` | bge-small-en-v1.5 | fp32 | Experimental, about 2.5x slower indexing |
+| `bge-small-q8` | bge-small-en-v1.5 | int8 | Experimental |
+| `bge-base-q8` | bge-base-en-v1.5 | int8 | Experimental, 768-dim |
+
+Experimental models scored below MiniLM on the coding-agent eval, though
+higher on probes from a real palace (see the
+[bake-off](#embedding-model-bake-off)). You can try them on your own palace:
+verification decides whether it switches.
+
+```bash
+palace embeddings list                       # models, which is active, which are downloaded
+palace embeddings estimate minilm-l6-v2-q8   # time, disk and latency, measured on this machine
+palace embeddings migrate minilm-l6-v2-q8    # build, verify, switch
+palace embeddings rollback                   # back to the previous model, instantly
+palace embeddings cleanup                    # drop the previous model's vectors
+```
+
+`migrate` builds the new vectors in batches while search keeps using the
+current model, so it is safe to interrupt and rerun. When the vectors are
+built, it checks the new model against the current one on 200 known-item
+probes taken from your palace (hybrid and vector-only recall@1/@5, plus query
+latency). It switches only if recall@5 drops by at most 0.01 and p95 query
+latency stays within budget. The budget is twice the current model's p95, and
+at least 25 ms. Run `palace embeddings cutover --force` to switch anyway, or
+`palace embeddings cancel` to keep the current model.
+
+Setting `embedding_model` in `config.json` (or `PALACE_EMBEDDING_MODEL`)
+picks the model for a new, empty palace. An existing palace never switches
+on its own. `palace status`, `palace_status`, and `palace_session_context`
+report the pending migration until you run `migrate`. Nothing migrates on
+its own: you run `migrate`, or ask your agent to, which uses the
+`palace_embeddings` MCP tool (it runs the same steps in the background of
+the server). In remote mode the server owns the model, so these commands run on the server.
+
+Agent-generated query dumps are cleaned up before retrieval. Results come back
+with score provenance (`combined`, `cosine`, `bm25`, `coding_boost`,
+`preference_match`, `rerank_score`, `intent`) and the neighbouring chunks from
+the same source file.
+
+### Automatic recall (hooks)
+
+`palace install` registers user-level hooks, so memory works in every project
+without editing per-project files:
+
+<p align="center">
+  <img src="docs/images/hooks.svg" alt="One agent session, four hooks: session start, prompt submit, and post tool use recall from palace.db; stop asks the agent to save a diary entry and decisions" width="100%">
+</p>
+
+<sub><i>Figure 3. Three hooks read memory into the session. The fourth makes sure the session's lessons get written back.</i></sub>
+
+| Hook | What it does |
+|---|---|
+| **Session start** | Injects the memory protocol, your standing rules from `general/preferences` (verbatim, in every project), recent diary entries for this project (from any agent), and the top drawers of the project's wing. |
+| **Prompt submit** | Searches Palace with your actual question and injects matching drawers before the agent answers. If a history question finds nothing, it tells the agent to run `palace_search`. In Claude Code it also adds a one-line reminder until the session calls a Palace tool. Skips short prompts and slash commands. Claude Code and Codex only. |
+| **Post tool use** | While the agent greps and reads files, recalls related memory so earlier decisions surface without a search. In Claude Code it also records the session's Palace calls. |
+| **Stop** | If the session did real work but saved nothing, asks the agent once to write a diary entry and record decisions before it finishes. In Claude Code this is judged per session, including sessions that never used Palace; other agents use a recent-activity window. |
+
+Auto-recall is limited to the current project. Drawers from your other
+project wings and diaries from other projects stay out. Topic wings still
+appear.
+
+All hooks fail open: if the palace is missing or empty, the agent works as
+normal.
+
+### The memory protocol
+
+`palace install` also writes a short rule into each client's instruction file.
+The rule tells the agent when to use memory:
+
+1. **Session start:** `palace_status` → `palace_session_context` → `palace_diary_search`.
+2. **Before answering** a question about past decisions, preferences, or
+   history: `palace_search` and `palace_kg_query`, before grep.
+3. **After work:** `palace_diary_write`, plus `palace_kg_add` for durable facts.
+
+Grep remains the right first tool for current symbols, exact definitions, and
+code that may have changed since it was mined.
+
+The nine protocol tools are marked `_meta."anthropic/alwaysLoad" = true`, so
+Claude Code 2.1.121 and later keeps them loaded instead of deferring them
+behind tool search.
+
+### Memory layers
+
+| Layer | Name | Contents |
+|---|---|---|
+| L0 | Identity | `~/.palace/identity.txt`, always loaded (~100 tokens) |
+| L1 | Essential story | Top drawers by importance, grouped by room (~600–900 tokens) |
+| L2 | On demand | Wing- and room-filtered retrieval |
+| L3 | Deep search | Full hybrid search across the palace |
+
+`palace wake-up` prints L0 and L1. Agents reach L2 and L3 through MCP tools.
+
+---
+
+## 🔌 Supported clients
+
+`palace install` configures every supported client by default
+(`--client all`). Gemini CLI, VS Code, Windsurf, OpenCode, Cline, Zed and
+Goose are included only when their config folder exists, so Palace never sets up an agent you don't
+have. Use `--client <name>` to configure one explicitly.
+
+| Client | `--client` | MCP config | Rule file | Hooks |
+|---|---|---|---|---|
+| Claude Code | `claude` | `~/.claude.json` | `~/.claude/CLAUDE.md` | `~/.claude/settings.json` |
+| Codex | `codex` | `~/.codex/config.toml` | `~/.codex/AGENTS.md` | `~/.codex/hooks.json` (run `/hooks` once in the Codex CLI to trust them) |
+| Cursor | `cursor` | `~/.cursor/mcp.json` | `~/.cursor/rules/palace.mdc` | `~/.cursor/hooks.json` |
+| Gemini CLI | `gemini` | `~/.gemini/settings.json` | `~/.gemini/GEMINI.md` | `~/.gemini/settings.json` (run only in folders you trust in Gemini) |
+| VS Code (Copilot) | `vscode` | `Code/User/mcp.json` | `Code/User/prompts/palace.instructions.md` | `~/.copilot/hooks/palace.json` (no prompt-time recall: VS Code can't inject there) |
+| OpenCode | `opencode` | `~/.config/opencode/opencode.json` | `~/.config/opencode/palace.md`, listed under `instructions` | `~/.config/opencode/plugins/palace.js` |
+| Cline | `cline` | `~/.cline/data/settings/cline_mcp_settings.json` | `~/.cline/rules/palace.md` | `Documents/Cline/Hooks` (prompt and post-tool recall; Cline can't continue after a task, so no save nudge). Your own hook scripts are never overwritten. |
+| Zed | `zed` | Zed `settings.json` (`context_servers`) | Zed's global `AGENTS.md` | None. Zed's agent has no hooks; external agents in Zed use their own Palace setup. |
+| Goose | `goose` | Goose `config.yaml` (`extensions`) | Goose `.goosehints` | `~/.agents/plugins/palace` (save nudge only; Goose hooks can't inject context; needs `sh` on Windows) |
+| Windsurf | `windsurf` | `~/.codeium/windsurf/mcp_config.json` | `~/.codeium/windsurf/memories/global_rules.md` | None. Cascade hooks can't inject context. Devin Local reuses the Claude Code hooks. |
+| Claude Desktop | `claude-desktop` | `claude_desktop_config.json` | `~/.claude/CLAUDE.md` | None. Use the [MCP prompts](#mcp-prompts) instead. |
+
+Rule files are written as a managed block. Your existing content is kept.
+
+```bash
+palace install --client claude                       # one client only
+palace install --scope project --path ./my-project   # project-level rule files
+palace install --no-rule                             # MCP wiring only, no rule
+palace install --dry-run                             # preview the changes
+palace uninstall                                     # undo everything
+```
+
+With `--scope project`, rules go to `<project>/CLAUDE.md`, `<project>/AGENTS.md`
+(Codex, OpenCode, Cline, Zed and Goose), `<project>/GEMINI.md`, `<project>/.github/copilot-instructions.md`,
+`<project>/.windsurf/rules/palace.md`, and `<project>/.cursor/rules/palace.mdc`.
+Cursor, VS Code and OpenCode also get a project MCP config
+(`.cursor/mcp.json`, `.vscode/mcp.json`, `opencode.json`).
+
+<details>
+<summary>Manual MCP config</summary>
+
+Any MCP client can run Palace as a stdio server with `palace mcp`.
+
+JSON clients (Claude Code, Cursor, Claude Desktop):
+
+```json
+{
+  "mcpServers": {
+    "palace": { "command": "palace", "args": ["mcp"] }
+  }
+}
+```
+
+Codex (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.palace]
+command = "palace"
+args = ["mcp"]
+```
+
+Claude Code CLI:
+
+```bash
+claude mcp add palace -- palace mcp
+```
+
+</details>
+
+### MCP prompts
+
+Claude Desktop cannot run hooks, so the server offers two prompts in its
+prompt picker:
+
+| Prompt | What it does |
+|---|---|
+| `continue-session` | Loads warm-start context so the agent picks up where you left off |
+| `save-session` | Saves the session to memory so it carries over next time |
+
+### Profiles
+
+A profile changes the agent rule, the protocol text, and which rooms
+`palace init` looks for:
+
+| Profile | For | Typical rooms |
+|---|---|---|
+| `coding` (default) | Software projects | frontend, backend, testing, docs, config |
+| `creative` | Worldbuilding, D&D, fiction | characters, places, lore, factions, timeline |
+| `personal` | Coaching, caregiving, household, client notes | people, health, finances, home, schedule |
+
+```bash
+palace install --profile creative
+```
+
+The profile is saved to `~/.palace/config.json`. Set `PALACE_PROFILE` to
+override it for one process.
+
+### Remote mode (shared team memory)
+
+By default, `palace mcp` serves your local palace. Remote mode turns it into a
+stdio-to-HTTP bridge to a shared [Palace Server](https://palacememory.com),
+the commercial, self-hosted team edition. Client registrations do not change.
+
+```bash
+palace remote set --endpoint https://palace.yourco.com   # prompts for the ps_… API key
+palace remote on
+palace remote test      # runs the MCP handshake and reports the tool count
+palace remote status    # mode, endpoint, masked key
+palace local            # back to the local palace
+```
+
+---
+
+## 🧰 CLI reference
+
+Run `palace <command> --help` for every flag.
+
+**Setup**
+
+| Command | What it does |
+|---|---|
+| `palace install` | Register the MCP server, rules, and hooks with your agents |
+| `palace uninstall` | Remove them again |
+| `palace doctor` | Check the binary, database, MCP configs, and rules |
+| `palace seed-adoption-facts` | Seed knowledge-graph facts that make agent recall measurable |
+
+**Adding memory**
+
+| Command | What it does |
+|---|---|
+| `palace init <dir>` | Detect rooms and write `palace.yaml` (`--yes` skips prompts, `--auto-mine` mines straight after) |
+| `palace mine <dir>` | Chunk, embed, and store project files. Re-runs only process changed files. |
+| `palace watch <dir>` | Re-mine changed files automatically as you work |
+| `palace mine-convos <dir>` | Ingest chat exports: Claude Code and Codex JSONL, Claude.ai, ChatGPT, Slack |
+| `palace sweep <path>` | Store transcript JSONL files as one drawer per message |
+| `palace split` | Split concatenated Claude Code transcripts into one file per session |
+
+**Finding memory**
+
+| Command | What it does |
+|---|---|
+| `palace search <query>` | Hybrid search (`--wing`, `--room`, `--limit`, `--rerank`) |
+| `palace wake-up` | Print the L0 identity and L1 essential story |
+| `palace status` | Drawer counts by wing and room |
+| `palace wings` | Registered wings, with kind, drawer count, and last mined time |
+| `palace timeline` | Knowledge-graph facts in time order (`--entity` to filter) |
+| `palace gain` | How much your agents use Palace, and what it saves |
+
+**Maintenance**
+
+| Command | What it does |
+|---|---|
+| `palace export` / `palace import <file>` | Back up or restore drawers as JSON (embeddings are rebuilt on import) |
+| `palace prune --older-than-days <n>` | Delete old drawers (`--dry-run` to preview) |
+| `palace repair` | Re-embed drawers that are missing vectors |
+| `palace upgrade-embeddings` | Re-embed everything with the active model (`--refresh-preferences` for preference spans) |
+| `palace embeddings …` | List, estimate, migrate to, verify, cut over to, or roll back [embedding models](#embedding-models) |
+| `palace migrate <db>` | Copy drawers from another palace database |
+| `palace compress` | Compress drawers to the AAAK dialect |
+
+**Servers**
+
+| Command | What it does |
+|---|---|
+| `palace mcp` | Start the MCP stdio server |
+| `palace remote …` / `palace local` | Configure and toggle [remote mode](#remote-mode-shared-team-memory) |
+| `palace hook <event> --client <c>` | Hook runner called by the installed hooks |
+
+### Mining a project
+
+```mermaid
+flowchart LR
+    DIR["📁 Your repo"] --> F["Filter<br/>.gitignore + skip build dirs"]
+    F --> C{"Changed since<br/>last mine?"}
+    C -- no --> SKIP["Skip"]
+    C -- yes --> CH["Chunk + pick room<br/>using palace.yaml"]
+    CH --> E["Embed locally<br/>all-MiniLM-L6-v2"]
+    E --> DB[("palace.db")]
+```
+
+<sub><i>Figure 4. Mining only touches files that changed, so re-running it is cheap.</i></sub>
+
+`palace mine` respects `.gitignore` and skips `.git`, `node_modules`,
+`target`, `build`, `dist`, `vendor`, and other build output. It reads common
+text and source formats: `md`, `txt`, `rs`, `py`, `js`, `ts`, `tsx`, `go`,
+`java`, `rb`, `sh`, `sql`, `json`, `yaml`, `toml`, `html`, `css`, `csv`, and
+more.
 
 ```bash
 palace mine ~/my-project \
-  --wing my_project          # Override wing name
-  --limit 100                # Cap at 100 files
-  --dry-run                  # Preview without storing
-  --no-gitignore             # Ignore .gitignore rules
-  --include vendor,third_party  # Force-include these paths
+  --wing my_project            # override the wing name
+  --limit 100                  # process at most 100 new or changed files
+  --dry-run                    # preview without storing
+  --no-gitignore               # ignore .gitignore rules
+  --include vendor,third_party # force-include these paths
 ```
 
-### `mine-convos` flags
+`--limit` runs can be resumed: the next run continues from where the last
+one stopped.
+
+### Measuring value with `palace gain`
 
 ```bash
-palace mine-convos ~/Desktop/transcripts \
-  --wing claude_sessions \
-  --mode exchange   # or: general (decisions/milestones/emotions)
-  --limit 50
-  --dry-run
-```
-
-### `split` flags
-
-```bash
-palace split \
-  --source ~/Desktop/transcripts \
-  --min-sessions 2 \
-  --dry-run
-```
-
-### `gain`
-
-`palace gain` summarizes automatic MCP usage by Cursor, Codex, Claude Code,
-or any other MCP client. It records local tool-call metadata in `palace.db` and
-estimates value from retrieval hits, duplicate skips, KG facts, diary recalls,
-repeat questions, and latency.
-
-```bash
-palace gain
+palace gain                       # last 30 days
 palace gain --project my_project --since 7d
-palace gain --history
+palace gain --history             # recent tool calls
 palace gain --json
-palace gain --record <query_id> <drawer_id> useful
+palace gain --record <query_id> <drawer_id> useful   # or not_useful / wrong_answer
 ```
-
-Example output:
 
 ```text
-palace gain - last 30d (palace_rs)
+palace gain - last 30d (my_project)
   Tool calls         : 412   (sessions: 27)
   Hit rate           : 88%   (search hits 142/162)
   Precision@1        : 92%
@@ -261,272 +530,139 @@ palace gain - last 30d (palace_rs)
   Diary recalls      : 8
   Repeat Qs avoided  : 19
   p95 latency        : 41 ms
-  Tool latency       : palace_search(p50 18 ms, p95 41 ms)
-  Top wings          : palace_rs(120), checkout(40)
 ```
 
-Set `PALACE_GAIN_DISABLED=1` to disable usage recording. The legacy
-`MEMPALACE_GAIN_DISABLED` is still honored in 0.2.x with a deprecation warning.
-
-`palace_gain` also accepts an optional `record` payload for MCP callers that want
-to file explicit usefulness feedback without learning a new tool:
-
-```json
-{"record": {"query_id": "query_abc", "drawer_id": "drawer_xyz", "verdict": "useful"}}
-```
+Usage metadata stays in your local `palace.db`. Set `PALACE_GAIN_DISABLED=1`
+to turn recording off.
 
 ---
 
-## MCP Setup
+## 🧩 MCP tools
 
-`palace install` is the normal setup command for the four supported local agent
-clients: Cursor, Codex, Claude Code, and Claude Desktop. It writes both:
+<details>
+<summary>All 50 tools</summary>
 
-- an MCP server entry that starts `palace mcp`
-- a small rule that tells the agent when to call `palace_status`,
-  `palace_search`, `palace_preference_search`, `palace_kg_query`, and
-  `palace_diary_write`
-
-```bash
-palace install
-```
-
-What gets written by default:
-
-| Client | MCP config | Rule file |
-|---|---|---|
-| Cursor | `~/.cursor/mcp.json` | `~/.cursor/rules/palace.mdc` |
-| Codex | `~/.codex/config.toml` | `~/.codex/AGENTS.md` |
-| Claude Code | `~/.claude/mcp_servers.json` | `~/.claude/CLAUDE.md` |
-| Claude Desktop | Claude Desktop config | `~/.claude/CLAUDE.md` |
-
-Existing 0.1.x installs that registered the server as `mempalace` are migrated
-to `palace` automatically the next time you run `palace install`.
-
-Install for one client:
-
-```bash
-palace install --client cursor
-palace install --client codex
-palace install --client claude
-```
-
-Install project-scoped rules instead of global rules:
-
-```bash
-palace install --scope project --path /path/to/project
-```
-
-For project scope, Cursor also gets a project-local MCP config at
-`<project>/.cursor/mcp.json`. Codex and Claude Code keep MCP config in their
-user-level config files, while their rules go into `<project>/AGENTS.md` and
-`<project>/CLAUDE.md`.
-
-Skip rule files if you only want MCP wiring:
-
-```bash
-palace install --no-rule
-```
-
-Inspect the current setup:
-
-```bash
-palace doctor
-```
-
-The installed rule is memory-first for remembered context: decisions, prior
-fixes, conventions, preferences, prior commands, session history, and "what
-happened last time?" should use Palace before grep or code search. Grep remains
-the right first tool for current symbols, exact definitions, exact files, and
-implementation details that may have changed since the project was mined.
-It also tells agents to warm-start with `palace_session_context`, search diaries
-with `palace_diary_search` before continuing old work, use KG tools for durable
-facts, and write `palace_diary_write` after substantive work.
-
-Seed durable KG facts for adoption tracking:
-
-```bash
-palace seed-adoption-facts --project my_project
-```
-
-The seed is idempotent and records the four supported clients, the memory-first
-protocol, routing rules, user preference for memory-aware agents, and standard
-quality gates. Agents can then recall those facts with `palace_kg_query`.
-
-Remove palace config:
-
-```bash
-palace uninstall
-palace uninstall --client cursor
-```
-
-### Cursor
-
-After `palace install --client cursor`, restart Cursor or reload the window.
-Settings -> MCP should show `palace` as an enabled stdio server.
-
-Manual Cursor config shape:
-
-```json
-{
-  "mcpServers": {
-    "palace": {
-      "command": "palace",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-The rule is installed as `.cursor/rules/palace.mdc` with `alwaysApply: true`.
-
-### Codex
-
-After `palace install --client codex`, restart Codex so it reloads
-`~/.codex/config.toml`.
-
-Manual Codex config shape:
-
-```toml
-[mcp_servers.palace]
-command = "palace"
-args = ["mcp"]
-```
-
-The rule is installed as a managed palace block in `~/.codex/AGENTS.md` (or
-`<project>/AGENTS.md` with `--scope project`). Existing content is preserved.
-
-### Claude Code
-
-After `palace install --client claude`, restart Claude Code so it reloads
-`~/.claude/mcp_servers.json`.
-
-Manual Claude JSON shape is the same as Cursor's `mcpServers` object above.
-You can also use Claude Code's own MCP command:
-
-```bash
-claude mcp remove palace
-claude mcp add palace -- palace mcp
-```
-
-The rule is installed as a managed palace block in `~/.claude/CLAUDE.md` (or
-`<project>/CLAUDE.md` with `--scope project`). Existing content is preserved.
-
-### MCP Tools
-
-The server exposes tools for status, taxonomy, search, drawer CRUD, knowledge
-graph operations, graph tunnels, hook acknowledgements, and agent diaries:
+**Status and health**
 
 | Tool | Description |
 |---|---|
-| `palace_status` | Palace overview + protocol |
-| `palace_gain` | MCP usage gains, estimated savings, and per-project value |
-| `palace_verify` | Verify MCP tools, database health, embeddings, and model cache |
-| `palace_recall_check` | Run project-memory probes and report expected-memory hits |
-| `palace_conflicts` | Surface likely stale or contradictory KG facts |
-| `palace_list_wings` | List wings with drawer counts |
-| `palace_list_rooms` | List rooms within a wing |
+| `palace_status` | Palace overview: drawer and wing counts, recent sessions (`verbose` adds rooms, protocol text, AAAK spec) |
+| `palace_verify` | Check MCP tools, database health, embeddings, and model cache |
+| `palace_recall_check` | Run project-memory probes and report expected hits |
+| `palace_gain` | Usage gains and savings. Accepts an optional `record` payload for feedback. |
+| `palace_memory_report` | Readable inventory: profile, per-wing and per-room counts, recent activity |
+
+**Wings and taxonomy**
+
+| Tool | Description |
+|---|---|
+| `palace_project_status` | Is this project mined, registered but unmined, or unknown? |
+| `palace_mine` | Mine a code repository on demand (after the user agrees) |
+| `palace_create_wing` | Declare a topic or project wing |
+| `palace_list_wings` | Registered wings with kind, path, last mined time, and counts |
+| `palace_list_rooms` | Rooms within a wing |
 | `palace_get_taxonomy` | Full wing → room → count tree |
-| `palace_get_aaak_spec` | AAAK compressed memory dialect spec |
-| `palace_search` | Semantic search over drawers |
-| `palace_check_duplicate` | Check if content already exists |
-| `palace_add_drawer` | File content into the palace |
-| `palace_delete_drawer` | Remove a drawer by ID |
-| `palace_kg_query` | Query entity relationships |
+
+**Search**
+
+| Tool | Description |
+|---|---|
+| `palace_search` | Hybrid search with score provenance and source context |
+| `palace_preference_search` | Dedicated pass for preference and convention questions |
+| `palace_check_duplicate` | Check whether content already exists |
+
+**Drawers**
+
+| Tool | Description |
+|---|---|
+| `palace_add_drawer` | Store content in a wing and room |
+| `palace_remember` | Store a key fact with importance 5 |
+| `palace_get_drawer` | Fetch a drawer by id |
+| `palace_list_drawers` | List drawers, with optional wing and room filters |
+| `palace_update_drawer` | Update content and refresh metadata |
+| `palace_delete_drawer` / `palace_forget` | Remove a drawer |
+| `palace_explain` | Full provenance: who stored it, when, from where, importance |
+| `palace_prune` | Remove stale or low-value drawers |
+| `palace_export` / `palace_import` | Export or import palace data |
+| `palace_upgrade_embeddings` | Re-embed drawers and refresh preference vectors |
+| `palace_embeddings` | List models, estimate, and migrate to another embedding model when you ask |
+
+**Knowledge graph**
+
+| Tool | Description |
+|---|---|
+| `palace_kg_query` | Query an entity's relationships |
 | `palace_kg_add` | Add a fact (subject → predicate → object) |
 | `palace_kg_invalidate` | Mark a fact as no longer true |
-| `palace_kg_timeline` | Chronological fact history |
-| `palace_kg_stats` | Knowledge graph overview |
-| `palace_seed_adoption_facts` | Seed durable KG facts for four-client adoption |
-| `palace_traverse` | BFS graph walk from a room |
-| `palace_find_tunnels` | Rooms bridging two wings |
-| `palace_graph_stats` | Palace graph summary |
-| `palace_diary_write` | Write a diary entry in AAAK format |
-| `palace_diary_read` | Read recent diary entries |
-| `palace_diary_search` | Search within an agent's diary entries |
-| `palace_session_context` | Get recent diary context for agent warm-start |
+| `palace_kg_timeline` | Facts in time order |
+| `palace_kg_stats` | Graph overview |
+| `palace_conflicts` | Find stale or contradictory facts |
+| `palace_seed_adoption_facts` | Seed adoption and quality-gate facts |
+
+**Graph and tunnels**
+
+| Tool | Description |
+|---|---|
+| `palace_traverse` | Breadth-first walk from a room |
+| `palace_find_tunnels` | Rooms that bridge two wings |
+| `palace_create_tunnel` / `palace_list_tunnels` / `palace_delete_tunnel` | Manage stored tunnels |
+| `palace_follow_tunnels` | Follow tunnels from a wing and room |
+| `palace_graph_stats` | Graph summary |
+
+**Diaries and sessions**
+
+| Tool | Description |
+|---|---|
+| `palace_diary_write` | Write a diary entry |
+| `palace_diary_read` | Read recent entries |
+| `palace_diary_search` | Search diaries. `all_agents: true` searches every agent's diary. |
+| `palace_session_context` | Warm-start context. Falls back to other agents' recent work on the project. |
+| `palace_list_agents` | List agent diaries |
+
+**Internal**
+
+| Tool | Description |
+|---|---|
+| `palace_get_aaak_spec` | The AAAK compressed-memory dialect spec |
+| `palace_hook_settings` | Hook settings |
+| `palace_memories_filed_away` | Acknowledgement used by the stop hook |
+
+</details>
 
 ---
 
-## Migrating from `mempalace` to `palace`
+## 🔧 Configuration
 
-The 0.2.0 release renames the project from `mempalace` to `palace`. The 0.2.x line
-keeps the old names working with deprecation warnings; they will be removed in 0.3.0.
+Settings load in this order: environment variables, then
+`~/.palace/config.json`, then defaults.
 
-| Surface | Before (0.1.x) | After (0.2.x) |
+| Env var | Default | Description |
 |---|---|---|
-| Crate | `mempalace-rs` | `palace-rs` |
-| Primary binary | `mempalace` | `palace` (the `mempalace` binary is now a deprecation shim) |
-| MCP server name | `mempalace` | `palace` (migrated automatically by `palace install`) |
-| MCP tools | `mempalace_*` | `palace_*` |
-| Config / data dir | `~/.mempalace` | `~/.palace` (auto-migrated on first run) |
-| Project config | `mempalace.yaml` | `palace.yaml` (legacy filename still read) |
-| Env vars | `MEMPALACE_*` | `PALACE_*` (legacy names accepted with a warning) |
-| Cursor rule | `.cursor/rules/mempalace.mdc` | `.cursor/rules/palace.mdc` |
-| Release assets | `mempalace-<ver>-<target>` | `palace-<ver>-<target>` |
+| `PALACE_PALACE_PATH` | `~/.palace/palace` | Data directory. The database is `palace.db` inside it. |
+| `PALACE_PROFILE` | `coding` | `coding`, `creative`, or `personal` |
+| `PALACE_RERANK` | off | `1` turns on the local reranker for every search |
+| `PALACE_RERANK_MODEL` | built-in | Override the reranker model |
+| `PALACE_ENTITY_LANGUAGES` | `en` | Comma-separated languages for entity detection |
+| `PALACE_GAIN_DISABLED` | off | `1` turns off usage recording |
+| `PALACE_PROJECT` | auto | Project name used for gain attribution |
+| `PALACE_SOURCE_DIR` | `~/Desktop/transcripts` | Default source for `palace split` |
+| `PALACE_MINE_TRACE` | off | `1` prints per-stage mining timings |
+| `PALACE_MCP_MODE` | `local` | `local` or `remote` |
+| `PALACE_EMBEDDING_MODEL` | `minilm-l6-v2` | Embedding model for new palaces (see [embedding models](#embedding-models)) |
+| `PALACE_EMBEDDING_LATENCY_BUDGET_MS` | 2x current p95 | Query-latency budget for `palace embeddings verify` |
+| `PALACE_EMBED_THREADS` | all cores | ONNX threads used for embedding |
+| `PALACE_REMOTE_ENDPOINT` | none | Palace Server URL (host, base URL, or full `/mcp` URL) |
+| `PALACE_API_KEY` | none | Palace Server API key (`ps_…`) |
 
-One-step migration:
+`config.json` takes the same settings as keys: `palace_path`, `profile`,
+`entity_languages`, `topic_wings`, `people_map`, `mcp_mode`,
+`remote_endpoint`, `remote_api_key`, `embedding_model`,
+`embedding_latency_budget_ms`. Palace writes this file with owner-only
+`0600` permissions.
 
-```bash
-cargo install --path .
-palace install
-```
+### `palace.yaml` (per project)
 
-`palace install` rewrites existing MCP client configs (Cursor, Codex, Claude Code)
-and rule files, replacing legacy `mempalace` entries with `palace` entries.
-`~/.mempalace` is moved to `~/.palace` on first run when the legacy directory
-exists and the new one does not.
-
-## Migration from Python
-
-The Rust version uses a new single-file database (`palace.db`). Your existing ChromaDB data cannot be migrated automatically.
-
-**Steps:**
-
-```bash
-# 1. Re-mine your projects
-palace init ~/my-project && palace mine ~/my-project
-
-# 2. Re-index conversations
-palace mine-convos ~/Desktop/transcripts
-
-# 3. Verify
-palace status
-```
-
-Your `identity.txt`, `people_map.json`, and `known_names.json` in `~/.palace/` (migrated from `~/.mempalace/` if present) are compatible and will be read automatically.
-
----
-
-## Test on a Project
-
-```bash
-palace init /path/to/project
-palace mine /path/to/project
-palace status
-```
-
-Restart Cursor, Codex, or Claude Code, then ask the agent a project question that
-should use memory, for example: "Search the palace for how this project handles
-database migrations." The agent should call `palace_search` through MCP
-instead of re-indexing the repository from scratch.
-
----
-
-## Configuration
-
-`~/.palace/config.json` is read on startup. Environment variables take highest priority:
-
-| Env Var | Default | Description |
-|---|---|---|
-| `PALACE_PALACE_PATH` | `~/.palace/palace` | Palace data directory |
-
-The legacy `MEMPALACE_PALACE_PATH` is still honored in 0.2.x with a deprecation warning.
-
-### `palace.yaml` (per-project)
-
-Created by `palace init`. The legacy filename `mempalace.yaml` is still read.
-Example:
+`palace init` creates this file. Edit it to tune how files map to rooms:
 
 ```yaml
 wing: my_project
@@ -544,43 +680,275 @@ rooms:
 
 ---
 
-## Memory Stack
+## 📊 Benchmarks
 
-| Layer | Name | Description |
-|---|---|---|
-| L0 | Identity | `~/.palace/identity.txt` — always loaded (~100 tokens) |
-| L1 | Essential Story | Top drawers by importance, grouped by room (~600–900 tokens) |
-| L2 | On-Demand | Wing/room filtered retrieval |
-| L3 | Deep Search | Full semantic search |
+### Coding-agent memory eval
 
-`palace wake-up` prints L0 + L1. The AI uses MCP tools for L2/L3.
+A fixture of realistic project memories (decisions, past failures, commands,
+conventions, preferences, current direction) with 40 questions such as:
+
+- why did we choose bundled sqlite?
+- how did we fix the migration test failure last time?
+- what clippy command should I run?
+
+```bash
+cargo test --test coding_agent_eval -- --nocapture
+```
+
+The test reports `recall@1` and `recall@5`, and fails if retrieval drops below
+a fixed threshold. It answers the question that matters: can a coding agent
+find the right project context when it needs it?
+
+### Embedding model bake-off
+
+`tests/embedding_bakeoff.rs` scores every [embedding model](#embedding-models)
+on this eval with embedded drawers, and on 200 known-item probes from a real
+palace. It also measures indexing throughput and query latency. Each probe is
+an inner sentence of a drawer with about 30% of its words dropped.
+
+```bash
+PALACE_RUN_BAKEOFF=1 PALACE_BAKEOFF_DB=~/.palace/palace/palace.db \
+  cargo test --release --test embedding_bakeoff -- --nocapture
+```
+
+| Model | Coding eval R@1 / R@5 | Palace probes R@1 / R@5 | Indexing | Query p95 |
+|---|---:|---:|---:|---:|
+| `minilm-l6-v2` (default) | 0.902 / 1.000 | 0.850 / 0.970 | 112 drawers/s | 2.3 ms |
+| `minilm-l6-v2-q8` | **0.922** / 1.000 | 0.860 / 0.980 | **204 drawers/s** | 2.6 ms |
+| `bge-small` | 0.863 / 1.000 | 0.910 / 0.985 | 55 drawers/s | 7.2 ms |
+| `bge-small-q8` | 0.863 / 1.000 | 0.915 / 0.985 | 103 drawers/s | 5.5 ms |
+| `bge-base-q8` | 0.863 / 1.000 | **0.920 / 0.985** | 39 drawers/s | 11.0 ms |
+
+Hybrid recall, 400 drawers sampled from a 10,700-drawer palace, Windows,
+16 threads. BGE ranks best with a 0.5 cosine floor and an even cosine/BM25
+split, which its registry entry carries. A model ships as non-experimental
+only if it matches MiniLM on the coding-agent eval, so the BGE models stay
+experimental for now even though they win on real-palace probes. `verify`
+measures the same thing on your own palace before it switches.
+
+### LongMemEval
+
+Retrieval recall on LongMemEval `s_cleaned`: 470 evaluated questions, each
+over a haystack of about 50 sessions and 115k tokens. The 30 abstention
+questions are excluded, as is standard.
+
+| Split | R@1 | R@5 | R@10 |
+|---|---:|---:|---:|
+| `longmemeval_oracle` (sanity check) | 1.000 | 1.000 | 1.000 |
+| `longmemeval_s_cleaned` | **0.889** | **0.981** | **0.991** |
+
+<details>
+<summary>Method and per-type results</summary>
+
+- **Granularity:** one drawer per session, with user and assistant turns
+  embedded together. No filtering, summarisation, or LLM extraction.
+- **Embedder:** `all-MiniLM-L6-v2` (384-dim, ONNX), 512-token cap, local.
+- **Retrieval:** BM25 (k1=1.5, b=0.75, weight 0.35) fused with cosine (weight
+  0.65), top-K 10. This run predates the coding-agent intent boosts.
+- **No LLM at any stage**, no per-dataset tuning, no GPU.
+- **Metric:** `recall_any@K` at session granularity.
+- **Hardware:** Apple M1 Pro, 32 GB RAM.
+
+| Question type | R@1 | R@5 | R@10 |
+|---|---:|---:|---:|
+| knowledge-update | 0.944 | 1.000 | 1.000 |
+| multi-session | 0.909 | 0.983 | 1.000 |
+| single-session-assistant | 1.000 | 1.000 | 1.000 |
+| single-session-preference | 0.633 | 0.867 | 0.933 |
+| single-session-user | 0.922 | 1.000 | 1.000 |
+| temporal-reasoning | 0.835 | 0.976 | 0.984 |
+
+The `oracle` split only contains the gold sessions, so it checks the pipeline
+rather than measuring retrieval. Most top-1 misses on `s_cleaned` are
+near-misses at rank 2–5. Preference questions are the weakest category,
+because "I prefer…" sentences rarely share keywords with the question. The
+dedicated preference pass added since this run targets that gap.
+
+</details>
 
 ---
 
-## Development
+## 🔒 Privacy and data
 
-```bash
-cargo build
-cargo test
-cargo clippy
-```
+- **Everything is local by default.** One SQLite file at
+  `~/.palace/palace/palace.db`. Embeddings are computed on your CPU.
+- **Network access** is limited to the one-time model download from Hugging
+  Face, and to your own Palace Server if you turn on remote mode.
+- **No telemetry.** `palace gain` statistics are written to your local
+  database only.
+- **Back up** with `palace export`, or copy `palace.db`.
+- **Delete** a single memory with `palace_forget`, or everything by removing
+  `~/.palace`.
 
-Tests use in-memory SQLite — no palace.db needed. The embedding model is not loaded in tests that don't require it.
+Palace stores whatever you mine. Exclude secrets with `.gitignore` before you
+mine a repository.
 
 ---
 
-## Hooks Compatibility
+## 🩺 Troubleshooting
 
-Shell hooks that previously called `python -m mempalace.mcp_server` or
-`mempalace mcp` can now call `palace mcp`. Update the binary path in your hooks:
+| Problem | Fix |
+|---|---|
+| The agent never calls Palace | Run `palace doctor`, then fully restart the agent app. In the Codex CLI, run `/hooks` once to trust the hooks. |
+| `palace: command not found` | Open a new terminal so `PATH` picks up the install directory, or run `palace doctor` with the full path. |
+| No search results | Check `palace status`. If the project has no drawers, run `palace init <dir> --yes --auto-mine`. |
+| Results are out of date | Run `palace mine <dir>` again (only changed files are processed), or keep `palace watch <dir>` running. |
+| Model download fails | Check that `huggingface.co` is reachable, then retry. The model is cached after the first successful download. |
+| Searches feel slow on first run | The first call loads the ONNX model. Later calls in the same session are fast. |
+| Some drawers have no vectors | `palace repair` |
+
+---
+
+## ❓ FAQ
+
+<details>
+<summary><b>Do I have to tell my agent to use it?</b></summary>
+
+No. After `palace install`, hooks inject relevant memory at session start, when
+you send a prompt, and while the agent reads code. The installed rule tells the
+agent to search memory before answering history questions and to save what it
+learned afterwards.
+
+</details>
+
+<details>
+<summary><b>How is this different from CLAUDE.md or AGENTS.md?</b></summary>
+
+Those files are instructions you write and maintain by hand, and every line is
+loaded into every session. Palace is searchable memory that grows as you work:
+only the parts relevant to the current question are recalled, and the same
+memory is shared by Claude Code, Codex, Cursor, and Claude Desktop. Keep using
+instruction files for rules; use Palace for history.
+
+</details>
+
+<details>
+<summary><b>Does it send my data anywhere?</b></summary>
+
+No. Storage, embeddings, and search all run locally. The only network calls
+are the one-time model download from Hugging Face and, if you turn it on,
+your own Palace Server in remote mode. See [Privacy and data](#-privacy-and-data).
+
+</details>
+
+<details>
+<summary><b>Will it slow my agent down?</b></summary>
+
+Searches typically take tens of milliseconds (`palace gain` shows your real
+p50 and p95). The first call in a session loads the embedding model. Hooks fail
+open, so a missing or broken palace never blocks the agent.
+
+</details>
+
+<details>
+<summary><b>What happens when a memory goes out of date?</b></summary>
+
+Re-running `palace mine` updates changed files. For facts, agents call
+`palace_kg_invalidate` and add the new fact, so the timeline keeps both.
+`palace_conflicts` flags facts that look stale or contradictory, and
+`palace_forget` or `palace prune` removes drawers you no longer want.
+
+</details>
+
+<details>
+<summary><b>Can my whole team share one memory?</b></summary>
+
+Different agents on one machine already share it: a Codex session can pick up
+a Claude Code session's diary. For a team, [remote mode](#remote-mode-shared-team-memory)
+points every `palace mcp` at a shared, self-hosted Palace Server.
+
+</details>
+
+<details>
+<summary><b>Is it only for code?</b></summary>
+
+No. The `creative` and `personal` [profiles](#profiles) tune Palace for
+worldbuilding, fiction, coaching, caregiving, and household notes. Palace
+reads Markdown and text files, so Claude Desktop users can install the MCPB
+bundle and start without writing code.
+
+</details>
+
+---
+
+## 📚 Using Palace as a library
+
+Palace is also a Rust crate (`palace`). Add it as a git dependency:
+
+```toml
+[dependencies]
+palace-rs = { git = "https://github.com/AncientiCe/palace-rs", default-features = false }
+```
+
+```rust
+use palace::{db, knowledge_graph, store};
+
+let conn = db::open_in_memory()?;
+store::add_drawer(&conn, "wing_code", "backend",
+    "We use SQLite with WAL mode for concurrent reads.",
+    None, "architecture.md", 0, "example", 4.0)?;
+knowledge_graph::add_triple(&conn, "Palace", "stores_data_in", "SQLite",
+    Some("2026-04-01"), None, 1.0, None, None)?;
+```
+
+`default-features = false` leaves out the CLI dependencies. For the full
+example, see [`examples/basic_usage.rs`](examples/basic_usage.rs)
+(`cargo run --example basic_usage`). `palace::palace::Palace::search_with_provenance` returns
+the same score details as the MCP tools.
+
+---
+
+## 🧪 Development
 
 ```bash
-# Before (Python)
-exec python -m mempalace.mcp_server
-
-# Before (Rust 0.1.x)
-exec mempalace mcp
-
-# After (Rust 0.2.x+)
-exec palace mcp
+cargo fmt
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+cargo audit
 ```
+
+Tests use in-memory SQLite, and only tests that need the embedding model load
+it. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
+[CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## 🚚 Migrating from older versions
+
+<details>
+<summary>From <code>mempalace</code> (0.1.x)</summary>
+
+Version 0.2.0 renamed the project from `mempalace` to `palace`. The 0.2.x line
+kept the old names working with warnings. They were removed in 0.3.0.
+
+To upgrade from 0.1.x, either install a 0.2.x release first and run
+`palace install`, which migrates configs and moves `~/.mempalace` to
+`~/.palace`, or rename by hand: `~/.mempalace` → `~/.palace`,
+`mempalace.yaml` → `palace.yaml`, `MEMPALACE_*` → `PALACE_*`, and the
+`mempalace_*` MCP tools → `palace_*`. Hooks that ran `mempalace mcp` or
+`python -m mempalace.mcp_server` should now run `palace mcp`.
+
+</details>
+
+<details>
+<summary>From the Python version</summary>
+
+The Rust version replaces ChromaDB plus SQLite with a single `palace.db`.
+ChromaDB data cannot be converted, so re-ingest:
+
+```bash
+palace init ~/my-project --yes --auto-mine
+palace mine-convos ~/Desktop/transcripts
+palace status
+```
+
+`identity.txt`, `people_map.json`, and `known_names.json` in `~/.palace/` are
+still compatible and are read automatically.
+
+</details>
+
+---
+
+## 📜 License
+
+[MIT](LICENSE)

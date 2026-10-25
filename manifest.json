@@ -1,0 +1,44 @@
+{
+  "manifest_version": "0.3",
+  "name": "palace-rs",
+  "display_name": "Palace",
+  "version": "0.0.0",
+  "description": "Local-first memory for coding agents — MCP server, single SQLite file, local embeddings",
+  "long_description": "Palace is a local-first memory retrieval engine for coding agents. It stores verbatim project and conversation memory in a single SQLite file, embeds it locally with all-MiniLM-L6-v2, and retrieves source-grounded context over MCP so agents remember decisions, prior fixes, commands, conventions, and preferences across sessions.",
+  "author": {
+    "name": "AncientiCe",
+    "url": "https://github.com/AncientiCe"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AncientiCe/palace-rs.git"
+  },
+  "homepage": "https://palacememory.com",
+  "documentation": "https://github.com/AncientiCe/palace-rs#readme",
+  "support": "https://github.com/AncientiCe/palace-rs/issues",
+  "license": "MIT",
+  "keywords": ["memory", "mcp", "coding-agents", "local-first", "embeddings", "rust"],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/palace-linux-x86_64",
+    "mcp_config": {
+      "command": "server/palace-linux-x86_64",
+      "args": ["mcp"],
+      "env": {},
+      "platform_overrides": {
+        "win32": {
+          "command": "server/palace-windows-x86_64.exe",
+          "args": ["mcp"]
+        },
+        "darwin": {
+          "command": "server/palace-darwin-arm64",
+          "args": ["mcp"]
+        }
+      }
+    }
+  },
+  "tools_generated": true,
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"]
+  }
+}

@@ -11,7 +11,7 @@ use std::time::Instant;
 use tracing::{error, info, warn};
 
 use crate::config::PalaceConfig;
-use crate::dialect::{AAAK_SPEC, PALACE_PROTOCOL};
+use crate::dialect::AAAK_SPEC;
 use crate::knowledge_graph as kg;
 use crate::palace_graph;
 use crate::searcher::search_memories_with_options;
@@ -24,6 +24,22 @@ use crate::store::{
 /// Run the MCP stdio server. Blocks until stdin closes.
 pub fn run() -> Result<()> {
     let config = PalaceConfig::new();
+
+    // Remote mode: act as a transparent stdio→HTTP proxy to a shared palace-server.
+    if config.mcp_mode() == "remote" {
+        let url = config.remote_endpoint_url().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Remote MCP mode is on but no endpoint is set. Run: palace remote set --endpoint <url>"
+            )
+        })?;
+        let key = config.remote_api_key().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Remote MCP mode is on but no API key is set. Run: palace remote set --endpoint <url> --api-key <key>"
+            )
+        })?;
+        return crate::remote::run(&url, &key);
+    }
+
     let db_path = config.palace_db_path();
 
     // Open palace DB (or create if first run)
@@ -36,6 +52,13 @@ pub fn run() -> Result<()> {
     };
 
     info!(palace = %db_path.display(), "Palace MCP server starting");
+
+    // Start loading the embedding model now, off the request path — otherwise
+    // the ~90MB HuggingFace download (on a cold cache) plus ONNX session
+    // build happens inside whichever tool call touches embeddings first,
+    // which can exceed that call's timeout on its own.
+    crate::embedder::warm_up_in_background();
+
     let session = crate::usage::UsageSession::new();
 
     let stdin = io::stdin();
@@ -76,6 +99,26 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+/// Build the MCP `initialize` result, including `instructions`.
+///
+/// Clients that honor `InitializeResult.instructions` (Claude Desktop/Cowork,
+/// Claude Code, and others) inject this text into the agent's system prompt at
+/// session start. This is the only channel that reaches every project on
+/// clients without hook support (Claude Desktop/Cowork), so the memory
+/// protocol is advertised here rather than relying solely on hooks, rule
+/// files, or per-project CLAUDE.md edits.
+fn initialize_result(protocol_version: &str, profile: crate::config::Profile) -> Value {
+    json!({
+        "protocolVersion": protocol_version,
+        "capabilities": {"tools": {}, "prompts": {}},
+        "serverInfo": {"name": "palace", "version": env!("CARGO_PKG_VERSION")},
+        "instructions": format!(
+            "{}\n\nNOTE FOR CLIENTS THAT DEFER MCP TOOLS (e.g. Claude Desktop/Cowork): the palace_* tools may need to be loaded via tool search before use. Load the protocol tools in ONE batch first: palace_status, palace_session_context, palace_diary_search, palace_project_status, palace_search, palace_kg_query, palace_preference_search, palace_diary_write, palace_kg_add.",
+            crate::dialect::palace_protocol(profile)
+        ),
+    })
+}
+
 fn handle_request(
     conn: &Connection,
     config: &PalaceConfig,
@@ -92,18 +135,71 @@ fn handle_request(
                 .get("protocolVersion")
                 .and_then(|value| value.as_str())
                 .unwrap_or("2024-11-05");
-            Some(json!({
-                "protocolVersion": protocol_version,
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "palace", "version": env!("CARGO_PKG_VERSION")},
-            }))
+            Some(initialize_result(protocol_version, config.profile()))
         }
         "notifications/initialized" => return None,
         "tools/list" => Some(json!({"tools": tool_list()})),
+        "prompts/list" => Some(json!({"prompts": prompt_list()})),
+        "prompts/get" => {
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            match prompt_get(config, name) {
+                Some(result) => Some(result),
+                None => {
+                    return Some(
+                        serde_json::to_string(&json!({
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {"code": -32602, "message": format!("Unknown prompt: {name}")}
+                        }))
+                        .unwrap(),
+                    )
+                }
+            }
+        }
         "tools/call" => {
             let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or_default();
-            let result = dispatch_tool_with_usage(conn, config, session, tool_name, &args);
+            let progress_token = params
+                .get("_meta")
+                .and_then(|meta| meta.get("progressToken"))
+                .cloned();
+
+            // `palace_mine` can run for a long time on larger projects, and
+            // the stdio loop below only writes the final response once the
+            // whole call returns — with no progress notifications, a slow
+            // mine looks indistinguishable from a hung server. When the
+            // client opts in via `_meta.progressToken`, stream
+            // `notifications/progress` lines to stdout as each file is
+            // mined instead of staying silent for the whole call.
+            let result = if tool_name == "palace_mine" {
+                if let Some(token) = progress_token {
+                    let start = Instant::now();
+                    let mut on_progress =
+                        |phase: crate::miner::MinePhase, done: usize, total: usize| {
+                            let notification = progress_notification(&token, phase, done, total);
+                            let mut out = io::stdout().lock();
+                            let _ = writeln!(out, "{notification}");
+                            let _ = out.flush();
+                        };
+                    let result = mine_with_progress(config, &args, &mut on_progress);
+                    if let Err(err) = crate::usage::record_event(
+                        conn,
+                        session,
+                        tool_name,
+                        &args,
+                        &result,
+                        start.elapsed(),
+                    ) {
+                        warn!(error = %err, "Palace MCP: failed to record usage event");
+                    }
+                    result
+                } else {
+                    dispatch_tool_with_usage(conn, config, session, tool_name, &args)
+                }
+            } else {
+                dispatch_tool_with_usage(conn, config, session, tool_name, &args)
+            };
+
             Some(json!({
                 "content": [{"type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default()}]
             }))
@@ -148,9 +244,16 @@ pub fn dispatch_tool_with_usage(
 }
 
 pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args: &Value) -> Value {
+    // A cutover made by another process changes the palace's model; follow it.
+    if let Err(err) = crate::embedding_migration::sync_active_model(conn) {
+        warn!(error = %err, "Palace MCP: cannot use this palace's embedding model");
+    }
     match name {
-        "palace_status" => tool_status(conn, config),
+        "palace_status" => tool_status(conn, config, args),
         "palace_list_wings" => tool_list_wings(conn),
+        "palace_create_wing" => tool_create_wing(conn, args),
+        "palace_project_status" => tool_project_status(conn, args),
+        "palace_mine" => tool_mine(config, args, None),
         "palace_list_rooms" => tool_list_rooms(conn, args),
         "palace_get_taxonomy" => tool_get_taxonomy(conn),
         "palace_get_aaak_spec" => json!({"aaak_spec": AAAK_SPEC}),
@@ -180,7 +283,7 @@ pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args:
         "palace_diary_write" => tool_diary_write(conn, args),
         "palace_diary_read" => tool_diary_read(conn, args),
         "palace_diary_search" => tool_diary_search(conn, args),
-        "palace_session_context" => tool_session_context(conn, args),
+        "palace_session_context" => tool_session_context(conn, config, args),
         "palace_gain" => tool_gain(conn, args),
         "palace_verify" => tool_verify(conn, config),
         "palace_recall_check" => tool_recall_check(conn, args),
@@ -192,7 +295,9 @@ pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args:
         "palace_export" => tool_export(conn),
         "palace_import" => tool_import(conn, args),
         "palace_upgrade_embeddings" => tool_upgrade_embeddings(conn, args),
+        "palace_embeddings" => tool_embeddings(conn, config, args),
         "palace_prune" => tool_prune(conn, args),
+        "palace_memory_report" => tool_memory_report(conn, config, args),
         _ => json!({"error": format!("Unknown tool: {name}")}),
     }
 }
@@ -207,14 +312,17 @@ fn no_palace() -> Value {
     })
 }
 
-fn tool_status(conn: &Connection, config: &PalaceConfig) -> Value {
+/// Palace overview. Compact by default, since agents call it at the start of
+/// every session: the protocol already arrives via MCP instructions and rule
+/// files, and the AAAK spec via `palace_get_aaak_spec`. `verbose: true` adds
+/// per-room counts, the protocol text, and the AAAK spec.
+fn tool_status(conn: &Connection, config: &PalaceConfig, args: &Value) -> Value {
+    let verbose = args
+        .get("verbose")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let count = count_drawers(conn).unwrap_or(0);
     let wings = wing_counts(conn).unwrap_or_default();
-    let rooms = room_counts(conn, None)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(k, v)| (k, json!(v)))
-        .collect::<serde_json::Map<_, _>>();
 
     // Surface recent diary entries for any known agent (warm-start context).
     let cutoff = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
@@ -251,17 +359,99 @@ fn tool_status(conn: &Connection, config: &PalaceConfig) -> Value {
     let mut response = json!({
         "total_drawers": count,
         "wings": wings,
-        "rooms": rooms,
         "palace_path": config.palace_db_path().to_string_lossy(),
-        "protocol": PALACE_PROTOCOL,
-        "aaak_dialect": AAAK_SPEC,
+        "profile": config.profile().as_str(),
+        "embedding_model": crate::embedder::active_model().id,
     });
+    if let Some(notice) = embedding_notice(conn, config) {
+        response["embedding_migration"] = json!(notice);
+    }
+    if verbose {
+        let rooms = room_counts(conn, None)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k, json!(v)))
+            .collect::<serde_json::Map<_, _>>();
+        response["rooms"] = json!(rooms);
+        response["protocol"] = json!(crate::dialect::palace_protocol(config.profile()));
+        response["aaak_dialect"] = json!(AAAK_SPEC);
+    } else {
+        response["more"] =
+            json!("Pass verbose=true for per-room counts, the protocol text, and the AAAK spec.");
+    }
 
     if !last_session.is_empty() {
         response["last_session"] = json!(last_session);
     }
 
     response
+}
+
+/// Human-readable inventory of palace memory. Non-developer friendly: shows
+/// the active profile, per-wing/room breakdown, and recent activity — no UI needed.
+fn tool_memory_report(conn: &Connection, config: &PalaceConfig, args: &Value) -> Value {
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let wing_filter = str_arg(args, "wing");
+
+    let total = count_drawers(conn).unwrap_or(0);
+    let all_wings = wing_counts(conn).unwrap_or_default();
+
+    let mut wings_report: Vec<Value> = all_wings
+        .iter()
+        .filter(|(wing, _)| {
+            wing_filter
+                .as_deref()
+                .is_none_or(|only| only == wing.as_str())
+        })
+        .map(|(wing, dcount)| {
+            let rooms = room_counts(conn, Some(wing.as_str()))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(room, c)| json!({"room": room, "drawers": c}))
+                .collect::<Vec<_>>();
+            json!({"wing": wing, "drawers": dcount, "rooms": rooms})
+        })
+        .collect();
+    wings_report.sort_by(|a, b| {
+        b["drawers"]
+            .as_i64()
+            .unwrap_or(0)
+            .cmp(&a["drawers"].as_i64().unwrap_or(0))
+    });
+
+    // Recent diary activity across all diary wings, newest first.
+    let mut recent: Vec<_> = all_wings
+        .keys()
+        .filter(|w| w.starts_with("wing_diary__"))
+        .flat_map(|wing| {
+            let filter = DrawerFilter {
+                wing: Some(wing.clone()),
+                room: Some("diary".to_string()),
+            };
+            crate::store::list_drawers(conn, &filter, 10000).unwrap_or_default()
+        })
+        .collect();
+    recent.sort_by(|a, b| b.filed_at.cmp(&a.filed_at));
+    let recent_activity: Vec<Value> = recent
+        .into_iter()
+        .take(limit)
+        .map(|d| {
+            json!({
+                "topic": d.metadata.get("topic").and_then(|v| v.as_str()).unwrap_or("general"),
+                "timestamp": d.filed_at,
+                "text": compact_text(&d.content, 160),
+            })
+        })
+        .collect();
+
+    json!({
+        "profile": config.profile().as_str(),
+        "total_drawers": total,
+        "wing_count": wings_report.len(),
+        "wings": wings_report,
+        "recent_activity": recent_activity,
+        "palace_path": config.palace_db_path().to_string_lossy(),
+    })
 }
 
 fn tool_gain(conn: &Connection, args: &Value) -> Value {
@@ -355,7 +545,9 @@ fn tool_verify(conn: &Connection, config: &PalaceConfig) -> Value {
             "integrity": db_integrity,
         },
         "model": {
-            "name": "all-MiniLM-L6-v2",
+            "id": crate::embedder::active_model().id,
+            "name": crate::embedder::active_model().name,
+            "precision": crate::embedder::active_model().precision,
             "cached": model_cached,
             "cold_start_note": if model_cached {
                 "model is cached; normal search should avoid download latency"
@@ -462,7 +654,215 @@ fn tool_conflicts(conn: &Connection, args: &Value) -> Value {
 }
 
 fn tool_list_wings(conn: &Connection) -> Value {
-    json!({"wings": wing_counts(conn).unwrap_or_default()})
+    match crate::store::list_wings_registry(conn) {
+        Ok(wings) => json!({"wings": wings}),
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+/// Declare a wing in the registry. Used to create a topic wing for non-repo
+/// work (e.g. sales) or to pre-declare a project wing before mining.
+fn tool_create_wing(conn: &Connection, args: &Value) -> Value {
+    let raw_name = match str_arg(args, "name") {
+        Some(n) => n,
+        None => return json!({"success": false, "error": "name is required"}),
+    };
+    let name = crate::config::normalize_wing_name(&raw_name);
+    if name.is_empty() {
+        return json!({"success": false, "error": "name normalizes to an empty wing"});
+    }
+    let kind = str_arg(args, "kind").unwrap_or_else(|| "topic".to_string());
+    if kind != "topic" && kind != "project" {
+        return json!({"success": false, "error": "kind must be 'topic' or 'project'"});
+    }
+    let description = str_arg(args, "description").unwrap_or_default();
+    let project_path = str_arg(args, "project_path");
+
+    match crate::store::upsert_wing(conn, &name, &kind, &description, project_path.as_deref()) {
+        Ok(()) => match crate::store::get_wing(conn, &name) {
+            Ok(Some(record)) => json!({"success": true, "wing": record}),
+            Ok(None) => json!({"success": true, "wing": {"name": name, "kind": kind}}),
+            Err(e) => json!({"success": false, "error": e.to_string()}),
+        },
+        Err(e) => json!({"success": false, "error": e.to_string()}),
+    }
+}
+
+/// Report whether the current project/topic is known to the palace, with a
+/// recommendation the agent can act on (mine the repo, or create a topic wing).
+fn tool_project_status(conn: &Connection, args: &Value) -> Value {
+    use crate::miner::ProjectWingStatus;
+    let project_path = match str_arg(args, "project_path") {
+        Some(p) => p,
+        None => return json!({"error": "project_path is required"}),
+    };
+    let wing_override = str_arg(args, "wing");
+    let path = std::path::Path::new(&project_path);
+
+    let status = match crate::miner::project_wing_status(conn, path) {
+        Ok(s) => s,
+        Err(e) => return json!({"error": e.to_string()}),
+    };
+
+    // If the caller named a specific wing and the path lookup is Unknown,
+    // report on that named wing instead (e.g. a non-repo topic wing).
+    let status = match (&status, &wing_override) {
+        (
+            ProjectWingStatus::Unknown {
+                has_palace_yaml, ..
+            },
+            Some(w),
+        ) => match crate::store::get_wing(conn, w) {
+            Ok(Some(r)) if r.last_mined_at.is_some() || r.drawer_count > 0 => {
+                ProjectWingStatus::Mined {
+                    wing: r.name,
+                    drawers: r.drawer_count,
+                    last_mined_at: r.last_mined_at,
+                }
+            }
+            Ok(Some(r)) => ProjectWingStatus::RegisteredNotMined {
+                wing: r.name,
+                drawers: r.drawer_count,
+            },
+            _ => ProjectWingStatus::Unknown {
+                suggested_wing: w.clone(),
+                has_palace_yaml: *has_palace_yaml,
+            },
+        },
+        _ => status,
+    };
+
+    let recommendation = match &status {
+        ProjectWingStatus::Mined { .. } => "ready — memories are available for this wing",
+        ProjectWingStatus::RegisteredNotMined { .. } => {
+            "registered but empty — if this is a code repo, ask the user whether to mine it with palace_mine (mining implicitly initialises it)"
+        }
+        ProjectWingStatus::Unknown {
+            has_palace_yaml, ..
+        } => {
+            if *has_palace_yaml {
+                "not mined — ask the user whether to mine this repo with palace_mine (mining implicitly initialises it)"
+            } else {
+                "unknown — mining is for code repos only: if this is a repo, ask the user to mine it with palace_mine (which implicitly initialises it); if it is a non-repo topic or chat, offer to create a topic wing with palace_create_wing"
+            }
+        }
+    };
+
+    let mut value = serde_json::to_value(&status).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("project_path".to_string(), json!(project_path));
+        obj.insert("recommendation".to_string(), json!(recommendation));
+    }
+    value
+}
+
+/// Mine a project directory into the palace on demand. Opens its own
+/// connection because the shared MCP connection is immutable and the miner
+/// needs a mutable handle. Auto-initialises `palace.yaml` for first-time repos.
+///
+/// `on_progress`, when given, is forwarded to `miner::mine` so long-running
+/// mines can report visible progress instead of giving zero feedback for the
+/// whole call (see `mine_with_progress`, used by the stdio server's
+/// `notifications/progress` bridge).
+fn tool_mine(
+    config: &PalaceConfig,
+    args: &Value,
+    on_progress: Option<&mut dyn FnMut(crate::miner::MinePhase, usize, usize)>,
+) -> Value {
+    let project_path = match str_arg(args, "project_path") {
+        Some(p) => p,
+        None => return json!({"success": false, "error": "project_path is required"}),
+    };
+    let dir = std::path::Path::new(&project_path);
+    if !dir.is_dir() {
+        return json!({"success": false, "error": format!("not a directory: {project_path}")});
+    }
+    let wing = str_arg(args, "wing");
+    let limit = int_arg(args, "limit").unwrap_or(0).max(0) as usize;
+    let dry_run = bool_arg(args, "dry_run");
+
+    // Auto-init palace.yaml for first-time projects so they can be mined without
+    // a separate `palace init` step. Skipped on dry runs (which must not write).
+    if !dir.join("palace.yaml").exists() && !dry_run {
+        let rooms = crate::room_detector::detect_rooms_from_folders(dir, config.profile());
+        let project_name = wing
+            .clone()
+            .unwrap_or_else(|| crate::miner::wing_slug_from_dir(dir));
+        if let Err(e) = crate::room_detector::save_config(dir, &project_name, &rooms) {
+            return json!({"success": false, "error": format!("auto-init failed: {e}")});
+        }
+    }
+
+    let mut conn = match crate::db::open(&config.palace_db_path()) {
+        Ok(c) => c,
+        Err(e) => return json!({"success": false, "error": e.to_string()}),
+    };
+
+    match crate::miner::mine(
+        &mut conn,
+        dir,
+        wing.as_deref(),
+        "palace-mcp",
+        limit,
+        dry_run,
+        true,
+        &[],
+        true,
+        on_progress,
+    ) {
+        Ok(summary) => {
+            let status = crate::miner::project_wing_status(&conn, dir)
+                .ok()
+                .and_then(|s| serde_json::to_value(s).ok());
+            json!({
+                "success": true,
+                "project_path": project_path,
+                "dry_run": dry_run,
+                "status": status,
+                "summary": summary,
+            })
+        }
+        Err(e) => json!({"success": false, "error": e.to_string()}),
+    }
+}
+
+/// Mine a project with progress reporting.
+///
+/// Additive alongside `dispatch_tool`'s plain `palace_mine` path (which keeps
+/// working exactly as before, with no progress callback, for any caller that
+/// doesn't need it): this is the entry point the stdio server uses to bridge
+/// `miner::mine`'s per-file progress into MCP `notifications/progress`
+/// messages when the client asked for them via `_meta.progressToken`.
+pub fn mine_with_progress(
+    config: &PalaceConfig,
+    args: &Value,
+    on_progress: &mut dyn FnMut(crate::miner::MinePhase, usize, usize),
+) -> Value {
+    tool_mine(config, args, Some(on_progress))
+}
+
+/// Build a `notifications/progress` JSON-RPC notification. Per the MCP spec,
+/// notifications carry no `id` and expect no response; `message` is an
+/// optional spec field we use to carry which phase (walking, hashing,
+/// chunking, embedding, writing, pruning, or loading_model) this update is
+/// from, since without it every phase's `progress`/`total` pair looks the
+/// same to the client.
+fn progress_notification(
+    token: &Value,
+    phase: crate::miner::MinePhase,
+    progress: usize,
+    total: usize,
+) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+            "progressToken": token,
+            "progress": progress,
+            "total": total,
+            "message": phase.label(),
+        }
+    })
 }
 
 fn tool_list_rooms(conn: &Connection, args: &Value) -> Value {
@@ -557,7 +957,7 @@ fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         format!("drawer_{wing}_{room}_{}", &hash.to_hex()[..16])
     };
 
-    let embedding = crate::embedder::embed_one(&content).ok();
+    let embedding = crate::embedder::embed_document(&content).ok();
     match add_drawer_with_id(
         conn,
         &drawer_id,
@@ -569,7 +969,10 @@ fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         &added_by,
         None,
     ) {
-        Ok(true) => json!({"success": true, "drawer_id": drawer_id, "wing": wing, "room": room}),
+        Ok(true) => {
+            let _ = crate::store::ensure_wing_registered(conn, &wing);
+            json!({"success": true, "drawer_id": drawer_id, "wing": wing, "room": room})
+        }
         Ok(false) => json!({"success": false, "reason": "already exists"}),
         Err(e) => json!({"success": false, "error": e.to_string()}),
     }
@@ -874,6 +1277,29 @@ fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
     let timestamp = now.to_rfc3339();
     let date = now.format("%Y-%m-%d").to_string();
 
+    // Semantic dedup scoped to this agent's diary: skip near-identical entries
+    // (e.g. the same session summary written twice) so the diary grows with new
+    // information rather than repetition. Scoped per agent so a different agent
+    // recording the same observation keeps its own continuity record.
+    let dedup_filter = crate::store::DrawerFilter {
+        wing: Some(wing.clone()),
+        room: Some(room.clone()),
+    };
+    match crate::store::check_duplicate_filtered(conn, &entry, 0.95, &dedup_filter) {
+        Ok(dups) if !dups.is_empty() => {
+            let matches_json: Vec<Value> = dups
+                .iter()
+                .map(|m| json!({"id": m.id, "similarity": m.similarity}))
+                .collect();
+            return json!({
+                "success": false,
+                "reason": "duplicate",
+                "matches": matches_json,
+            });
+        }
+        _ => {}
+    }
+
     let entry_prefix = &entry[..50.min(entry.len())];
     let id = diary_id(&wing, &timestamp, entry_prefix);
 
@@ -888,7 +1314,7 @@ fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
         "tags": tags,
     });
 
-    let embedding = crate::embedder::embed_one(&entry).ok();
+    let embedding = crate::embedder::embed_document(&entry).ok();
     match add_drawer_with_id(
         conn,
         &id,
@@ -993,25 +1419,44 @@ fn tool_diary_search(conn: &Connection, args: &Value) -> Value {
     };
     let limit = int_arg(args, "limit").unwrap_or(5) as usize;
     let tag_filter = str_arg(args, "tag");
+    // Cross-agent recall: when `all_agents` is set, search every agent's diary
+    // (room = "diary" across all `wing_diary__*` wings) instead of just the
+    // caller's own wing. This is what lets a different agent the next day pick
+    // up an investigation recorded by another agent.
+    let all_agents = bool_arg(args, "all_agents");
+    let project_path = str_arg(args, "project_path");
 
-    let wing = diary_wing(&agent_name);
-
-    let filter = crate::store::DrawerFilter {
-        wing: Some(wing),
-        room: Some("diary".to_string()),
+    let wing = if all_agents {
+        None
+    } else {
+        Some(diary_wing(&agent_name))
     };
+    let room = Some("diary".to_string());
 
     let _ = tag_filter; // tag filtering is on the roadmap; search is already wing/room scoped
+                        // When filtering by project we over-fetch, then post-filter on the
+                        // `project_path` stored in each drawer's metadata.
+    let fetch_limit = if project_path.is_some() {
+        limit.saturating_mul(4).max(limit)
+    } else {
+        limit
+    };
     let results = crate::searcher::search_memories(
         conn,
         &query,
-        filter.wing.as_deref(),
-        filter.room.as_deref(),
-        limit,
+        wing.as_deref(),
+        room.as_deref(),
+        fetch_limit,
     );
     if let Some(hits) = results.get("results").and_then(|v| v.as_array()) {
+        let mut hits = hits.clone();
+        if let Some(project) = project_path.as_deref() {
+            hits.retain(|hit| hit_project_path(conn, hit).as_deref() == Some(project));
+        }
+        hits.truncate(limit);
         json!({
             "agent": agent_name,
+            "all_agents": all_agents,
             "query": query,
             "results": hits,
         })
@@ -1020,100 +1465,176 @@ fn tool_diary_search(conn: &Connection, args: &Value) -> Value {
     }
 }
 
-fn tool_session_context(conn: &Connection, args: &Value) -> Value {
+/// Look up the `project_path` recorded in the metadata of the drawer behind a
+/// search hit. Used to scope cross-agent recall to a single project.
+fn hit_project_path(conn: &Connection, hit: &Value) -> Option<String> {
+    let id = hit.get("id").and_then(|v| v.as_str())?;
+    let drawer = get_drawer(conn, id).ok().flatten()?;
+    drawer
+        .metadata
+        .get("project_path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// Gather recent diary drawers, newest first.
+///
+/// `wing = None` searches every agent's diary (cross-agent). When `project` is
+/// set, only entries for that project are returned.
+pub(crate) fn recent_diary_drawers(
+    conn: &Connection,
+    wing: Option<&str>,
+    project: Option<&str>,
+    within_hours: i64,
+    take: usize,
+) -> Vec<crate::store::Drawer> {
+    let filter = crate::store::DrawerFilter {
+        wing: wing.map(String::from),
+        room: Some("diary".to_string()),
+    };
+    let cutoff = (Utc::now() - chrono::Duration::hours(within_hours)).to_rfc3339();
+    let mut drawers = crate::store::list_drawers(conn, &filter, 10000).unwrap_or_default();
+    drawers.sort_by(|a, b| b.filed_at.cmp(&a.filed_at));
+    drawers
+        .into_iter()
+        .filter(|d| d.filed_at >= cutoff)
+        .filter(|d| {
+            project.is_none_or(|p| {
+                d.metadata
+                    .get("project_path")
+                    .and_then(|v| v.as_str())
+                    .map(|stored| stored == p)
+                    .unwrap_or(false)
+            })
+        })
+        .take(take)
+        .collect()
+}
+
+fn tool_session_context(conn: &Connection, config: &PalaceConfig, args: &Value) -> Value {
+    let mut response = session_context(conn, args);
+    if let (Some(notice), Some(object)) = (embedding_notice(conn, config), response.as_object_mut())
+    {
+        object.insert("embedding_notice".into(), json!(notice));
+    }
+    response
+}
+
+/// One line about a pending or running embedding migration, for status and
+/// session context. `None` when the configured model is the active one.
+fn embedding_notice(conn: &Connection, config: &PalaceConfig) -> Option<String> {
+    let wanted = config.embedding_model();
+    let status = crate::embedding_migration::status(conn, wanted.as_deref()).ok()?;
+    if let (Some(target), Some(coverage)) = (&status.target, &status.coverage) {
+        return Some(format!(
+            "migrating embeddings {} -> {target}: {:.0}% built; search uses {} until cutover",
+            status.active,
+            coverage.percent(),
+            status.active
+        ));
+    }
+    status.migration_pending.then(|| {
+        format!(
+            "migration pending: config wants embedding model {} but this palace uses {}; \
+             it switches only when the user runs `palace embeddings migrate {0}`",
+            status.wanted.as_deref().unwrap_or_default(),
+            status.active
+        )
+    })
+}
+
+fn session_context(conn: &Connection, args: &Value) -> Value {
     let agent_name = match str_arg(args, "agent_name") {
         Some(n) => n,
         None => return json!({"error": "agent_name is required"}),
     };
+    let project_path = str_arg(args, "project_path");
 
     let wing = diary_wing(&agent_name);
-    let filter = crate::store::DrawerFilter {
-        wing: Some(wing),
-        room: Some("diary".to_string()),
-    };
 
-    let cutoff = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+    // 1. Prefer the calling agent's own recent diary (last 24h).
+    let mut cross_agent = false;
+    let mut recent = recent_diary_drawers(conn, Some(&wing), project_path.as_deref(), 24, 3);
 
-    match crate::store::list_drawers(conn, &filter, 10000) {
-        Ok(mut drawers) => {
-            drawers.sort_by(|a, b| b.filed_at.cmp(&a.filed_at));
-            let recent: Vec<_> = drawers
-                .into_iter()
-                .filter(|d| d.filed_at >= cutoff)
-                .take(3)
-                .collect();
+    // 2. Fall back to any other agent's recent work (wider 7-day window) so a
+    //    different agent the next day still benefits from prior investigations.
+    if recent.is_empty() {
+        recent = recent_diary_drawers(conn, None, project_path.as_deref(), 24 * 7, 3);
+        cross_agent = !recent.is_empty();
+    }
 
-            if recent.is_empty() {
-                return json!({
-                    "agent": agent_name,
-                    "has_recent_session": false,
-                    "context": null,
-                });
-            }
+    {
+        if recent.is_empty() {
+            return json!({
+                "agent": agent_name,
+                "has_recent_session": false,
+                "context": null,
+            });
+        }
 
-            let project = recent
-                .first()
-                .and_then(|d| d.metadata.get("project_path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+        let project = recent
+            .first()
+            .and_then(|d| d.metadata.get("project_path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
-            let entries: Vec<Value> = recent
-                .iter()
-                .map(|d| {
-                    let topic = d
-                        .metadata
+        let entries: Vec<Value> = recent
+            .iter()
+            .map(|d| {
+                let topic = d
+                    .metadata
+                    .get("topic")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("general");
+                let session_id = d
+                    .metadata
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let project_path = d
+                    .metadata
+                    .get("project_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let tags = d.metadata.get("tags").cloned().unwrap_or_else(|| json!([]));
+                json!({
+                    "topic": topic,
+                    "timestamp": d.filed_at,
+                    "session_id": session_id,
+                    "project_path": project_path,
+                    "tags": tags,
+                    "text": compact_text(&d.content, 240),
+                })
+            })
+            .collect();
+        let summary = entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "[{}] {}",
+                    entry
                         .get("topic")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("general");
-                    let session_id = d
-                        .metadata
-                        .get("session_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let project_path = d
-                        .metadata
-                        .get("project_path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let tags = d.metadata.get("tags").cloned().unwrap_or_else(|| json!([]));
-                    json!({
-                        "topic": topic,
-                        "timestamp": d.filed_at,
-                        "session_id": session_id,
-                        "project_path": project_path,
-                        "tags": tags,
-                        "text": compact_text(&d.content, 240),
-                    })
-                })
-                .collect();
-            let summary = entries
-                .iter()
-                .map(|entry| {
-                    format!(
-                        "[{}] {}",
-                        entry
-                            .get("topic")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("general"),
-                        entry.get("text").and_then(|v| v.as_str()).unwrap_or("")
-                    )
-                })
-                .collect::<Vec<_>>();
-
-            json!({
-                "agent": agent_name,
-                "has_recent_session": true,
-                "last_active_project": project,
-                "recent_entries": entries,
-                "context": format!(
-                    "Last session ({}): {}",
-                    recent.first().map(|d| d.filed_at.as_str()).unwrap_or("unknown"),
-                    summary.join(" | ")
-                ),
+                        .unwrap_or("general"),
+                    entry.get("text").and_then(|v| v.as_str()).unwrap_or("")
+                )
             })
-        }
-        Err(e) => json!({"error": e.to_string()}),
+            .collect::<Vec<_>>();
+
+        json!({
+            "agent": agent_name,
+            "has_recent_session": true,
+            "cross_agent": cross_agent,
+            "last_active_project": project,
+            "recent_entries": entries,
+            "context": format!(
+                "{}({}): {}",
+                if cross_agent { "Recent work by another agent " } else { "Last session " },
+                recent.first().map(|d| d.filed_at.as_str()).unwrap_or("unknown"),
+                summary.join(" | ")
+            ),
+        })
     }
 }
 
@@ -1136,8 +1657,33 @@ fn tool_remember(conn: &Connection, args: &Value) -> Value {
         .unwrap_or("general")
         .to_string();
 
-    let embedding = crate::embedder::embed_one(&text).ok();
+    // Semantic dedup: a remembered fact filed under a different wing/room would
+    // otherwise slip past the deterministic-ID guard and create a duplicate.
+    match check_duplicate(conn, &text, 0.9) {
+        Ok(dups) if !dups.is_empty() => {
+            let matches_json: Vec<Value> = dups
+                .iter()
+                .map(|m| json!({"id": m.id, "wing": m.wing, "room": m.room, "similarity": m.similarity}))
+                .collect();
+            return json!({
+                "success": true,
+                "inserted": false,
+                "reason": "duplicate",
+                "matches": matches_json,
+            });
+        }
+        _ => {}
+    }
+
+    let embedding = crate::embedder::embed_document(&text).ok();
     let emb_ref = embedding.as_deref();
+
+    // `add_drawer`'s id is derived from (wing, room, source_file, chunk_index),
+    // not content — a fixed source_file here would collide every remembered
+    // fact in the same wing/room onto one id and silently drop the rest via
+    // INSERT OR IGNORE. Hash the text into source_file so distinct facts get
+    // distinct ids while identical text still naturally dedups.
+    let source_file = format!("palace_remember/{}", blake3::hash(text.as_bytes()).to_hex());
 
     match crate::store::add_drawer(
         conn,
@@ -1145,18 +1691,21 @@ fn tool_remember(conn: &Connection, args: &Value) -> Value {
         &room,
         &text,
         emb_ref,
-        "palace_remember",
+        &source_file,
         0,
         "mcp",
         5.0,
     ) {
-        Ok((inserted, id)) => json!({
-            "success": true,
-            "inserted": inserted,
-            "id": id,
-            "wing": wing,
-            "room": room,
-        }),
+        Ok((inserted, id)) => {
+            let _ = crate::store::ensure_wing_registered(conn, &wing);
+            json!({
+                "success": true,
+                "inserted": inserted,
+                "id": id,
+                "wing": wing,
+                "room": room,
+            })
+        }
         Err(e) => json!({"error": e.to_string()}),
     }
 }
@@ -1215,7 +1764,7 @@ fn tool_preference_search(conn: &Connection, args: &Value) -> Value {
         room: args.get("room").and_then(|v| v.as_str()).map(String::from),
     };
 
-    let embedding = match crate::embedder::embed_one(&query) {
+    let embedding = match crate::embedder::embed_query(&query) {
         Ok(e) => e,
         Err(e) => return json!({"error": format!("embedding error: {e}")}),
     };
@@ -1296,44 +1845,138 @@ fn tool_upgrade_embeddings(conn: &Connection, args: &Value) -> Value {
             Err(e) => return json!({"error": e.to_string()}),
         };
 
-    let mut reembedded = 0usize;
-    let mut errors = 0usize;
-    for (id, content) in &ids_and_content {
-        match crate::embedder::embed_one(content) {
-            Ok(emb) => {
-                let bytes = crate::embedder::vec_to_blob(&emb);
-                let pref_bytes = if refresh_preferences {
-                    crate::preference::preference_span(content)
-                        .and_then(|span| crate::embedder::embed_one(&span).ok())
-                        .map(|embedding| crate::embedder::vec_to_blob(&embedding))
-                } else {
-                    None
-                };
-                let update = if refresh_preferences {
-                    conn.execute(
-                        "UPDATE drawers SET embedding = ?1, pref_embedding = ?2 WHERE id = ?3",
-                        rusqlite::params![bytes, pref_bytes, id],
-                    )
-                } else {
-                    conn.execute(
-                        "UPDATE drawers SET embedding = ?1 WHERE id = ?2",
-                        rusqlite::params![bytes, id],
-                    )
-                };
-                match update {
-                    Ok(_) => reembedded += 1,
-                    Err(_) => errors += 1,
-                }
-            }
-            Err(_) => errors += 1,
+    let crate::store::ReembedReport { reembedded, errors } =
+        match crate::store::reembed_drawers(conn, &ids_and_content) {
+            Ok(report) => report,
+            Err(e) => return json!({"error": e.to_string()}),
+        };
+    let preferences_refreshed = if refresh_preferences {
+        match crate::store::refresh_preference_tags(conn, true) {
+            Ok(count) => count,
+            Err(e) => return json!({"error": e.to_string()}),
         }
-    }
+    } else {
+        0
+    };
     json!({
         "reembedded": reembedded,
         "errors": errors,
         "total": ids_and_content.len(),
         "refresh_preferences": refresh_preferences,
+        "preferences_refreshed": preferences_refreshed,
     })
+}
+
+/// Background migration started from MCP, so a second `migrate` call reports
+/// progress instead of starting another worker.
+static MIGRATION_WORKER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `palace_embeddings`: list models, estimate, migrate (in the background),
+/// and inspect or finish a migration. Nothing here runs on its own: an agent
+/// calls the changing actions only when the user asks for them.
+fn tool_embeddings(conn: &Connection, config: &PalaceConfig, args: &Value) -> Value {
+    use crate::embedding_migration as migration;
+    let action = str_arg(args, "action").unwrap_or_else(|| "status".to_string());
+    let model_arg = || -> Result<&'static crate::embedding_models::ModelSpec, Value> {
+        let id = str_arg(args, "model").ok_or_else(|| json!({"error": "model is required"}))?;
+        crate::embedding_models::find(&id).ok_or_else(|| {
+            json!({"error": format!(
+                "unknown model '{id}' (known: {})",
+                crate::embedding_models::ids()
+            )})
+        })
+    };
+    let to_json =
+        |result: Result<Value>| result.unwrap_or_else(|e| json!({"error": e.to_string()}));
+    let wanted = config.embedding_model();
+    if !matches!(action.as_str(), "list" | "status") {
+        if let Err(e) = migration::ensure_local(config) {
+            return json!({"error": e.to_string()});
+        }
+    }
+    match action.as_str() {
+        "list" => {
+            let active = crate::embedder::active_model().id;
+            let models: Vec<Value> = crate::embedding_models::MODELS
+                .iter()
+                .map(|spec| {
+                    json!({
+                        "id": spec.id,
+                        "name": spec.name,
+                        "precision": spec.precision,
+                        "dim": spec.dim,
+                        "download_bytes": spec.download_bytes,
+                        "cached": crate::embedding_models::is_cached(spec),
+                        "active": spec.id == active,
+                        "experimental": spec.experimental,
+                        "summary": spec.summary,
+                    })
+                })
+                .collect();
+            json!({"active": active, "models": models})
+        }
+        "status" => to_json(migration::status(conn, wanted.as_deref()).map(|status| {
+            json!({
+                "status": status,
+                "worker_running": MIGRATION_WORKER.load(std::sync::atomic::Ordering::SeqCst),
+            })
+        })),
+        "estimate" => match model_arg() {
+            Ok(spec) => to_json(migration::estimate(conn, spec).map(|e| json!(e))),
+            Err(e) => e,
+        },
+        "migrate" => {
+            let spec = match model_arg() {
+                Ok(spec) => spec,
+                Err(e) => return e,
+            };
+            if let Err(e) = migration::start(conn, spec.id) {
+                return json!({"error": e.to_string()});
+            }
+            if MIGRATION_WORKER.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return json!({"started": false, "target": spec.id, "note": "a migration worker is already running; check action=status"});
+            }
+            let db_path = config.palace_db_path();
+            let budget = config.embedding_latency_budget_ms();
+            let force = bool_arg(args, "force");
+            std::thread::spawn(move || {
+                let outcome = crate::db::open(&db_path)
+                    .and_then(|conn| migration::run(&conn, budget, true, force, &mut |_| {}));
+                match outcome {
+                    Ok(report) => tracing::info!(
+                        written = report.written,
+                        passed = report.verify.passed,
+                        switched = report.switched.is_some(),
+                        "Palace: embedding migration finished"
+                    ),
+                    Err(err) => warn!(error = %err, "Palace: embedding migration failed"),
+                }
+                MIGRATION_WORKER.store(false, std::sync::atomic::Ordering::SeqCst);
+            });
+            json!({
+                "started": true,
+                "target": spec.id,
+                "note": "Building vectors in the background; search keeps using the current model. \
+                         The palace switches only if verify passes. Check progress with action=status.",
+            })
+        }
+        "verify" => {
+            let sample = int_arg(args, "sample")
+                .map(|n| n.max(1) as usize)
+                .unwrap_or(migration::VERIFY_SAMPLE);
+            to_json(
+                migration::verify(conn, sample, config.embedding_latency_budget_ms())
+                    .map(|r| json!(r)),
+            )
+        }
+        "cutover" => to_json(migration::cutover(conn, bool_arg(args, "force")).map(|r| json!(r))),
+        "rollback" => to_json(migration::rollback(conn).map(|r| json!(r))),
+        "cleanup" => to_json(migration::cleanup(conn).map(|r| json!(r))),
+        "cancel" => to_json(migration::cancel(conn).map(|target| json!({"cancelled": target}))),
+        other => json!({"error": format!(
+            "unknown action '{other}' (list, status, estimate, migrate, verify, cutover, rollback, cleanup, cancel)"
+        )}),
+    }
 }
 
 /// Delete drawers that have not been accessed and were filed more than
@@ -1354,7 +1997,7 @@ fn tool_prune(conn: &Connection, args: &Value) -> Value {
 }
 
 fn count_corrupted_embeddings(conn: &Connection) -> i64 {
-    let expected_bytes = (crate::embedder::EMBEDDING_DIM * std::mem::size_of::<f32>()) as i64;
+    let expected_bytes = (crate::embedder::active_model().dim * std::mem::size_of::<f32>()) as i64;
     conn.query_row(
         "SELECT COUNT(*) FROM drawers WHERE embedding IS NOT NULL AND length(embedding) != ?1",
         [expected_bytes],
@@ -1364,18 +2007,7 @@ fn count_corrupted_embeddings(conn: &Connection) -> i64 {
 }
 
 fn embedding_model_cached() -> bool {
-    let cache_base = if let Ok(path) = std::env::var("HF_HUB_CACHE") {
-        std::path::PathBuf::from(path)
-    } else if let Some(home) =
-        directories::UserDirs::new().map(|user| user.home_dir().to_path_buf())
-    {
-        home.join(".cache").join("huggingface").join("hub")
-    } else {
-        return false;
-    };
-    cache_base
-        .join("models--Qdrant--all-MiniLM-L6-v2-onnx")
-        .exists()
+    crate::embedding_models::is_cached(crate::embedder::active_model())
 }
 
 fn find_conflicts(conn: &Connection, entity: Option<&str>) -> Result<Vec<Value>> {
@@ -1465,12 +2097,58 @@ fn tool_names() -> Vec<String> {
 
 // ── Tool schema list ──────────────────────────────────────────────────────
 
+/// Protocol-critical tools pinned first-class (loaded into context at session
+/// start) via the Anthropic `alwaysLoad` tool-meta hint, so the mandatory Palace
+/// Memory Protocol does not depend on Claude Code's ToolSearch deferral. These are
+/// exactly the three-hard-trigger tools: SESSION START, BEFORE ANSWERING, AFTER WORK.
+/// Requires Claude Code >= 2.1.121. All other tools remain deferrable.
+const ALWAYS_LOAD_TOOLS: &[&str] = &[
+    // SESSION START
+    "palace_status",
+    "palace_session_context",
+    "palace_diary_search",
+    // PROJECT CHECK
+    "palace_project_status",
+    // BEFORE ANSWERING
+    "palace_search",
+    "palace_kg_query",
+    "palace_preference_search",
+    // AFTER WORK
+    "palace_diary_write",
+    "palace_kg_add",
+];
+
+/// Stamp `_meta.anthropic/alwaysLoad = true` onto each protocol-critical tool so
+/// clients that honor the hint keep them resident instead of deferring behind
+/// tool search. Tools not in [`ALWAYS_LOAD_TOOLS`] are left untouched.
+fn pin_protocol_tools(tools: &mut Value) {
+    let Some(arr) = tools.as_array_mut() else {
+        return;
+    };
+    for tool in arr {
+        let is_protocol = tool
+            .get("name")
+            .and_then(|n| n.as_str())
+            .is_some_and(|name| ALWAYS_LOAD_TOOLS.contains(&name));
+        if is_protocol {
+            if let Some(obj) = tool.as_object_mut() {
+                obj.insert("_meta".to_string(), json!({ "anthropic/alwaysLoad": true }));
+            }
+        }
+    }
+}
+
 fn tool_list() -> Value {
-    json!([
+    let mut tools = json!([
         {
             "name": "palace_status",
-            "description": "Palace overview — total drawers, wing and room counts",
-            "inputSchema": {"type": "object", "properties": {}}
+            "description": "Palace overview — total drawers, wing counts, and recent sessions. Pass verbose=true for room counts, the protocol text, and the AAAK spec.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "verbose": {"type": "boolean", "description": "Include per-room counts, the protocol text, and the AAAK spec (default: false)"}
+                }
+            }
         },
         {
             "name": "palace_gain",
@@ -1538,8 +2216,48 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_list_wings",
-            "description": "List all wings with drawer counts",
+            "description": "List all registered wings with their kind (project/topic), description, project path, last mined time, and drawer counts.",
             "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "palace_project_status",
+            "description": "Check whether the current project or topic is known to the palace. Returns a state (mined / registered_not_mined / unknown) plus a recommendation. Call this when entering a workspace; if it is unmined, ask the user before calling palace_mine, and offer palace_create_wing for non-repo topics.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string", "description": "Absolute path to the project/workspace directory"},
+                    "wing": {"type": "string", "description": "Optional explicit wing name to check instead of deriving one from the path"}
+                },
+                "required": ["project_path"]
+            }
+        },
+        {
+            "name": "palace_mine",
+            "description": "Mine (or re-sync) a CODE REPOSITORY directory into the palace (only after the user agrees). Repos only — chats or non-repo topics have no folder to mine, use palace_create_wing for those. Accepting this implicitly initialises palace.yaml for first-time repos and then syncs files into the project's wing: new files are added, edited files are re-mined so their drawers reflect the latest content, unchanged files are left alone, and drawers for files deleted from disk are removed. The result's `summary` field reports new/updated/unchanged/removed file counts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string", "description": "Absolute path to the project directory to mine"},
+                    "wing": {"type": "string", "description": "Override the wing name (defaults to palace.yaml or the directory slug)"},
+                    "limit": {"type": "integer", "description": "Max files to process (0 = no limit)"},
+                    "dry_run": {"type": "boolean", "description": "Report what would be mined without writing"}
+                },
+                "required": ["project_path"]
+            }
+        },
+        {
+            "name": "palace_create_wing",
+            "description": "Declare a wing in the registry. Use kind='topic' for non-repo work (e.g. sales topics) so memories have a dedicated area, or kind='project' to pre-declare a repo wing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Wing name (will be normalised to a slug)"},
+                    "kind": {"type": "string", "enum": ["topic", "project"], "description": "Wing kind (default: topic)"},
+                    "description": {"type": "string", "description": "What this wing is for (optional)"},
+                    "project_path": {"type": "string", "description": "Canonical path for project wings (optional)"}
+                },
+                "required": ["name"]
+            }
         },
         {
             "name": "palace_list_rooms",
@@ -1808,7 +2526,7 @@ fn tool_list() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "agent_name": {"type": "string"},
+                    "agent_name": {"type": "string", "description": "Your agent name (required)"},
                     "last_n": {"type": "integer", "description": "Number of recent entries (default: 10)"}
                 },
                 "required": ["agent_name"]
@@ -1816,25 +2534,28 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_diary_search",
-            "description": "Semantic search within an agent's diary entries.",
+            "description": "Semantic search within diary entries. Set all_agents=true to recall investigations recorded by any agent (cross-agent continuity).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "agent_name": {"type": "string"},
+                    "agent_name": {"type": "string", "description": "Your agent name (required)"},
                     "query": {"type": "string", "description": "Search query"},
                     "limit": {"type": "integer", "description": "Max results (default: 5)"},
-                    "tag": {"type": "string", "description": "Optional tag filter"}
+                    "tag": {"type": "string", "description": "Optional tag filter"},
+                    "all_agents": {"type": "boolean", "description": "Search every agent's diary instead of only your own (default: false)"},
+                    "project_path": {"type": "string", "description": "Restrict results to entries recorded for this project path"}
                 },
                 "required": ["agent_name", "query"]
             }
         },
         {
             "name": "palace_session_context",
-            "description": "Get warm-start context from the last 24h of diary entries for an agent.",
+            "description": "Get warm-start context from recent diary entries. Falls back to other agents' recent work for the project when you have none of your own.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "agent_name": {"type": "string"}
+                    "agent_name": {"type": "string", "description": "Your agent name (required)"},
+                    "project_path": {"type": "string", "description": "Restrict and scope fallback recall to this project path"}
                 },
                 "required": ["agent_name"]
             }
@@ -1906,11 +2627,24 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_upgrade_embeddings",
-            "description": "Re-embed all drawers using the current embedding model. Run after upgrading the model to keep search quality consistent.",
+            "description": "Re-embed all drawers with the palace's active embedding model (batched). To switch models use palace_embeddings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "refresh_preferences": {"type": "boolean", "description": "Also refresh preference-span embeddings"}
+                }
+            }
+        },
+        {
+            "name": "palace_embeddings",
+            "description": "Embedding model management. action=list shows models; status shows the active model and any migration; estimate measures cost of switching to `model` on this machine; migrate rebuilds every vector for `model` in the background while search keeps working, verifies it on this palace, and switches only if it is at least as good; verify/cutover/rollback/cleanup/cancel run single steps. Switching models is the user's choice: run estimate, migrate, cutover, rollback or cleanup only when the user asks for it, never on your own initiative.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "status", "estimate", "migrate", "verify", "cutover", "rollback", "cleanup", "cancel"], "description": "What to do (default: status)"},
+                    "model": {"type": "string", "description": "Model id for estimate/migrate (see action=list)"},
+                    "force": {"type": "boolean", "description": "cutover/migrate: switch even if verify failed"},
+                    "sample": {"type": "integer", "description": "verify: number of probes (default 200)"}
                 }
             }
         },
@@ -1924,8 +2658,79 @@ fn tool_list() -> Value {
                 },
                 "required": ["older_than_days"]
             }
+        },
+        {
+            "name": "palace_memory_report",
+            "description": "Human-readable overview of what the palace remembers: profile, total drawers, wings and rooms with counts, recent diary topics, and top remembered facts. Use this to inspect memory without a UI — ideal for non-developer users who want to see what's stored.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wing": {"type": "string", "description": "Restrict the report to a single wing (optional)"},
+                    "limit": {"type": "integer", "description": "Max recent diary entries and sample drawers to include (default 10)"}
+                }
+            }
+        }
+    ]);
+    pin_protocol_tools(&mut tools);
+    tools
+}
+
+/// Prompts advertised to MCP clients (e.g. Claude Desktop) via `prompts/list`.
+/// These give non-developer users one-click session continuity without hooks.
+fn prompt_list() -> Value {
+    json!([
+        {
+            "name": "continue-session",
+            "description": "Load Palace memory before you start — recent work, decisions, and context.",
+            "arguments": []
+        },
+        {
+            "name": "save-session",
+            "description": "Save what happened this session to Palace memory so it carries over next time.",
+            "arguments": [
+                {"name": "summary", "description": "Optional one-line summary of what to remember", "required": false}
+            ]
         }
     ])
+}
+
+/// Resolve a prompt by name into a `prompts/get` result. Wording adapts to the
+/// active profile so the guidance reads naturally for the user's use case.
+fn prompt_get(config: &PalaceConfig, name: &str) -> Option<Value> {
+    let noun = match config.profile() {
+        crate::config::Profile::Coding => "project",
+        crate::config::Profile::Creative => "world or story",
+        crate::config::Profile::Personal => "person or household",
+    };
+    match name {
+        "continue-session" => {
+            let text = format!(
+                "Before doing anything else, load Palace memory for this {noun}:\n\
+                 1. Call palace_status.\n\
+                 2. Call palace_session_context(agent_name) for warm-start context.\n\
+                 3. Call palace_diary_search for recent work.\n\
+                 Then briefly summarise what you found so we can pick up where we left off."
+            );
+            Some(json!({
+                "description": "Load Palace memory for this session",
+                "messages": [{"role": "user", "content": {"type": "text", "text": text}}]
+            }))
+        }
+        "save-session" => {
+            let text = format!(
+                "Save this session to Palace memory for next time:\n\
+                 1. Call palace_diary_write with what happened, what changed, and what matters.\n\
+                 2. Call palace_kg_add for any stable new facts about this {noun}.\n\
+                 3. Use palace_remember (importance=5) for anything critical.\n\
+                 Then confirm what you saved."
+            );
+            Some(json!({
+                "description": "Save this session to Palace memory",
+                "messages": [{"role": "user", "content": {"type": "text", "text": text}}]
+            }))
+        }
+        _ => None,
+    }
 }
 
 // ── Argument helpers ──────────────────────────────────────────────────────
@@ -1981,4 +2786,123 @@ fn float_arg(args: &Value, key: &str) -> Option<f64> {
 
 fn compact_text(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initialize_result_advertises_protocol_instructions() {
+        let result = initialize_result("2024-11-05", crate::config::Profile::default());
+        let instructions = result
+            .get("instructions")
+            .and_then(|v| v.as_str())
+            .expect("initialize result must carry instructions");
+        assert!(
+            instructions.contains("MANDATORY"),
+            "instructions must contain the memory protocol"
+        );
+        assert!(
+            instructions.contains("tool search"),
+            "instructions must tell deferring clients to batch-load protocol tools"
+        );
+        for tool in ALWAYS_LOAD_TOOLS {
+            assert!(
+                instructions.contains(tool),
+                "instructions must name protocol tool {tool}"
+            );
+        }
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["serverInfo"]["name"], "palace");
+    }
+
+    #[test]
+    fn protocol_tools_are_pinned_always_load() {
+        let tools = tool_list();
+        let arr = tools.as_array().expect("tool_list returns an array");
+
+        for tool in arr {
+            let name = tool.get("name").and_then(|n| n.as_str()).unwrap();
+            let meta = tool
+                .get("_meta")
+                .and_then(|m| m.get("anthropic/alwaysLoad"));
+            if ALWAYS_LOAD_TOOLS.contains(&name) {
+                assert_eq!(
+                    meta.and_then(|v| v.as_bool()),
+                    Some(true),
+                    "protocol tool {name} must be pinned alwaysLoad"
+                );
+            } else {
+                assert!(
+                    meta.is_none(),
+                    "non-protocol tool {name} must not carry alwaysLoad meta"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_always_load_tool_exists_in_tool_list() {
+        let tools = tool_list();
+        let names: Vec<&str> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        for pinned in ALWAYS_LOAD_TOOLS {
+            assert!(
+                names.contains(pinned),
+                "pinned tool {pinned} is not present in tool_list"
+            );
+        }
+    }
+
+    #[test]
+    fn progress_notification_has_no_id_and_carries_the_caller_token() {
+        let token = json!("abc-123");
+        let notification = progress_notification(&token, crate::miner::MinePhase::Writing, 3, 10);
+
+        assert_eq!(notification["jsonrpc"], "2.0");
+        assert!(
+            notification.get("id").is_none(),
+            "notifications must not carry an id per the JSON-RPC/MCP spec"
+        );
+        assert_eq!(notification["method"], "notifications/progress");
+        assert_eq!(notification["params"]["progressToken"], token);
+        assert_eq!(notification["params"]["progress"], 3);
+        assert_eq!(notification["params"]["total"], 10);
+        assert_eq!(notification["params"]["message"], "writing");
+    }
+
+    #[test]
+    fn tool_list_includes_memory_report() {
+        let tools = tool_list();
+        let names: Vec<&str> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"palace_memory_report"));
+    }
+
+    #[test]
+    fn prompts_are_advertised_and_resolvable() {
+        let prompts = prompt_list();
+        let names: Vec<&str> = prompts
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"continue-session"));
+        assert!(names.contains(&"save-session"));
+
+        let cfg = PalaceConfig::new();
+        assert!(prompt_get(&cfg, "continue-session").is_some());
+        assert!(prompt_get(&cfg, "save-session").is_some());
+        assert!(prompt_get(&cfg, "does-not-exist").is_none());
+    }
 }

@@ -32,6 +32,68 @@ fn status_returns_counts() {
     assert_eq!(count, 1);
 }
 
+#[test]
+fn status_is_compact_by_default() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    store::add_drawer(
+        &conn,
+        "wing_test",
+        "room_a",
+        "content",
+        None,
+        "f.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let result =
+        palace::mcp_server::dispatch_tool(&conn, &config, "palace_status", &serde_json::json!({}));
+
+    assert_eq!(result["total_drawers"], 1);
+    assert_eq!(result["wings"]["wing_test"], 1);
+    assert!(result.get("palace_path").is_some());
+    assert!(result.get("profile").is_some());
+    // Already served elsewhere (MCP instructions, rule files, palace_get_aaak_spec)
+    // or rarely needed at session start.
+    assert!(result.get("aaak_dialect").is_none(), "{result}");
+    assert!(result.get("protocol").is_none(), "{result}");
+    assert!(result.get("rooms").is_none(), "{result}");
+}
+
+#[test]
+fn status_verbose_includes_rooms_protocol_and_aaak() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    store::add_drawer(
+        &conn,
+        "wing_test",
+        "room_a",
+        "content",
+        None,
+        "f.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_status",
+        &serde_json::json!({"verbose": true}),
+    );
+
+    assert_eq!(result["rooms"]["room_a"], 1);
+    assert!(result["protocol"].as_str().is_some_and(|p| !p.is_empty()));
+    assert!(result["aaak_dialect"]
+        .as_str()
+        .is_some_and(|a| !a.is_empty()));
+}
+
 // ── Taxonomy ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -213,6 +275,39 @@ fn remember_inserts_high_importance_drawer() {
     let drawer = store::get_drawer(&conn, id).unwrap().unwrap();
     assert_eq!(drawer.importance, 5.0);
     assert_eq!(drawer.wing, "preferences");
+}
+
+#[test]
+fn remember_does_not_collide_distinct_facts_in_same_wing_room() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    let first = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &serde_json::json!({"text": "The user prefers tabs over spaces", "wing": "w", "room": "r"}),
+    );
+    assert_eq!(first["success"], true);
+    assert_eq!(first["inserted"], true);
+    let first_id = first["id"].as_str().unwrap().to_string();
+
+    let second = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &serde_json::json!({"text": "The user prefers rebase over merge", "wing": "w", "room": "r"}),
+    );
+    assert_eq!(second["success"], true);
+    assert_eq!(second["inserted"], true);
+    let second_id = second["id"].as_str().unwrap().to_string();
+
+    assert_ne!(
+        first_id, second_id,
+        "distinct remembered facts in the same wing/room must not collide onto the same drawer id"
+    );
+    assert!(store::get_drawer(&conn, &first_id).unwrap().is_some());
+    assert!(store::get_drawer(&conn, &second_id).unwrap().is_some());
 }
 
 #[test]
@@ -590,4 +685,505 @@ fn room_counts_filtered_by_wing() {
     assert_eq!(rooms.len(), 2);
     assert!(rooms.contains_key("r1"));
     assert!(rooms.contains_key("r2"));
+}
+
+// ── Cross-agent, project-scoped recall ────────────────────────────────────
+
+fn write_diary(
+    conn: &rusqlite::Connection,
+    config: &palace::config::PalaceConfig,
+    agent: &str,
+    entry: &str,
+    project_path: &str,
+) {
+    let result = palace::mcp_server::dispatch_tool(
+        conn,
+        config,
+        "palace_diary_write",
+        &serde_json::json!({
+            "agent_name": agent,
+            "entry": entry,
+            "topic": "investigation",
+            "project_path": project_path,
+        }),
+    );
+    assert_eq!(result["success"], true, "diary_write failed: {result}");
+}
+
+#[test]
+fn diary_search_all_agents_finds_other_agent_entries() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    // Agent "claude-cli" investigates and records a decision.
+    write_diary(
+        &conn,
+        &config,
+        "claude-cli",
+        "Investigated the duplicate checkout endpoint and chose to deduplicate by idempotency key in the payment handler.",
+        "/proj/checkout",
+    );
+
+    // A different agent ("cursor") searches across all agents.
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_search",
+        &serde_json::json!({
+            "agent_name": "cursor",
+            "query": "why did we deduplicate the checkout endpoint idempotency key",
+            "all_agents": true,
+        }),
+    );
+
+    let hits = result["results"].as_array().expect("results array");
+    assert!(
+        !hits.is_empty(),
+        "cross-agent diary search should surface another agent's entry: {result}"
+    );
+    let joined = hits
+        .iter()
+        .filter_map(|h| h["text"].as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        joined.contains("idempotency key"),
+        "expected the claude-cli decision in results, got: {joined}"
+    );
+}
+
+#[test]
+fn diary_search_defaults_to_calling_agent_only() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    write_diary(
+        &conn,
+        &config,
+        "claude-cli",
+        "Investigated the duplicate checkout endpoint and chose to deduplicate by idempotency key.",
+        "/proj/checkout",
+    );
+
+    // Without all_agents, a different agent sees nothing (per-agent isolation).
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_search",
+        &serde_json::json!({
+            "agent_name": "cursor",
+            "query": "idempotency key checkout endpoint",
+        }),
+    );
+    let hits = result["results"].as_array().expect("results array");
+    assert!(
+        hits.is_empty(),
+        "default diary search must stay scoped to the calling agent: {result}"
+    );
+}
+
+// ── Write-path semantic dedup ─────────────────────────────────────────────
+
+#[test]
+fn remember_blocks_near_duplicate_facts_across_rooms() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    let text = "We deduplicate checkout requests using the idempotency key stored in Redis.";
+
+    let first = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &serde_json::json!({"text": text, "wing": "decisions", "room": "checkout"}),
+    );
+    assert_eq!(
+        first["inserted"], true,
+        "first remember should insert: {first}"
+    );
+
+    // Same fact filed under a different room would slip past the deterministic
+    // ID guard — semantic dedup must catch it.
+    let second = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &serde_json::json!({"text": text, "wing": "decisions", "room": "payments"}),
+    );
+    assert_eq!(
+        second["inserted"], false,
+        "near-duplicate remember should be skipped: {second}"
+    );
+    assert_eq!(
+        second["reason"], "duplicate",
+        "expected duplicate reason: {second}"
+    );
+
+    // Only the first fact should be stored.
+    assert_eq!(store::count_drawers(&conn).unwrap(), 1);
+}
+
+#[test]
+fn diary_write_blocks_near_duplicate_entries_for_same_agent() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    let entry =
+        "Investigated the duplicate suggestion bug and decided to dedupe by idempotency key.";
+
+    let first = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_write",
+        &serde_json::json!({"agent_name": "claude-cli", "entry": entry, "topic": "investigation"}),
+    );
+    assert_eq!(
+        first["success"], true,
+        "first diary_write should succeed: {first}"
+    );
+
+    let second = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_write",
+        &serde_json::json!({"agent_name": "claude-cli", "entry": entry, "topic": "investigation"}),
+    );
+    assert_eq!(
+        second["success"], false,
+        "near-duplicate diary entry should be skipped: {second}"
+    );
+    assert_eq!(
+        second["reason"], "duplicate",
+        "expected duplicate reason: {second}"
+    );
+
+    assert_eq!(store::count_drawers(&conn).unwrap(), 1);
+}
+
+#[test]
+fn diary_write_dedup_is_scoped_per_agent() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    let entry =
+        "Investigated the duplicate suggestion bug and decided to dedupe by idempotency key.";
+
+    let first = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_write",
+        &serde_json::json!({"agent_name": "claude-cli", "entry": entry}),
+    );
+    assert_eq!(first["success"], true);
+
+    // A different agent recording the same observation is NOT a duplicate — it
+    // is that agent's own continuity record.
+    let other = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_write",
+        &serde_json::json!({"agent_name": "cursor", "entry": entry}),
+    );
+    assert_eq!(
+        other["success"], true,
+        "another agent's identical entry must still be stored: {other}"
+    );
+    assert_eq!(store::count_drawers(&conn).unwrap(), 2);
+}
+
+#[test]
+fn session_context_falls_back_to_other_agents_for_project() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+
+    // Yesterday's agent recorded recent work for a project.
+    write_diary(
+        &conn,
+        &config,
+        "claude-cli",
+        "Pushed a fix that removes the duplicate suggestion in the checkout flow.",
+        "/proj/checkout",
+    );
+
+    // A different agent opens a session for the same project and has no diary
+    // of its own — it should still see the prior agent's recent work.
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_session_context",
+        &serde_json::json!({
+            "agent_name": "cursor",
+            "project_path": "/proj/checkout",
+        }),
+    );
+
+    assert_eq!(
+        result["has_recent_session"], true,
+        "cross-agent fallback should report a recent session: {result}"
+    );
+    assert_eq!(
+        result["cross_agent"], true,
+        "fallback context must be flagged as cross-agent: {result}"
+    );
+    let entries = result["recent_entries"].as_array().expect("recent_entries");
+    assert!(!entries.is_empty());
+}
+
+// ── Wings registry: create / project status / auto-register ─────────────────
+
+#[test]
+fn create_wing_declares_topic_wing() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    let args = serde_json::json!({
+        "name": "Enterprise Sales",
+        "description": "Sales account notes",
+    });
+    let result = palace::mcp_server::dispatch_tool(&conn, &config, "palace_create_wing", &args);
+    assert_eq!(result["success"], true, "{result}");
+    assert_eq!(result["wing"]["name"], "enterprise_sales");
+    assert_eq!(result["wing"]["kind"], "topic");
+
+    let record = store::get_wing(&conn, "enterprise_sales").unwrap().unwrap();
+    assert_eq!(record.description, "Sales account notes");
+}
+
+#[test]
+fn project_status_unknown_for_fresh_dir() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    let args = serde_json::json!({ "project_path": tmp.path().to_string_lossy() });
+    let result = palace::mcp_server::dispatch_tool(&conn, &config, "palace_project_status", &args);
+    assert_eq!(result["state"], "unknown", "{result}");
+    assert!(result["recommendation"].is_string());
+}
+
+#[test]
+fn remember_auto_registers_new_wing() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    let args = serde_json::json!({
+        "text": "A brand new fact for a brand new topic wing",
+        "wing": "fresh_topic",
+        "room": "general",
+    });
+    let result = palace::mcp_server::dispatch_tool(&conn, &config, "palace_remember", &args);
+    assert_eq!(result["success"], true, "{result}");
+
+    let record = store::get_wing(&conn, "fresh_topic").unwrap();
+    assert!(record.is_some(), "wing should be auto-registered");
+    assert_eq!(record.unwrap().kind, "topic");
+}
+
+#[test]
+fn list_wings_returns_registry_records() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    store::upsert_wing(&conn, "topic_x", "topic", "desc", None).unwrap();
+
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_list_wings",
+        &serde_json::json!({}),
+    );
+    let wings = result["wings"].as_array().expect("wings array");
+    assert!(
+        wings
+            .iter()
+            .any(|w| w["name"] == "topic_x" && w["kind"] == "topic"),
+        "registry should list topic_x: {result}"
+    );
+}
+
+// ── palace_mine progress reporting (MCP liveness fix) ───────────────────────
+//
+// `tool_mine` opens its own connection via `config.palace_db_path()` (it
+// can't share the immutable `conn` handed to `dispatch_tool`), so these tests
+// isolate the palace directory via `with_config_dir` rather than touching the
+// real user's `~/.palace`.
+
+#[test]
+fn mine_with_progress_reports_each_file_and_returns_success() {
+    let config_dir = tempfile::TempDir::new().unwrap();
+    let config = palace::config::PalaceConfig::with_config_dir(Some(config_dir.path()));
+
+    let project = tempfile::TempDir::new().unwrap();
+    palace::room_detector::save_config(
+        project.path(),
+        "mcp_progress_test",
+        &[palace::room_detector::Room {
+            name: "general".into(),
+            description: "general".into(),
+            keywords: vec![],
+        }],
+    )
+    .unwrap();
+    for i in 0..4 {
+        std::fs::write(
+            project.path().join(format!("note_{i}.txt")),
+            format!(
+                "some unique content about topic number {i} for testing mine progress reporting."
+            ),
+        )
+        .unwrap();
+    }
+
+    let args = serde_json::json!({ "project_path": project.path().to_string_lossy() });
+    let mut seen: Vec<(palace::miner::MinePhase, usize, usize)> = Vec::new();
+    let mut on_progress = |phase: palace::miner::MinePhase, done: usize, total: usize| {
+        seen.push((phase, done, total))
+    };
+    let result = palace::mcp_server::mine_with_progress(&config, &args, &mut on_progress);
+
+    assert_eq!(result["success"], true, "{result}");
+    let writes: Vec<(usize, usize)> = seen
+        .iter()
+        .filter(|(p, _, _)| *p == palace::miner::MinePhase::Writing)
+        .map(|(_, done, total)| (*done, *total))
+        .collect();
+    assert_eq!(
+        writes.len(),
+        4,
+        "expected one Writing progress call per file: {writes:?}"
+    );
+    assert_eq!(writes.last(), Some(&(4, 4)));
+}
+
+#[test]
+fn dispatch_tool_mine_still_works_without_a_progress_callback() {
+    let conn = test_db();
+    let config_dir = tempfile::TempDir::new().unwrap();
+    let config = palace::config::PalaceConfig::with_config_dir(Some(config_dir.path()));
+
+    let project = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        project.path().join("note.txt"),
+        "some unique content for testing the plain palace_mine dispatch path.",
+    )
+    .unwrap();
+
+    let args = serde_json::json!({ "project_path": project.path().to_string_lossy() });
+    let result = palace::mcp_server::dispatch_tool(&conn, &config, "palace_mine", &args);
+    assert_eq!(result["success"], true, "{result}");
+}
+
+// ── palace_embeddings ──────────────────────────────────────────────────────
+
+fn config_with(json: serde_json::Value) -> (tempfile::TempDir, palace::config::PalaceConfig) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.json"), json.to_string()).unwrap();
+    let config = palace::config::PalaceConfig::with_config_dir(Some(dir.path()));
+    (dir, config)
+}
+
+#[test]
+fn embeddings_list_marks_the_active_model() {
+    let conn = test_db();
+    let (_dir, config) = config_with(serde_json::json!({}));
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_embeddings",
+        &serde_json::json!({"action": "list"}),
+    );
+    let models = result["models"].as_array().expect("models array");
+    assert_eq!(models.len(), palace::embedding_models::MODELS.len());
+    let active: Vec<&str> = models
+        .iter()
+        .filter(|m| m["active"] == true)
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(active, vec![palace::embedding_models::DEFAULT_MODEL_ID]);
+}
+
+#[test]
+fn status_and_session_context_report_a_pending_migration() {
+    let conn = test_db();
+    let (_dir, config) = config_with(serde_json::json!({"embedding_model": "bge-small"}));
+    let status =
+        palace::mcp_server::dispatch_tool(&conn, &config, "palace_status", &serde_json::json!({}));
+    assert_eq!(
+        status["embedding_model"],
+        palace::embedding_models::DEFAULT_MODEL_ID
+    );
+    let notice = status["embedding_migration"].as_str().expect("notice");
+    assert!(notice.contains("migration pending"), "{notice}");
+
+    let context = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_session_context",
+        &serde_json::json!({"agent_name": "tester"}),
+    );
+    assert!(context["embedding_notice"]
+        .as_str()
+        .is_some_and(|n| n.contains("bge-small")));
+
+    let state = palace::embedding_migration::status(&conn, Some("bge-small")).unwrap();
+    assert!(
+        state.target.is_none(),
+        "a configured model never starts a migration"
+    );
+    assert_eq!(state.active, palace::embedding_models::DEFAULT_MODEL_ID);
+
+    let (_dir, plain) = config_with(serde_json::json!({}));
+    let status =
+        palace::mcp_server::dispatch_tool(&conn, &plain, "palace_status", &serde_json::json!({}));
+    assert!(status.get("embedding_migration").is_none());
+}
+
+#[test]
+fn embeddings_changes_are_refused_in_remote_mode() {
+    let conn = test_db();
+    let (_dir, config) = config_with(serde_json::json!({"mcp_mode": "remote"}));
+    if config.mcp_mode() != "remote" {
+        // PALACE_MCP_MODE in the environment overrides config.json.
+        return;
+    }
+    for action in ["migrate", "cutover", "cleanup", "estimate"] {
+        let result = palace::mcp_server::dispatch_tool(
+            &conn,
+            &config,
+            "palace_embeddings",
+            &serde_json::json!({"action": action, "model": "bge-small"}),
+        );
+        let error = result["error"].as_str().unwrap_or_default();
+        assert!(error.contains("remote mode"), "{action}: {result}");
+    }
+    let status = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_embeddings",
+        &serde_json::json!({"action": "status"}),
+    );
+    assert!(status.get("status").is_some());
+}
+
+#[test]
+fn embeddings_rejects_unknown_actions_and_models() {
+    let conn = test_db();
+    let (_dir, config) = config_with(serde_json::json!({}));
+    let bad_action = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_embeddings",
+        &serde_json::json!({"action": "teleport"}),
+    );
+    assert!(bad_action["error"]
+        .as_str()
+        .unwrap()
+        .contains("unknown action"));
+    let bad_model = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_embeddings",
+        &serde_json::json!({"action": "estimate", "model": "gpt-embed"}),
+    );
+    assert!(bad_model["error"]
+        .as_str()
+        .unwrap()
+        .contains("unknown model"));
 }

@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 470" width="1280" height="470" role="img" aria-labelledby="title desc">
+  <title id="title">Inside a palace</title>
+  <desc id="desc">A palace holds wings. A project wing such as my_api contains rooms like backend, decisions, and testing, and each room holds drawers: verbatim text chunks with an embedding. A topic wing such as sales_notes has no folder on disk. Alongside the wings sit a knowledge graph of time-stamped facts and per-agent diaries.</desc>
+  <style>
+    .bg { fill: #f6f8fa; }
+    .ink { fill: #1f2328; }
+    .muted { fill: #57606a; }
+    .line { stroke: #8c959f; }
+    .wing { fill: #ffffff; stroke: #d0d7de; }
+    .room { fill: #f6f8fa; stroke: #d0d7de; }
+    .drawer { fill: #ffffff; stroke: #d0d7de; }
+    .bar { fill: #d0d7de; }
+    .bar-accent { fill: #c297ff; }
+    .accent { fill: #8250df; }
+    .accent-text { fill: #8250df; }
+    .accent-stroke { stroke: #8250df; }
+    .tag-project { fill: #ddf4ff; }
+    .tag-project-text { fill: #0969da; }
+    .tag-topic { fill: #fff8c5; }
+    .tag-topic-text { fill: #9a6700; }
+    .good { fill: #1a7f37; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .ink { fill: #e6edf3; }
+      .muted { fill: #9198a1; }
+      .line { stroke: #6e7681; }
+      .wing { fill: #161b22; stroke: #30363d; }
+      .room { fill: #0d1117; stroke: #30363d; }
+      .drawer { fill: #161b22; stroke: #30363d; }
+      .bar { fill: #30363d; }
+      .bar-accent { fill: #6e40c9; }
+      .accent { fill: #a371f7; }
+      .accent-text { fill: #d2a8ff; }
+      .accent-stroke { stroke: #a371f7; }
+      .tag-project { fill: #0c2d6b; }
+      .tag-project-text { fill: #79c0ff; }
+      .tag-topic { fill: #3b2300; }
+      .tag-topic-text { fill: #e3b341; }
+      .good { fill: #3fb950; }
+    }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+  </style>
+
+  <defs>
+    <!-- A drawer: verbatim text lines plus an embedding strip -->
+    <g id="drawer">
+      <rect class="drawer" width="136" height="58" rx="6" stroke-width="1.2"/>
+      <rect class="bar" x="10" y="12" width="104" height="5" rx="2.5"/>
+      <rect class="bar" x="10" y="23" width="116" height="5" rx="2.5"/>
+      <rect class="bar" x="10" y="34" width="78" height="5" rx="2.5"/>
+      <rect class="bar-accent" x="10" y="46" width="6" height="5" rx="1"/>
+      <rect class="bar-accent" x="19" y="46" width="6" height="5" rx="1"/>
+      <rect class="bar-accent" x="28" y="46" width="6" height="5" rx="1"/>
+      <rect class="bar-accent" x="37" y="46" width="6" height="5" rx="1"/>
+      <rect class="bar-accent" x="46" y="46" width="6" height="5" rx="1"/>
+    </g>
+  </defs>
+
+  <rect class="bg" width="1280" height="470" rx="16"/>
+  <text class="ink" x="64" y="44" font-size="20" font-weight="700">Inside a palace</text>
+  <text class="muted mono" x="236" y="44" font-size="14">~/.palace/palace/palace.db</text>
+
+  <!-- Project wing -->
+  <g transform="translate(64 68)">
+    <rect class="wing" width="560" height="340" rx="12" stroke-width="1.5"/>
+    <text class="muted" x="20" y="34" font-size="14">wing</text>
+    <text class="ink mono" x="58" y="34" font-size="18" font-weight="700">my_api</text>
+    <rect class="tag-project" x="140" y="18" width="66" height="22" rx="11"/>
+    <text class="tag-project-text" x="173" y="34" font-size="13" text-anchor="middle">project</text>
+    <text class="muted" x="222" y="34" font-size="13">mined from ~/code/my_api</text>
+
+    <g transform="translate(20 56)">
+      <rect class="room" width="164" height="264" rx="10" stroke-width="1.2"/>
+      <text class="muted" x="14" y="26" font-size="13">room</text>
+      <text class="ink mono" x="50" y="26" font-size="15" font-weight="600">backend</text>
+      <use href="#drawer" x="14" y="42"/>
+      <use href="#drawer" x="14" y="112"/>
+      <use href="#drawer" x="14" y="182"/>
+    </g>
+    <g transform="translate(198 56)">
+      <rect class="room" width="164" height="264" rx="10" stroke-width="1.2"/>
+      <text class="muted" x="14" y="26" font-size="13">room</text>
+      <text class="ink mono" x="50" y="26" font-size="15" font-weight="600">decisions</text>
+      <use href="#drawer" x="14" y="42"/>
+      <use href="#drawer" x="14" y="112"/>
+    </g>
+    <g transform="translate(376 56)">
+      <rect class="room" width="164" height="264" rx="10" stroke-width="1.2"/>
+      <text class="muted" x="14" y="26" font-size="13">room</text>
+      <text class="ink mono" x="50" y="26" font-size="15" font-weight="600">testing</text>
+      <use href="#drawer" x="14" y="42"/>
+      <use href="#drawer" x="14" y="112"/>
+      <use href="#drawer" x="14" y="182"/>
+    </g>
+  </g>
+
+  <!-- Topic wing -->
+  <g transform="translate(648 68)">
+    <rect class="wing" width="260" height="340" rx="12" stroke-width="1.5"/>
+    <text class="muted" x="20" y="34" font-size="14">wing</text>
+    <text class="ink mono" x="58" y="34" font-size="18" font-weight="700">sales_notes</text>
+    <rect class="tag-topic" x="20" y="48" width="56" height="22" rx="11"/>
+    <text class="tag-topic-text" x="48" y="64" font-size="13" text-anchor="middle">topic</text>
+    <text class="muted" x="86" y="64" font-size="13">no folder on disk</text>
+
+    <g transform="translate(20 86)">
+      <rect class="room" width="220" height="234" rx="10" stroke-width="1.2"/>
+      <text class="muted" x="14" y="26" font-size="13">room</text>
+      <text class="ink mono" x="50" y="26" font-size="15" font-weight="600">calls</text>
+      <use href="#drawer" x="14" y="42"/>
+      <use href="#drawer" x="14" y="112"/>
+    </g>
+  </g>
+
+  <!-- Knowledge graph -->
+  <g transform="translate(932 68)">
+    <rect class="wing" width="284" height="160" rx="12" stroke-width="1.5"/>
+    <text class="ink" x="20" y="34" font-size="16" font-weight="600">Knowledge graph</text>
+    <rect class="room" x="20" y="58" width="86" height="34" rx="17" stroke-width="1.2"/>
+    <text class="ink mono" x="63" y="80" font-size="14" text-anchor="middle">my_api</text>
+    <rect class="room" x="178" y="58" width="86" height="34" rx="17" stroke-width="1.2"/>
+    <text class="ink mono" x="221" y="80" font-size="14" text-anchor="middle">SQLite</text>
+    <path class="accent-stroke" d="M108 75 L 172 75" stroke-width="2" fill="none" stroke-linecap="round"/>
+    <path class="accent-stroke" d="M165 69 L 173 75 L 165 81" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="accent-text mono" x="142" y="112" font-size="13" text-anchor="middle">uses_queue</text>
+    <text class="muted" x="142" y="138" font-size="13" text-anchor="middle">valid from 2026-09-03</text>
+  </g>
+
+  <!-- Diaries -->
+  <g transform="translate(932 248)">
+    <rect class="wing" width="284" height="160" rx="12" stroke-width="1.5"/>
+    <text class="ink" x="20" y="34" font-size="16" font-weight="600">Agent diaries</text>
+    <circle class="good" cx="28" cy="62" r="5"/>
+    <text class="ink mono" x="42" y="67" font-size="13">claude · 2026-10-10</text>
+    <rect class="bar" x="42" y="76" width="210" height="5" rx="2.5"/>
+    <rect class="bar" x="42" y="87" width="160" height="5" rx="2.5"/>
+    <circle class="good" cx="28" cy="114" r="5"/>
+    <text class="ink mono" x="42" y="119" font-size="13">codex · 2026-10-11</text>
+    <rect class="bar" x="42" y="128" width="190" height="5" rx="2.5"/>
+    <rect class="bar" x="42" y="139" width="120" height="5" rx="2.5"/>
+  </g>
+
+  <!-- Legend -->
+  <g transform="translate(64 432)">
+    <use href="#drawer" transform="scale(0.32)"/>
+    <text class="muted" x="56" y="15" font-size="14">drawer = one chunk of verbatim text + its embedding + source, wing, room, and date</text>
+  </g>
+</svg>

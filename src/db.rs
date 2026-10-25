@@ -3,7 +3,7 @@
 //! Single palace.db file replaces both ChromaDB (drawers) and SQLite KG (triples).
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
 
 /// Open (or create) the palace SQLite database with WAL mode enabled.
@@ -24,6 +24,8 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     )?;
 
     migrate(&conn)?;
+    let wanted = crate::config::PalaceConfig::new().embedding_model();
+    init_embedding_model(&conn, wanted.as_deref())?;
     Ok(conn)
 }
 
@@ -32,7 +34,19 @@ pub fn open_in_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     migrate(&conn)?;
+    init_embedding_model(&conn, None)?;
     Ok(conn)
+}
+
+/// Record the palace's embedding model if it has none, point the embedder
+/// at it, and warn when stored vectors do not fit it. A palace written by a
+/// newer release with an unknown model keeps working on BM25.
+fn init_embedding_model(conn: &Connection, wanted: Option<&str>) -> Result<()> {
+    crate::embedding_migration::ensure_active_model(conn, wanted)?;
+    if let Err(e) = crate::embedding_migration::sync_active_model(conn) {
+        tracing::warn!(error = %e, "Palace: cannot use this palace's embedding model");
+    }
+    crate::embedding_migration::check_vector_dimensions(conn)
 }
 
 /// Run schema migrations — idempotent, safe to call on every startup.
@@ -96,6 +110,35 @@ fn migrate(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_tunnels_a ON tunnels(wing_a, room_a);
         CREATE INDEX IF NOT EXISTS idx_tunnels_b ON tunnels(wing_b, room_b);
+
+        -- ── Wings registry ───────────────────────────────────────────────────
+        -- First-class declaration of wings (both repos and topics). Drawers keep
+        -- their `wing` string; this table is the source of truth for what wings
+        -- exist, their kind, and (for projects) their on-disk path + mined state.
+        CREATE TABLE IF NOT EXISTS wings (
+            name          TEXT PRIMARY KEY,
+            kind          TEXT NOT NULL DEFAULT 'topic',
+            description   TEXT NOT NULL DEFAULT '',
+            project_path  TEXT,
+            last_mined_at TEXT,
+            created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_wings_kind ON wings(kind);
+        CREATE INDEX IF NOT EXISTS idx_wings_path ON wings(project_path);
+
+        -- ── Mined files tracking ─────────────────────────────────────────────
+        -- Content-hash checkpoint per mined source file, so `mine` can tell
+        -- new/changed/unchanged apart on re-runs instead of skipping any file
+        -- that already has drawers forever. Also the basis for pruning
+        -- drawers of files that have since been deleted from disk.
+        CREATE TABLE IF NOT EXISTS mined_files (
+            source_file  TEXT PRIMARY KEY,
+            wing         TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            mined_at     TEXT NOT NULL,
+            chunk_count  INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mined_files_wing ON mined_files(wing);
 
         -- ── BM25 index ───────────────────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS bm25_terms (
@@ -162,6 +205,18 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_usage_events_tool ON usage_events(tool);
         CREATE INDEX IF NOT EXISTS idx_usage_events_query_hash ON usage_events(query_hash);
 
+        -- Per-agent-session activity recorded by the hooks (see hook_sessions.rs).
+        CREATE TABLE IF NOT EXISTS hook_sessions (
+            session_id  TEXT PRIMARY KEY,
+            cwd         TEXT NOT NULL DEFAULT '',
+            prompts     INTEGER NOT NULL DEFAULT 0,
+            tool_calls  INTEGER NOT NULL DEFAULT 0,
+            palace_used INTEGER NOT NULL DEFAULT 0,
+            saved       INTEGER NOT NULL DEFAULT 0,
+            updated_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hook_sessions_updated ON hook_sessions(updated_at);
+
         CREATE TABLE IF NOT EXISTS gain_feedback (
             query_id   TEXT NOT NULL,
             drawer_id  TEXT NOT NULL,
@@ -173,6 +228,45 @@ fn migrate(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_gain_feedback_query ON gain_feedback(query_id);
         CREATE INDEX IF NOT EXISTS idx_gain_feedback_drawer ON gain_feedback(drawer_id);
+
+        -- ── Embedding vectors of non-active models ──────────────────────────
+        -- The hot columns (drawers.embedding, drawers.pref_embedding,
+        -- closets.embedding) hold the active model's vectors. This table holds
+        -- a migration target's vectors while they are built and the previous
+        -- model's after cutover (see embedding_migration.rs). owner_kind is
+        -- 'drawer', 'pref' or 'closet'.
+        CREATE TABLE IF NOT EXISTS embedding_vectors (
+            owner_kind TEXT NOT NULL,
+            owner_id   TEXT NOT NULL,
+            model      TEXT NOT NULL,
+            vec        BLOB NOT NULL,
+            PRIMARY KEY (owner_kind, owner_id, model)
+        );
+        CREATE INDEX IF NOT EXISTS idx_embedding_vectors_model
+            ON embedding_vectors(model, owner_kind);
+        CREATE TRIGGER IF NOT EXISTS trg_drawers_delete_vectors
+        AFTER DELETE ON drawers BEGIN
+            DELETE FROM embedding_vectors
+            WHERE owner_kind IN ('drawer', 'pref') AND owner_id = OLD.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_drawers_content_vectors
+        AFTER UPDATE OF content ON drawers WHEN NEW.content IS NOT OLD.content BEGIN
+            DELETE FROM embedding_vectors
+            WHERE owner_kind IN ('drawer', 'pref') AND owner_id = NEW.id;
+        END;
+        -- Re-tagging can change a preference span without touching content.
+        CREATE TRIGGER IF NOT EXISTS trg_drawers_metadata_pref_vectors
+        AFTER UPDATE OF metadata ON drawers WHEN NEW.metadata IS NOT OLD.metadata BEGIN
+            DELETE FROM embedding_vectors WHERE owner_kind = 'pref' AND owner_id = NEW.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_closets_delete_vectors
+        AFTER DELETE ON closets BEGIN
+            DELETE FROM embedding_vectors WHERE owner_kind = 'closet' AND owner_id = OLD.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_closets_topic_vectors
+        AFTER UPDATE OF topic ON closets WHEN NEW.topic IS NOT OLD.topic BEGIN
+            DELETE FROM embedding_vectors WHERE owner_kind = 'closet' AND owner_id = NEW.id;
+        END;
         "#,
     )
     .context("running schema migrations")?;
@@ -202,12 +296,45 @@ fn migrate(conn: &Connection) -> Result<()> {
     )
     .context("creating phase one drawer indexes")?;
 
+    crate::migrate::backfill_wings_registry(conn)
+        .context("backfilling wings registry from existing drawers")?;
+    // Fail open: a busy or locked palace must not stop it from opening. The
+    // version stays unrecorded, so the next open retries.
+    if let Err(err) = retag_preferences_if_stale(conn) {
+        tracing::warn!(error = %err, "palace: could not re-tag preference drawers");
+    }
+
     conn.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params!["schema_version", "1"],
     )
     .context("recording schema version")?;
+    Ok(())
+}
+
+/// Re-tag drawers once whenever the preference-tagging rules change.
+fn retag_preferences_if_stale(conn: &Connection) -> Result<()> {
+    const KEY: &str = "preference_tagging_version";
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if current.as_deref() == Some(crate::store::PREFERENCE_TAGGING_VERSION) {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    crate::store::refresh_preference_tags(&tx, false).context("re-tagging preference drawers")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![KEY, crate::store::PREFERENCE_TAGGING_VERSION],
+    )
+    .context("recording preference tagging version")?;
+    tx.commit()?;
     Ok(())
 }
 

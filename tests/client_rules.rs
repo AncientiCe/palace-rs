@@ -20,6 +20,7 @@ fn options(home: &Path, binary_path: &Path, clients: Vec<Client>) -> InstallOpti
         dry_run: false,
         force: false,
         install_rule: true,
+        profile: palace::config::Profile::Coding,
     }
 }
 
@@ -473,6 +474,8 @@ fn installed_rules_include_full_memory_lifecycle_for_all_clients() {
         assert!(rule.contains("palace_kg_add"));
         assert!(rule.contains("palace_kg_invalidate"));
         assert!(rule.contains("MEMORY ROUTING"));
+        assert!(rule.contains("Palace is the ONLY persistent memory"));
+        assert!(rule.contains("general/preferences"));
     }
 }
 
@@ -529,6 +532,62 @@ fn doctor_marks_rule_weak_without_full_memory_lifecycle() {
         .adoption_warnings
         .iter()
         .any(|warning| { warning.contains("Codex") && warning.contains("session warm-start") }));
+}
+
+#[test]
+fn doctor_marks_rule_weak_without_tool_search_load_step() {
+    let temp = TempDir::new().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    // A full pre-0.16.1 rule: every lifecycle step, but no instruction to load
+    // the palace tools when the client defers them behind tool search.
+    let old_body: String = palace::install::RULE_BODY
+        .lines()
+        .filter(|line| !line.contains("tool search"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        codex_dir.join("AGENTS.md"),
+        format!("<!-- BEGIN PALACE -->\n# Palace Memory Protocol — MANDATORY\n\n{old_body}\n<!-- END PALACE -->\n"),
+    )
+    .unwrap();
+
+    let binary_path = fake_binary(temp.path());
+    let install_options = options(temp.path(), &binary_path, vec![Client::Codex]);
+    let report = doctor(&install_options).unwrap();
+
+    assert!(report
+        .clients
+        .iter()
+        .any(|s| s.client == Client::Codex && s.rule_weak));
+}
+
+#[test]
+fn doctor_marks_rule_weak_without_only_memory_line() {
+    let temp = TempDir::new().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    // A full 0.17.0 rule: every step, but nothing saying Palace is the only
+    // persistent memory, so agents still write to their client's file memory.
+    let old_body: String = palace::install::RULE_BODY
+        .lines()
+        .filter(|line| !line.contains("ONLY persistent memory"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        codex_dir.join("AGENTS.md"),
+        format!("<!-- BEGIN PALACE -->\n# Palace Memory Protocol — MANDATORY\n\n{old_body}\n<!-- END PALACE -->\n"),
+    )
+    .unwrap();
+
+    let binary_path = fake_binary(temp.path());
+    let install_options = options(temp.path(), &binary_path, vec![Client::Codex]);
+    let report = doctor(&install_options).unwrap();
+
+    assert!(report
+        .clients
+        .iter()
+        .any(|s| s.client == Client::Codex && s.rule_weak));
 }
 
 #[test]
@@ -738,6 +797,97 @@ fn install_cursor_hook_writes_hooks_json() {
     );
 }
 
+fn palace_commands_for(val: &Value, event: &str) -> Vec<String> {
+    val["hooks"][event]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e["command"].as_str())
+                .filter(|c| c.contains("palace"))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn install_cursor_hook_registers_post_tool_use_and_stop() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+
+    install_cursor_hook(temp.path(), &binary, false).unwrap();
+
+    let hooks_json = temp.path().join(".cursor").join("hooks.json");
+    let val: Value = read_json(&hooks_json);
+
+    assert!(
+        !palace_commands_for(&val, "sessionStart").is_empty(),
+        "sessionStart palace entry missing: {val}"
+    );
+    assert!(
+        !palace_commands_for(&val, "postToolUse").is_empty(),
+        "postToolUse palace entry missing: {val}"
+    );
+    assert!(
+        !palace_commands_for(&val, "stop").is_empty(),
+        "stop palace entry missing: {val}"
+    );
+
+    // postToolUse should filter to investigation tools, not fire on everything.
+    let post = val["hooks"]["postToolUse"].as_array().unwrap();
+    let palace_post = post
+        .iter()
+        .find(|e| {
+            e["command"]
+                .as_str()
+                .map(|c| c.contains("palace"))
+                .unwrap_or(false)
+        })
+        .unwrap();
+    assert!(
+        palace_post.get("matcher").is_some(),
+        "postToolUse hook should carry a matcher: {palace_post}"
+    );
+}
+
+#[test]
+fn install_cursor_hook_all_events_idempotent() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+
+    install_cursor_hook(temp.path(), &binary, false).unwrap();
+    let changed = install_cursor_hook(temp.path(), &binary, false).unwrap();
+    assert!(!changed, "second identical install should be unchanged");
+
+    let hooks_json = temp.path().join(".cursor").join("hooks.json");
+    let val: Value = read_json(&hooks_json);
+    for event in ["sessionStart", "postToolUse", "stop"] {
+        assert_eq!(
+            palace_commands_for(&val, event).len(),
+            1,
+            "exactly one palace {event} entry expected: {val}"
+        );
+    }
+}
+
+#[test]
+fn uninstall_cursor_hook_removes_all_event_entries() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+
+    install_cursor_hook(temp.path(), &binary, false).unwrap();
+    uninstall_cursor_hook(temp.path(), false).unwrap();
+
+    let hooks_json = temp.path().join(".cursor").join("hooks.json");
+    let val: Value = read_json(&hooks_json);
+    for event in ["sessionStart", "postToolUse", "stop"] {
+        assert!(
+            palace_commands_for(&val, event).is_empty(),
+            "uninstall should remove palace {event} entry: {val}"
+        );
+    }
+}
+
 #[test]
 fn install_cursor_hook_is_idempotent() {
     let temp = TempDir::new().unwrap();
@@ -861,4 +1011,742 @@ fn session_start_hook_response_contains_protocol() {
         ctx.contains("Palace Memory Protocol"),
         "additional_context should include protocol header, got: {ctx}"
     );
+}
+
+#[test]
+fn every_profile_rule_tells_deferring_clients_to_load_protocol_tools_first() {
+    use palace::config::Profile;
+    for profile in [Profile::Coding, Profile::Creative, Profile::Personal] {
+        let body = palace::install::rule_body(profile);
+        let session_start = body.find("## SESSION START").unwrap();
+        let load_step = body
+            .find("tool search")
+            .unwrap_or_else(|| panic!("{profile:?} rule must mention tool search"));
+        assert!(
+            load_step > session_start && load_step < body.find("palace_status").unwrap(),
+            "{profile:?} rule must load tools before the first palace_status call"
+        );
+    }
+}
+
+// ── Claude Code / Codex nested hooks ─────────────────────────────────────────
+
+/// Collect every command string across all events of a nested hooks file.
+fn nested_commands(val: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(hooks) = val["hooks"].as_object() {
+        for groups in hooks.values() {
+            if let Some(groups) = groups.as_array() {
+                for group in groups {
+                    if let Some(handlers) = group["hooks"].as_array() {
+                        for handler in handlers {
+                            if let Some(cmd) = handler["command"].as_str() {
+                                out.push(cmd.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn install_clients_claude_installs_nested_hooks() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+
+    install_clients(&options(temp.path(), &binary, vec![Client::Claude])).unwrap();
+
+    let settings = temp.path().join(".claude").join("settings.json");
+    assert!(settings.exists(), "Claude settings.json should be created");
+    let val: Value = read_json(&settings);
+
+    for event in ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"] {
+        let groups = val["hooks"][event]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing event {event}: {val}"));
+        assert!(
+            groups.iter().any(|g| {
+                g["hooks"].as_array().is_some_and(|hs| {
+                    hs.iter().any(|h| {
+                        h["command"]
+                            .as_str()
+                            .is_some_and(|c| c.contains("palace") && c.contains("--client claude"))
+                    })
+                })
+            }),
+            "event {event} should hold a palace claude command: {val}"
+        );
+    }
+
+    // PostToolUse targets the file-investigation tools (for recall) and
+    // palace's own MCP tools (to record per-session palace use).
+    let post = &val["hooks"]["PostToolUse"][0];
+    assert_eq!(post["matcher"], "Grep|Read|Glob|mcp__palace__.*", "{val}");
+}
+
+#[test]
+fn install_clients_codex_installs_nested_hooks() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+
+    install_clients(&options(temp.path(), &binary, vec![Client::Codex])).unwrap();
+
+    let hooks_json = temp.path().join(".codex").join("hooks.json");
+    assert!(hooks_json.exists(), "Codex hooks.json should be created");
+    let val: Value = read_json(&hooks_json);
+
+    let commands = nested_commands(&val);
+    assert!(
+        commands.iter().any(|c| c.contains("--client codex")),
+        "codex hooks should pass --client codex: {val}"
+    );
+    // Codex investigates through the shell, so PostToolUse matches Bash.
+    assert_eq!(val["hooks"]["PostToolUse"][0]["matcher"], "Bash", "{val}");
+    // Prompt-time recall fires for every prompt, so it carries no matcher.
+    let prompt = &val["hooks"]["UserPromptSubmit"][0];
+    assert!(prompt["matcher"].is_null(), "{val}");
+    assert!(
+        prompt["hooks"][0]["command"]
+            .as_str()
+            .is_some_and(|c| c.contains("hook user-prompt-submit")),
+        "{val}"
+    );
+}
+
+#[test]
+fn install_clients_claude_hooks_preserve_existing_settings() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+
+    let claude_dir = temp.path().join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    let settings = claude_dir.join("settings.json");
+    fs::write(
+        &settings,
+        r#"{"model":"opus","hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"./fmt.sh"}]}]}}"#,
+    )
+    .unwrap();
+
+    install_clients(&options(temp.path(), &binary, vec![Client::Claude])).unwrap();
+
+    let val: Value = read_json(&settings);
+    assert_eq!(
+        val["model"], "opus",
+        "unrelated keys must be preserved: {val}"
+    );
+    let commands = nested_commands(&val);
+    assert!(
+        commands.iter().any(|c| c == "./fmt.sh"),
+        "unrelated hook must be preserved: {val}"
+    );
+    assert!(
+        commands.iter().any(|c| c.contains("palace")),
+        "palace hook must be added: {val}"
+    );
+}
+
+#[test]
+fn install_clients_claude_hooks_idempotent() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary, vec![Client::Claude]);
+
+    install_clients(&opts).unwrap();
+    let second = install_clients(&opts).unwrap();
+    assert!(
+        second
+            .hook_unchanged
+            .iter()
+            .any(|p| p.ends_with("settings.json")),
+        "second identical Claude hook install should be unchanged: {second:?}"
+    );
+
+    let val: Value = read_json(&temp.path().join(".claude").join("settings.json"));
+    assert_eq!(
+        val["hooks"]["PostToolUse"].as_array().map(|a| a.len()),
+        Some(1),
+        "no duplicate palace groups: {val}"
+    );
+}
+
+#[test]
+fn uninstall_clients_codex_removes_nested_hooks() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary, vec![Client::Codex]);
+
+    install_clients(&opts).unwrap();
+    uninstall_clients(&without_rule(opts)).unwrap();
+
+    let val: Value = read_json(&temp.path().join(".codex").join("hooks.json"));
+    let commands = nested_commands(&val);
+    assert!(
+        !commands.iter().any(|c| c.contains("palace")),
+        "palace hooks should be removed on uninstall: {val}"
+    );
+}
+
+#[test]
+fn doctor_reports_hook_installed_for_claude_and_codex() {
+    for client in [Client::Claude, Client::Codex] {
+        let temp = TempDir::new().unwrap();
+        let binary = fake_binary(temp.path());
+        let opts = options(temp.path(), &binary, vec![client]);
+
+        let before = doctor(&opts).unwrap();
+        assert!(
+            before
+                .clients
+                .iter()
+                .any(|s| s.client == client && !s.hook_installed),
+            "{client} hook should be reported missing before install"
+        );
+
+        install_clients(&opts).unwrap();
+        let after = doctor(&opts).unwrap();
+        assert!(
+            after
+                .clients
+                .iter()
+                .any(|s| s.client == client && s.hook_installed),
+            "{client} hook should be reported installed after install"
+        );
+    }
+}
+
+#[test]
+fn doctor_reports_claude_hook_with_outdated_matcher_as_missing() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary, vec![Client::Claude]);
+    install_clients(&opts).unwrap();
+
+    // Simulate a pre-0.17 install whose PostToolUse hook does not match
+    // palace's own MCP tools, so per-session palace use is never recorded.
+    let settings = temp.path().join(".claude").join("settings.json");
+    let text = fs::read_to_string(&settings).unwrap();
+    fs::write(
+        &settings,
+        text.replace("Grep|Read|Glob|mcp__palace__.*", "Grep|Read|Glob"),
+    )
+    .unwrap();
+
+    let report = doctor(&opts).unwrap();
+    assert!(
+        report
+            .clients
+            .iter()
+            .any(|s| s.client == Client::Claude && !s.hook_installed),
+        "an outdated palace hook matcher must prompt a reinstall"
+    );
+}
+
+// ── Gemini CLI, VS Code, Windsurf, OpenCode ──────────────────────────────────
+
+fn vscode_user_dir(home: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        home.join("AppData/Roaming/Code/User")
+    } else if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/Code/User")
+    } else {
+        home.join(".config/Code/User")
+    }
+}
+
+fn assert_full_protocol(rule: &str) {
+    assert!(rule.contains("palace_session_context"), "{rule}");
+    assert!(rule.contains("palace_kg_add"), "{rule}");
+    assert!(rule.contains("MEMORY ROUTING"), "{rule}");
+}
+
+#[test]
+fn install_gemini_writes_settings_and_gemini_md() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    install_clients(&options(temp.path(), &binary_path, vec![Client::Gemini])).unwrap();
+
+    let config = read_json(&temp.path().join(".gemini/settings.json"));
+    assert_eq!(
+        config["mcpServers"]["palace"]["command"].as_str(),
+        Some(binary_path.to_string_lossy().as_ref())
+    );
+    let rule = fs::read_to_string(temp.path().join(".gemini/GEMINI.md")).unwrap();
+    assert!(rule.contains("<!-- BEGIN PALACE -->"));
+    assert_full_protocol(&rule);
+}
+
+#[test]
+fn install_vscode_writes_stdio_server_and_always_on_instructions() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    install_clients(&options(temp.path(), &binary_path, vec![Client::Vscode])).unwrap();
+
+    let user_dir = vscode_user_dir(temp.path());
+    let config = read_json(&user_dir.join("mcp.json"));
+    let server = &config["servers"]["palace"];
+    assert_eq!(server["type"], "stdio");
+    assert_eq!(server["args"], serde_json::json!(["mcp"]));
+    assert!(config.get("mcpServers").is_none());
+
+    let rule = fs::read_to_string(user_dir.join("prompts/palace.instructions.md")).unwrap();
+    assert!(rule.starts_with("---\n"));
+    assert!(rule.contains("applyTo: \"**\""));
+    assert_full_protocol(&rule);
+}
+
+#[test]
+fn install_windsurf_writes_mcp_config_and_global_rules() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    install_clients(&options(temp.path(), &binary_path, vec![Client::Windsurf])).unwrap();
+
+    let dir = temp.path().join(".codeium/windsurf");
+    let config = read_json(&dir.join("mcp_config.json"));
+    assert!(config["mcpServers"]["palace"]["command"].is_string());
+    let rule = fs::read_to_string(dir.join("memories/global_rules.md")).unwrap();
+    assert!(rule.contains("<!-- BEGIN PALACE -->"));
+    assert!(
+        rule.len() < 6000,
+        "Windsurf global rules are capped at 6000 chars"
+    );
+    assert_full_protocol(&rule);
+}
+
+#[test]
+fn install_opencode_registers_local_server_and_instruction_file() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    install_clients(&options(temp.path(), &binary_path, vec![Client::OpenCode])).unwrap();
+
+    let dir = temp.path().join(".config").join("opencode");
+    let config = read_json(&dir.join("opencode.json"));
+    assert_eq!(config["$schema"], "https://opencode.ai/config.json");
+    let server = &config["mcp"]["palace"];
+    assert_eq!(server["type"], "local");
+    assert_eq!(server["enabled"], true);
+    assert_eq!(
+        server["command"],
+        serde_json::json!([binary_path.to_string_lossy(), "mcp"])
+    );
+    let rule_path = dir.join("palace.md");
+    assert_eq!(
+        config["instructions"],
+        serde_json::json!([rule_path.to_string_lossy()])
+    );
+    assert_full_protocol(&fs::read_to_string(&rule_path).unwrap());
+    // The global AGENTS.md slot stays free so OpenCode keeps its CLAUDE.md fallback.
+    assert!(!dir.join("AGENTS.md").exists());
+
+    let report = doctor(&options(temp.path(), &binary_path, vec![Client::OpenCode])).unwrap();
+    let status = &report.clients[0];
+    assert!(status.points_to_expected_binary, "{status:?}");
+    assert!(status.rule_installed, "{status:?}");
+}
+
+#[test]
+fn uninstall_opencode_removes_server_and_instruction_only() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let dir = temp.path().join(".config").join("opencode");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("opencode.json"),
+        r#"{"theme":"tokyonight","instructions":["docs/style.md"],"mcp":{"other":{"type":"local","command":["x"]}}}"#,
+    )
+    .unwrap();
+    let opts = options(temp.path(), &binary_path, vec![Client::OpenCode]);
+    install_clients(&opts).unwrap();
+    uninstall_clients(&opts).unwrap();
+
+    let config = read_json(&dir.join("opencode.json"));
+    assert_eq!(config["theme"], "tokyonight");
+    assert_eq!(config["instructions"], serde_json::json!(["docs/style.md"]));
+    assert!(config["mcp"].get("palace").is_none());
+    assert!(config["mcp"].get("other").is_some());
+    assert!(!dir.join("palace.md").exists());
+}
+
+#[test]
+fn install_all_includes_new_clients_only_when_detected() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    fs::create_dir_all(temp.path().join(".gemini")).unwrap();
+
+    let report = install_clients(&without_rule(options(
+        temp.path(),
+        &binary_path,
+        vec![Client::All],
+    )))
+    .unwrap();
+    let paths: Vec<String> = report
+        .changed
+        .iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    assert!(paths.iter().any(|p| p.ends_with(".gemini/settings.json")));
+    assert!(!temp.path().join(".codeium").exists(), "{paths:?}");
+    assert!(!temp.path().join(".config/opencode").exists(), "{paths:?}");
+    assert!(!vscode_user_dir(temp.path()).exists(), "{paths:?}");
+}
+
+#[test]
+fn project_scoped_install_covers_new_clients() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let binary_path = fake_binary(temp.path());
+    let mut install_options = options(
+        temp.path(),
+        &binary_path,
+        vec![
+            Client::Gemini,
+            Client::Vscode,
+            Client::Windsurf,
+            Client::OpenCode,
+        ],
+    );
+    install_options.scope = Scope::Project;
+    install_options.project_dir = Some(project.clone());
+    install_clients(&install_options).unwrap();
+
+    assert!(read_json(&project.join(".vscode/mcp.json"))["servers"]["palace"].is_object());
+    assert!(read_json(&project.join("opencode.json"))["mcp"]["palace"].is_object());
+    for path in [
+        project.join("GEMINI.md"),
+        project.join(".github/copilot-instructions.md"),
+        project.join(".windsurf/rules/palace.md"),
+        project.join("AGENTS.md"),
+    ] {
+        assert_full_protocol(&fs::read_to_string(&path).unwrap());
+    }
+    let windsurf = fs::read_to_string(project.join(".windsurf/rules/palace.md")).unwrap();
+    assert!(windsurf.starts_with("---\ntrigger: always_on\n---\n"));
+}
+
+#[test]
+fn install_gemini_registers_nested_hooks_in_settings() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary_path, vec![Client::Gemini]);
+    install_clients(&opts).unwrap();
+
+    let settings = read_json(&temp.path().join(".gemini/settings.json"));
+    assert!(
+        settings["mcpServers"]["palace"].is_object(),
+        "MCP entry kept"
+    );
+    for event in ["SessionStart", "BeforeAgent", "AfterTool", "AfterAgent"] {
+        let commands = nested_commands(
+            &serde_json::json!({ "hooks": { event: settings["hooks"][event].clone() } }),
+        );
+        assert!(
+            commands.iter().any(|c| c.contains("--client gemini")),
+            "{event}: {settings}"
+        );
+    }
+    assert!(settings["hooks"]["AfterTool"][0]["matcher"]
+        .as_str()
+        .unwrap()
+        .contains("grep_search"));
+    assert!(doctor(&opts).unwrap().clients[0].hook_installed);
+
+    uninstall_clients(&opts).unwrap();
+    let settings = read_json(&temp.path().join(".gemini/settings.json"));
+    assert!(nested_commands(&settings).is_empty());
+    assert!(settings["mcpServers"].get("palace").is_none());
+}
+
+#[test]
+fn install_vscode_writes_owned_hook_file() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary_path, vec![Client::Vscode]);
+    install_clients(&opts).unwrap();
+
+    let path = temp.path().join(".copilot/hooks/palace.json");
+    let hooks = read_json(&path);
+    for event in ["SessionStart", "PostToolUse", "Stop"] {
+        let entry = &hooks["hooks"][event][0];
+        assert_eq!(entry["type"], "command");
+        let command = entry["command"].as_str().unwrap();
+        assert!(command.ends_with("--client vscode"), "{command}");
+        assert!(
+            !command.starts_with('"'),
+            "no quotes when path has no spaces"
+        );
+        assert!(entry.get("matcher").is_none(), "VS Code ignores matchers");
+    }
+    assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
+    assert!(doctor(&opts).unwrap().clients[0].hook_installed);
+
+    uninstall_clients(&opts).unwrap();
+    assert!(!path.exists());
+}
+
+#[test]
+fn install_opencode_writes_plugin_with_binary_path() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary_path, vec![Client::OpenCode]);
+    install_clients(&opts).unwrap();
+
+    let path = temp.path().join(".config/opencode/plugins/palace.js");
+    let plugin = fs::read_to_string(&path).unwrap();
+    let literal = serde_json::to_string(&binary_path.to_string_lossy()).unwrap();
+    assert!(plugin.contains(&format!("const PALACE = {literal}")));
+    assert!(!plugin.contains("__PALACE_BINARY__"));
+    assert!(plugin.contains("--client"));
+    assert!(doctor(&opts).unwrap().clients[0].hook_installed);
+
+    uninstall_clients(&opts).unwrap();
+    assert!(!path.exists());
+}
+
+#[test]
+fn install_windsurf_writes_no_hooks() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let report =
+        install_clients(&options(temp.path(), &binary_path, vec![Client::Windsurf])).unwrap();
+    assert!(report.hook_changed.is_empty() && report.hook_unchanged.is_empty());
+    assert!(!temp.path().join(".codeium/windsurf/hooks.json").exists());
+}
+
+#[test]
+fn install_accepts_jsonc_config_with_comments_and_trailing_commas() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let cursor_dir = temp.path().join(".cursor");
+    fs::create_dir_all(&cursor_dir).unwrap();
+    fs::write(
+        cursor_dir.join("mcp.json"),
+        "// user servers\n{\n  /* keep */ \"mcpServers\": {\n    \"other\": { \"command\": \"x\", \"args\": [\"// not a comment\"], }, // trailing\n  },\n}\n",
+    )
+    .unwrap();
+
+    install_clients(&without_rule(options(
+        temp.path(),
+        &binary_path,
+        vec![Client::Cursor],
+    )))
+    .unwrap();
+
+    let config = read_json(&cursor_dir.join("mcp.json"));
+    assert_eq!(
+        config["mcpServers"]["other"]["args"],
+        serde_json::json!(["// not a comment"])
+    );
+    assert!(config["mcpServers"]["palace"].is_object());
+    assert!(
+        cursor_dir.join("mcp.json.bak").exists(),
+        "original kept as backup"
+    );
+}
+
+// ── Cline, Zed, Goose ─────────────────────────────────────────────────────────
+
+fn zed_dir(home: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        home.join("AppData").join("Roaming").join("Zed")
+    } else {
+        home.join(".config").join("zed")
+    }
+}
+
+fn goose_dir(home: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        home.join("AppData/Roaming/Block/goose/config")
+    } else {
+        home.join(".config/goose")
+    }
+}
+
+#[test]
+fn install_cline_writes_shared_mcp_settings_and_global_rule() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    install_clients(&options(temp.path(), &binary_path, vec![Client::Cline])).unwrap();
+
+    let config = read_json(
+        &temp
+            .path()
+            .join(".cline/data/settings/cline_mcp_settings.json"),
+    );
+    assert_eq!(
+        config["mcpServers"]["palace"]["args"],
+        serde_json::json!(["mcp"])
+    );
+    let rule = fs::read_to_string(temp.path().join(".cline/rules/palace.md")).unwrap();
+    assert!(
+        rule.starts_with("# Palace Memory Protocol"),
+        "no frontmatter = always on"
+    );
+    assert_full_protocol(&rule);
+}
+
+#[test]
+fn install_zed_writes_context_server_into_jsonc_settings() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let dir = zed_dir(temp.path());
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("settings.json"),
+        "// Zed settings\n{\n  \"theme\": \"One Dark\", // keep\n  \"vim_mode\": true,\n}\n",
+    )
+    .unwrap();
+    let opts = options(temp.path(), &binary_path, vec![Client::Zed]);
+    install_clients(&opts).unwrap();
+
+    let settings = read_json(&dir.join("settings.json"));
+    assert_eq!(settings["theme"], "One Dark");
+    let server = &settings["context_servers"]["palace"];
+    assert_eq!(
+        server["command"].as_str(),
+        Some(binary_path.to_string_lossy().as_ref())
+    );
+    assert!(server.get("source").is_none());
+    assert_full_protocol(&fs::read_to_string(dir.join("AGENTS.md")).unwrap());
+    assert!(doctor(&opts).unwrap().clients[0].points_to_expected_binary);
+
+    uninstall_clients(&opts).unwrap();
+    let settings = read_json(&dir.join("settings.json"));
+    assert!(settings["context_servers"].get("palace").is_none());
+    assert_eq!(settings["vim_mode"], true);
+}
+
+#[test]
+fn install_goose_writes_stdio_extension_and_goosehints() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let dir = goose_dir(temp.path());
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("config.yaml"),
+        "GOOSE_PROVIDER: anthropic\nextensions:\n  developer:\n    enabled: true\n    type: builtin\n    name: developer\n",
+    )
+    .unwrap();
+    let opts = options(temp.path(), &binary_path, vec![Client::Goose]);
+    install_clients(&opts).unwrap();
+
+    let text = fs::read_to_string(dir.join("config.yaml")).unwrap();
+    let config: serde_norway::Value = serde_norway::from_str(&text).unwrap();
+    assert_eq!(config["GOOSE_PROVIDER"].as_str(), Some("anthropic"));
+    assert!(config["extensions"]["developer"].is_mapping());
+    let palace = &config["extensions"]["palace"];
+    assert_eq!(palace["type"].as_str(), Some("stdio"));
+    assert_eq!(palace["enabled"].as_bool(), Some(true));
+    assert_eq!(
+        palace["cmd"].as_str(),
+        Some(binary_path.to_string_lossy().as_ref())
+    );
+    assert_eq!(palace["args"][0].as_str(), Some("mcp"));
+    let hints = fs::read_to_string(dir.join(".goosehints")).unwrap();
+    assert!(hints.contains("<!-- BEGIN PALACE -->"));
+    assert!(doctor(&opts).unwrap().clients[0].points_to_expected_binary);
+
+    // Idempotent.
+    let report = install_clients(&without_rule(opts.clone())).unwrap();
+    assert!(report.changed.is_empty(), "{report:?}");
+
+    uninstall_clients(&opts).unwrap();
+    let config: serde_norway::Value =
+        serde_norway::from_str(&fs::read_to_string(dir.join("config.yaml")).unwrap()).unwrap();
+    assert!(config["extensions"].get("palace").is_none());
+    assert!(config["extensions"]["developer"].is_mapping());
+}
+
+#[test]
+fn project_scope_cline_zed_goose_share_agents_md_block() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let binary_path = fake_binary(temp.path());
+    let mut opts = options(
+        temp.path(),
+        &binary_path,
+        vec![Client::Cline, Client::Zed, Client::Goose],
+    );
+    opts.scope = Scope::Project;
+    opts.project_dir = Some(project.clone());
+    install_clients(&opts).unwrap();
+
+    let agents = fs::read_to_string(project.join("AGENTS.md")).unwrap();
+    assert_eq!(agents.matches("<!-- BEGIN PALACE -->").count(), 1);
+}
+
+fn cline_hook(home: &Path, name: &str) -> PathBuf {
+    let file = if cfg!(windows) {
+        format!("{name}.ps1")
+    } else {
+        name.to_string()
+    };
+    home.join("Documents/Cline/Hooks").join(file)
+}
+
+#[test]
+fn install_cline_writes_hook_scripts_and_keeps_user_hooks() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let user_hook = cline_hook(temp.path(), "UserPromptSubmit");
+    fs::create_dir_all(user_hook.parent().unwrap()).unwrap();
+    fs::write(&user_hook, "echo my own hook\n").unwrap();
+
+    let opts = options(temp.path(), &binary_path, vec![Client::Cline]);
+    install_clients(&opts).unwrap();
+
+    let post = fs::read_to_string(cline_hook(temp.path(), "PostToolUse")).unwrap();
+    assert!(post.contains("palace-managed hook"));
+    assert!(post.contains("hook post-tool-use --client cline"));
+    assert!(post.contains(binary_path.to_string_lossy().as_ref()));
+    assert_eq!(
+        fs::read_to_string(&user_hook).unwrap(),
+        "echo my own hook\n",
+        "a user's own hook must never be overwritten"
+    );
+    assert!(!cline_hook(temp.path(), "TaskComplete").exists());
+
+    uninstall_clients(&opts).unwrap();
+    assert!(!cline_hook(temp.path(), "PostToolUse").exists());
+    assert!(user_hook.exists(), "uninstall leaves the user's hook alone");
+}
+
+#[test]
+fn install_cline_reports_hooks_installed() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary_path, vec![Client::Cline]);
+    install_clients(&opts).unwrap();
+    assert!(doctor(&opts).unwrap().clients[0].hook_installed);
+}
+
+#[test]
+fn install_goose_writes_stop_only_plugin() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary_path, vec![Client::Goose]);
+    install_clients(&opts).unwrap();
+
+    let dir = temp.path().join(".agents/plugins/palace");
+    let manifest = read_json(&dir.join("plugin.json"));
+    assert_eq!(manifest["name"], "palace");
+    let hooks = read_json(&dir.join("hooks/hooks.json"));
+    let events: Vec<&String> = hooks["hooks"].as_object().unwrap().keys().collect();
+    assert_eq!(events, ["Stop"]);
+    let command = hooks["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(command.starts_with('\''), "sh-quoted: {command}");
+    assert!(
+        !command.contains('\\'),
+        "sh needs forward slashes: {command}"
+    );
+    assert!(command.ends_with("hook stop --client goose"));
+    assert!(doctor(&opts).unwrap().clients[0].hook_installed);
+
+    uninstall_clients(&opts).unwrap();
+    assert!(!dir.exists());
 }

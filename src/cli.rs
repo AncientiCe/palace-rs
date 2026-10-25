@@ -36,9 +36,6 @@ enum Commands {
         /// Mine immediately after writing palace.yaml
         #[arg(long)]
         auto_mine: bool,
-        /// Disable optional LLM-assisted refinement
-        #[arg(long)]
-        no_llm: bool,
         /// Entity language list (comma-separated)
         #[arg(long, value_delimiter = ',')]
         lang: Vec<String>,
@@ -110,6 +107,8 @@ enum Commands {
     },
     /// Show palace status (drawer counts by wing/room)
     Status,
+    /// List registered wings (projects and topics) with mined status
+    Wings,
     /// Show automatic MCP usage gains and estimated savings
     Gain {
         /// Filter to one project
@@ -178,7 +177,7 @@ enum Commands {
     },
     /// Register the MCP server with local AI clients
     Install {
-        /// Client to configure: cursor, codex, claude, claude-desktop, or all
+        /// Client to configure: cursor, codex, claude, claude-desktop, gemini, vscode, windsurf, opencode, cline, zed, goose, or all
         #[arg(long, default_value = "all")]
         client: String,
         /// Configure all supported clients
@@ -199,10 +198,13 @@ enum Commands {
         /// Reserved for future overwrite prompts
         #[arg(long)]
         force: bool,
+        /// Usage profile shaping defaults: coding (default), creative, or personal
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Remove the Palace MCP server from local AI clients
     Uninstall {
-        /// Client to configure: cursor, codex, claude, claude-desktop, or all
+        /// Client to configure: cursor, codex, claude, claude-desktop, gemini, vscode, windsurf, opencode, cline, zed, goose, or all
         #[arg(long, default_value = "all")]
         client: String,
         /// Remove all supported clients
@@ -223,7 +225,7 @@ enum Commands {
     },
     /// Show MCP client configuration and palace status
     Doctor {
-        /// Client to inspect: cursor, codex, claude, claude-desktop, or all
+        /// Client to inspect: cursor, codex, claude, claude-desktop, gemini, vscode, windsurf, opencode, cline, zed, goose, or all
         #[arg(long, default_value = "all")]
         client: String,
         /// Inspect all supported clients
@@ -263,14 +265,24 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Re-embed all drawers using the current embedding model
+    /// Re-embed all drawers with the palace's active embedding model
     ///
-    /// Run this after upgrading the embedding model to keep search quality consistent.
+    /// Repairs vectors in place. To switch to another model use `palace embeddings`.
     #[command(name = "upgrade-embeddings")]
     UpgradeEmbeddings {
         /// Also refresh preference-span embeddings for preference-tagged drawers
         #[arg(long)]
         refresh_preferences: bool,
+    },
+    /// List embedding models and switch a palace to another one
+    ///
+    /// `migrate` estimates the cost, rebuilds every vector while search keeps
+    /// using the current model, verifies the new model on this palace, and
+    /// switches only if it is at least as good. Old vectors stay until
+    /// `cleanup`, so `rollback` is instant.
+    Embeddings {
+        #[command(subcommand)]
+        action: EmbeddingsAction,
     },
     /// Show a chronological timeline of knowledge-graph facts
     Timeline {
@@ -288,11 +300,90 @@ enum Commands {
     },
     /// Start the MCP stdio server
     Mcp,
-    /// Handle a Cursor agent hook event (used by hooks.json)
+    /// Configure and toggle remote MCP mode (connect to a shared palace-server)
+    Remote {
+        #[command(subcommand)]
+        action: RemoteAction,
+    },
+    /// Switch the MCP server back to the local palace (alias for `remote off`)
+    Local,
+    /// Handle an agent hook event (used by hooks.json / settings.json)
     Hook {
         /// Hook event name (e.g. session-start)
         event: String,
+        /// Client dialect for the response (cursor, claude, or codex)
+        #[arg(long, default_value = "cursor")]
+        client: String,
     },
+}
+
+#[derive(Subcommand)]
+enum EmbeddingsAction {
+    /// List available models
+    List,
+    /// Show the active model and any migration in progress
+    Status,
+    /// Measure what switching to MODEL would cost on this machine
+    Estimate {
+        /// Model id (see `palace embeddings list`)
+        model: String,
+    },
+    /// Rebuild vectors for MODEL, verify it, and switch if it passes
+    Migrate {
+        /// Model id (see `palace embeddings list`)
+        model: String,
+        /// Skip the estimate and confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        /// Stop after verify instead of switching
+        #[arg(long)]
+        no_cutover: bool,
+        /// Switch even if verify fails
+        #[arg(long)]
+        force: bool,
+    },
+    /// Compare the active and target models on probes from this palace
+    Verify {
+        /// Number of known-item probes
+        #[arg(long, default_value_t = crate::embedding_migration::VERIFY_SAMPLE)]
+        sample: usize,
+        /// Query-latency budget in ms (default: 2x the active model's p95)
+        #[arg(long)]
+        budget_ms: Option<f64>,
+    },
+    /// Switch to the migration target
+    Cutover {
+        /// Switch even if verify failed or was not run
+        #[arg(long)]
+        force: bool,
+    },
+    /// Switch back to the model the last cutover replaced
+    Rollback,
+    /// Delete vectors of inactive models and compact the database
+    Cleanup,
+    /// Stop the migration in progress (built vectors are kept until cleanup)
+    Cancel,
+}
+
+#[derive(Subcommand)]
+enum RemoteAction {
+    /// Set the remote endpoint and API key (does not switch mode by itself)
+    Set {
+        /// Remote palace-server URL (host, base URL, or full /mcp URL)
+        #[arg(long)]
+        endpoint: String,
+        /// API key (ps_*). Omit to be prompted on stdin instead of passing it on the command line.
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+    /// Turn remote mode on (route the MCP server to the remote palace-server)
+    On,
+    /// Turn remote mode off (route the MCP server to the local palace)
+    Off,
+    /// Show the current MCP mode, endpoint, and masked API key
+    Status,
+    /// Test connectivity and authentication against the configured remote server
+    Test,
 }
 
 pub fn run() -> Result<()> {
@@ -304,17 +395,14 @@ pub fn run() -> Result<()> {
             dir,
             yes,
             auto_mine,
-            no_llm,
             lang,
         } => {
             let dir = dir.canonicalize().unwrap_or(dir);
-            if no_llm {
-                println!("  LLM refinement disabled; using heuristic detection.");
-            }
             if !lang.is_empty() {
                 println!("  Entity languages: {}", lang.join(","));
             }
-            let rooms = crate::room_detector::detect_rooms_interactive(&dir, yes)?;
+            let rooms =
+                crate::room_detector::detect_rooms_interactive(&dir, yes, config.profile())?;
             let project_name = dir
                 .file_name()
                 .unwrap_or_default()
@@ -326,7 +414,18 @@ pub fn run() -> Result<()> {
             if auto_mine {
                 let db_path = config.palace_db_path();
                 let mut conn = crate::db::open(&db_path)?;
-                crate::miner::mine(&mut conn, &dir, None, "palace", 0, false, true, &[])?;
+                crate::miner::mine(
+                    &mut conn,
+                    &dir,
+                    None,
+                    "palace",
+                    0,
+                    false,
+                    true,
+                    &[],
+                    false,
+                    None,
+                )?;
             } else {
                 println!("\n  Next step:\n    palace mine {}\n", dir.display());
             }
@@ -358,6 +457,8 @@ pub fn run() -> Result<()> {
                 dry_run,
                 !no_gitignore,
                 &include,
+                false,
+                None,
             )?;
         }
 
@@ -438,6 +539,29 @@ pub fn run() -> Result<()> {
             }
             let conn = crate::db::open(&db_path)?;
             crate::miner::status(&conn, &db_path)?;
+        }
+
+        Commands::Wings => {
+            let db_path = config.palace_db_path();
+            if !db_path.exists() {
+                println!("\n  No palace found at {}", db_path.display());
+                println!("  Run: palace init <dir> then palace mine <dir>");
+                return Ok(());
+            }
+            let conn = crate::db::open(&db_path)?;
+            let wings = crate::store::list_wings_registry(&conn)?;
+            println!("\n  Registered wings ({}):\n", wings.len());
+            for w in &wings {
+                let mined = w.last_mined_at.as_deref().unwrap_or("never");
+                println!(
+                    "    {:<32} {:<8} {:>6} drawers   mined: {}",
+                    w.name, w.kind, w.drawer_count, mined
+                );
+                if !w.description.is_empty() {
+                    println!("        {}", w.description);
+                }
+            }
+            println!();
         }
 
         Commands::Gain {
@@ -574,13 +698,28 @@ pub fn run() -> Result<()> {
             dry_run,
             no_rule,
             force,
+            profile,
         } => {
-            let options = install_options(&client, all, &scope, path, dry_run, force)?;
+            // Resolve the profile: explicit flag > persisted config > default.
+            let profile = match profile {
+                Some(name) => crate::config::Profile::parse(&name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown profile '{name}' (expected: coding, creative, or personal)"
+                    )
+                })?,
+                None => config.profile(),
+            };
+            let mut options = install_options(&client, all, &scope, path, dry_run, force)?;
+            options.profile = profile;
             let options = with_rule_option(options, !no_rule);
             let report = crate::install::install_clients(&options)?;
             let action = if dry_run { "would update" } else { "updated" };
             crate::install::print_install_report(action, &report);
             if !dry_run {
+                // Persist the profile so the MCP server serves matching protocol text.
+                let mut cfg = PalaceConfig::new();
+                cfg.save_profile(profile)?;
+                println!("  Profile: {profile}");
                 println!("  Restart Cursor, Codex, Claude Code, or Claude Desktop to load the MCP server.");
             }
         }
@@ -700,40 +839,13 @@ pub fn run() -> Result<()> {
                 rows
             };
             let total = ids_and_content.len();
-            let mut reembedded = 0usize;
-            let mut errors = 0usize;
-            for (id, content) in &ids_and_content {
-                match crate::embedder::embed_one(content) {
-                    Ok(emb) => {
-                        let bytes = crate::embedder::vec_to_blob(&emb);
-                        let pref_bytes = if refresh_preferences {
-                            crate::preference::preference_span(content)
-                                .and_then(|span| crate::embedder::embed_one(&span).ok())
-                                .map(|embedding| crate::embedder::vec_to_blob(&embedding))
-                        } else {
-                            None
-                        };
-                        let update = if refresh_preferences {
-                            conn.execute(
-                                "UPDATE drawers SET embedding = ?1, pref_embedding = ?2 WHERE id = ?3",
-                                rusqlite::params![bytes, pref_bytes, id],
-                            )
-                        } else {
-                            conn.execute(
-                                "UPDATE drawers SET embedding = ?1 WHERE id = ?2",
-                                rusqlite::params![bytes, id],
-                            )
-                        };
-                        if update.is_ok() {
-                            reembedded += 1;
-                        } else {
-                            errors += 1;
-                        }
-                    }
-                    Err(_) => errors += 1,
-                }
-            }
+            let crate::store::ReembedReport { reembedded, errors } =
+                crate::store::reembed_drawers(&conn, &ids_and_content)?;
             println!("  Re-embedded {reembedded}/{total} drawer(s). Errors: {errors}.");
+            if refresh_preferences {
+                let refreshed = crate::store::refresh_preference_tags(&conn, true)?;
+                println!("  Refreshed {refreshed} preference tag(s).");
+            }
         }
 
         Commands::Timeline { entity } => {
@@ -778,12 +890,382 @@ pub fn run() -> Result<()> {
             crate::mcp_server::run()?;
         }
 
-        Commands::Hook { event } => {
-            crate::install::run_hook(&event)?;
+        Commands::Remote { action } => {
+            handle_remote(action)?;
+        }
+
+        Commands::Local => {
+            let mut cfg = PalaceConfig::new();
+            cfg.save_remote_settings(Some("local"), None, None)?;
+            println!("  MCP mode: local (using the local palace).");
+        }
+
+        Commands::Embeddings { action } => handle_embeddings(&config, action)?,
+
+        Commands::Hook { event, client } => {
+            crate::install::run_hook(&event, &client)?;
         }
     }
 
     Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1 << 30 {
+        format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64)
+    } else if bytes >= 1 << 20 {
+        format!("{:.1} MB", bytes as f64 / (1u64 << 20) as f64)
+    } else {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    }
+}
+
+fn format_duration(seconds: f64) -> String {
+    if seconds >= 3600.0 {
+        format!("{:.1} h", seconds / 3600.0)
+    } else if seconds >= 60.0 {
+        format!("{:.1} min", seconds / 60.0)
+    } else {
+        format!("{seconds:.0} s")
+    }
+}
+
+fn print_estimate(estimate: &crate::embedding_migration::Estimate) {
+    let active = crate::embedder::active_model().id;
+    println!("  Model:          {}", estimate.model);
+    println!(
+        "  Download:       {}{}",
+        format_bytes(estimate.download_bytes),
+        if estimate.was_cached {
+            " (already cached)"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "  To embed:       {} drawers, {} preference spans, {} closets ({})",
+        estimate.drawers,
+        estimate.prefs,
+        estimate.closets,
+        format_bytes(estimate.text_bytes)
+    );
+    println!(
+        "  Throughput:     {:.0} drawers/s (measured on {} drawers)",
+        estimate.drawers_per_sec, estimate.sampled_drawers
+    );
+    println!(
+        "  Estimated time: {} to build vectors + {} to verify",
+        format_duration(estimate.estimated_seconds),
+        format_duration(estimate.verify_seconds)
+    );
+    println!(
+        "  Extra disk:     {} until cleanup",
+        format_bytes(estimate.extra_disk_bytes)
+    );
+    println!(
+        "  Query latency:  p50 {:.1} ms / p95 {:.1} ms (now {active}: {:.1} / {:.1} ms)",
+        estimate.target_query.p50_ms,
+        estimate.target_query.p95_ms,
+        estimate.active_query.p50_ms,
+        estimate.active_query.p95_ms
+    );
+}
+
+fn print_verify(report: &crate::embedding_migration::VerifyReport) {
+    println!("  Probes: {}", report.probes);
+    for score in [&report.active, &report.target] {
+        println!(
+            "  {:<16} hybrid R@1 {:.3} R@5 {:.3} | vector R@1 {:.3} R@5 {:.3} | query p95 {:.1} ms",
+            score.model,
+            score.hybrid_recall_at_1,
+            score.hybrid_recall_at_5,
+            score.vector_recall_at_1,
+            score.vector_recall_at_5,
+            score.query.p95_ms
+        );
+    }
+    if report.passed {
+        println!(
+            "  Verify passed (latency budget {:.1} ms).",
+            report.latency_budget_ms
+        );
+    } else {
+        for reason in &report.reasons {
+            println!("  Verify failed: {reason}");
+        }
+    }
+}
+
+fn print_switch(report: &crate::embedding_migration::SwitchReport) {
+    println!(
+        "  Switched {} -> {}. Previous vectors are kept; `palace embeddings rollback` undoes it, \
+         `palace embeddings cleanup` frees the space.",
+        report.from, report.to
+    );
+}
+
+/// Handle the `palace embeddings <action>` command group.
+fn handle_embeddings(config: &PalaceConfig, action: EmbeddingsAction) -> Result<()> {
+    use crate::embedding_migration as migration;
+    if let EmbeddingsAction::List = action {
+        let palace_db = config.palace_db_path();
+        let active = if palace_db.exists() {
+            let conn = crate::db::open(&palace_db)?;
+            migration::active_model_id(&conn)?
+        } else {
+            crate::embedding_models::DEFAULT_MODEL_ID.to_string()
+        };
+        for spec in crate::embedding_models::MODELS {
+            println!(
+                "  {} {:<16} {:<18} {:<5} {:>4}d {:>9}  {}{}{}",
+                if spec.id == active { "*" } else { " " },
+                spec.id,
+                spec.name,
+                spec.precision,
+                spec.dim,
+                format_bytes(spec.download_bytes),
+                if spec.experimental {
+                    "(experimental) "
+                } else {
+                    ""
+                },
+                spec.summary,
+                if crate::embedding_models::is_cached(spec) {
+                    " [cached]"
+                } else {
+                    ""
+                }
+            );
+        }
+        return Ok(());
+    }
+    migration::ensure_local(config)?;
+    let db_path = config.palace_db_path();
+    if !db_path.exists() {
+        anyhow::bail!("No palace found. Run: palace init <dir> && palace mine <dir>");
+    }
+    let conn = crate::db::open(&db_path)?;
+    let find = |id: &str| {
+        crate::embedding_models::find(id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown model '{id}' (known: {})",
+                crate::embedding_models::ids()
+            )
+        })
+    };
+    match action {
+        EmbeddingsAction::List => unreachable!("handled above"),
+        EmbeddingsAction::Status => {
+            let wanted = config.embedding_model();
+            let status = migration::status(&conn, wanted.as_deref())?;
+            println!("  Active model: {}", status.active);
+            if status.migration_pending {
+                println!(
+                    "  ⚠ Migration pending: config wants {}; run `palace embeddings migrate {}`",
+                    status.wanted.as_deref().unwrap_or_default(),
+                    status.wanted.as_deref().unwrap_or_default()
+                );
+            }
+            if let (Some(target), Some(coverage)) = (&status.target, &status.coverage) {
+                println!(
+                    "  Migrating to:  {target} — {}/{} vectors ({:.0}%), started {}",
+                    coverage.done(),
+                    coverage.total(),
+                    coverage.percent(),
+                    status.started_at.as_deref().unwrap_or("?")
+                );
+                if let Some(verified) = &status.verified {
+                    println!("  Verify:        {verified}");
+                }
+            }
+            if let Some(previous) = &status.previous {
+                println!("  Rollback to:   {previous}");
+            }
+            for (model, rows) in &status.stored {
+                println!("  Stored:        {model} ({rows} vectors)");
+            }
+        }
+        EmbeddingsAction::Estimate { model } => {
+            print_estimate(&migration::estimate(&conn, find(&model)?)?);
+        }
+        EmbeddingsAction::Migrate {
+            model,
+            yes,
+            no_cutover,
+            force,
+        } => {
+            let spec = find(&model)?;
+            if spec.experimental {
+                println!(
+                    "  Note: {} is experimental (below MiniLM on the coding-agent eval); \
+                     verify decides whether this palace switches.",
+                    spec.id
+                );
+            }
+            if migration::target(&conn)?.map(|t| t.id) != Some(spec.id) {
+                if spec.id == migration::active_model_id(&conn)? {
+                    anyhow::bail!("{} is already the active embedding model", spec.id);
+                }
+                if !yes {
+                    print_estimate(&migration::estimate(&conn, spec)?);
+                    print!("  Migrate to {}? [y/N] ", spec.id);
+                    std::io::Write::flush(&mut std::io::stdout())?;
+                    let mut answer = String::new();
+                    std::io::stdin().read_line(&mut answer)?;
+                    if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+                        println!("  Cancelled.");
+                        return Ok(());
+                    }
+                }
+                migration::start(&conn, spec.id)?;
+            }
+            println!(
+                "  Building {} vectors; search keeps using the current model. Safe to interrupt: \
+                 rerun to resume.",
+                spec.id
+            );
+            let total = migration::coverage(&conn, spec.id)?;
+            let remaining = total.total() - total.done();
+            let report = migration::run(
+                &conn,
+                config.embedding_latency_budget_ms(),
+                !no_cutover,
+                force,
+                &mut |written| {
+                    print!("\r  Embedded {written}/{remaining}");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                },
+            )?;
+            println!();
+            print_verify(&report.verify);
+            match &report.switched {
+                Some(switch) => print_switch(switch),
+                None if no_cutover => {
+                    println!("  Not switched (--no-cutover). Run `palace embeddings cutover`.")
+                }
+                None => println!(
+                    "  Not switched. Keep the current model with `palace embeddings cancel`, \
+                     or switch anyway with `palace embeddings cutover --force`."
+                ),
+            }
+        }
+        EmbeddingsAction::Verify { sample, budget_ms } => {
+            let budget = budget_ms.or_else(|| config.embedding_latency_budget_ms());
+            print_verify(&migration::verify(&conn, sample, budget)?);
+        }
+        EmbeddingsAction::Cutover { force } => print_switch(&migration::cutover(&conn, force)?),
+        EmbeddingsAction::Rollback => print_switch(&migration::rollback(&conn)?),
+        EmbeddingsAction::Cleanup => {
+            let report = migration::cleanup(&conn)?;
+            println!(
+                "  Removed {} stored vectors, freed {}.",
+                report.rows_deleted,
+                format_bytes(report.bytes_freed)
+            );
+        }
+        EmbeddingsAction::Cancel => match migration::cancel(&conn)? {
+            Some(target) => println!(
+                "  Cancelled migration to {target}. Its vectors stay until \
+                 `palace embeddings cleanup`; migrating again resumes."
+            ),
+            None => println!("  No migration in progress."),
+        },
+    }
+    Ok(())
+}
+
+/// Handle the `palace remote <action>` command group.
+fn handle_remote(action: RemoteAction) -> Result<()> {
+    let mut cfg = PalaceConfig::new();
+    match action {
+        RemoteAction::Set { endpoint, api_key } => {
+            let endpoint = endpoint.trim().to_string();
+            let key = match api_key {
+                Some(k) => k.trim().to_string(),
+                None => prompt_api_key()?,
+            };
+            if key.is_empty() {
+                anyhow::bail!("No API key provided");
+            }
+            cfg.save_remote_settings(None, Some(&endpoint), Some(&key))?;
+            println!(
+                "  Remote endpoint set: {}",
+                crate::config::normalize_mcp_url(&endpoint)
+            );
+            println!("  API key stored ({}).", mask_key(&key));
+            println!("  Run `palace remote on` to switch, then `palace remote test` to verify.");
+        }
+        RemoteAction::On => {
+            if cfg.remote_endpoint().is_none() || cfg.remote_api_key().is_none() {
+                warn!(
+                    "Remote not configured. Run: palace remote set --endpoint <url> [--api-key <key>]"
+                );
+                std::process::exit(1);
+            }
+            cfg.save_remote_settings(Some("remote"), None, None)?;
+            println!(
+                "  MCP mode: remote → {}",
+                cfg.remote_endpoint_url().unwrap_or_default()
+            );
+            println!("  Restart your AI client (or reconnect the MCP server) to apply.");
+        }
+        RemoteAction::Off => {
+            cfg.save_remote_settings(Some("local"), None, None)?;
+            println!("  MCP mode: local (using the local palace).");
+            println!("  Restart your AI client (or reconnect the MCP server) to apply.");
+        }
+        RemoteAction::Status => {
+            println!("  MCP mode: {}", cfg.mcp_mode());
+            match cfg.remote_endpoint_url() {
+                Some(url) => println!("  Endpoint: {url}"),
+                None => println!("  Endpoint: (not set)"),
+            }
+            match cfg.remote_api_key() {
+                Some(k) => println!("  API key:  {}", mask_key(&k)),
+                None => println!("  API key:  (not set)"),
+            }
+        }
+        RemoteAction::Test => {
+            let url = cfg.remote_endpoint_url().ok_or_else(|| {
+                anyhow::anyhow!("Remote endpoint not set. Run: palace remote set --endpoint <url>")
+            })?;
+            let key = cfg.remote_api_key().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "API key not set. Run: palace remote set --endpoint <url> --api-key <key>"
+                )
+            })?;
+            println!("  Testing {url} ...");
+            match crate::remote::probe(&url, &key) {
+                Ok(n) => println!("  OK — authenticated, {n} tool(s) available."),
+                Err(e) => {
+                    warn!("FAILED: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Prompt for an API key on stdin so it is never required on the command line.
+fn prompt_api_key() -> Result<String> {
+    use std::io::Write;
+    print!("  Enter API key (ps_...): ");
+    std::io::stdout().flush()?;
+    let mut key = String::new();
+    std::io::stdin().read_line(&mut key)?;
+    Ok(key.trim().to_string())
+}
+
+/// Mask an API key for display, preserving a short prefix and suffix.
+fn mask_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 8 {
+        return "…".to_string();
+    }
+    let head: String = chars.iter().take(3).collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 fn install_options(

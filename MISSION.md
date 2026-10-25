@@ -1,6 +1,6 @@
 # Mission
 
-`mempalace-rs` provides local-first memory for AI assistants.
+`palace-rs` provides local-first memory for AI assistants.
 
 The project prioritizes:
 

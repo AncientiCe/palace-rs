@@ -4,12 +4,11 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 
-use crate::store::{get_drawer, vector_search, DrawerFilter, SearchResult};
+use crate::embedding_models::ModelSpec;
+use crate::store::{get_drawer, vector_search_in, DrawerFilter, SearchResult, VectorSource};
 
 const BM25_K1: f64 = 1.5;
 const BM25_B: f64 = 0.75;
-const COSINE_WEIGHT: f64 = 0.65;
-const BM25_WEIGHT: f64 = 0.35;
 const MAX_CODING_BOOST: f64 = 0.65;
 const MAX_PREFERENCE_MATCH: f64 = 0.22;
 /// Maximum recency bonus applied to brand-new drawers (filed today).
@@ -46,6 +45,29 @@ pub fn hybrid_search(
     filter: &DrawerFilter,
     n_results: usize,
 ) -> Result<Vec<HybridResult>> {
+    hybrid_search_in(
+        conn,
+        query,
+        query_vec,
+        VectorSource::Hot,
+        crate::embedder::active_model(),
+        filter,
+        n_results,
+    )
+}
+
+/// [`hybrid_search`] reading vectors from `source` and weighting cosine and
+/// BM25 for `model`, the model that made `query_vec`. Used to score a
+/// migration target against the active model before switching.
+pub fn hybrid_search_in(
+    conn: &Connection,
+    query: &str,
+    query_vec: Option<&[f32]>,
+    source: VectorSource,
+    model: &ModelSpec,
+    filter: &DrawerFilter,
+    n_results: usize,
+) -> Result<Vec<HybridResult>> {
     let sanitized_query = crate::query_sanitizer::sanitize_query(query);
     let query = if sanitized_query.is_empty() {
         query
@@ -55,7 +77,13 @@ pub fn hybrid_search(
     let mut by_id: HashMap<String, HybridResult> = HashMap::new();
 
     if let Some(vec) = query_vec {
-        for result in vector_search(conn, vec, filter, n_results.saturating_mul(4).max(20))? {
+        for result in vector_search_in(
+            conn,
+            vec,
+            source,
+            filter,
+            n_results.saturating_mul(4).max(20),
+        )? {
             by_id.insert(
                 result.id.clone(),
                 HybridResult {
@@ -99,8 +127,12 @@ pub fn hybrid_search(
         }
     }
 
+    // Cosine spread differs between models: unrelated texts score near 0.1
+    // with MiniLM but near 0.5 with BGE. Each model rescales cosine from its
+    // floor and carries its own cosine/BM25 balance (see `embedding_models`).
     for result in by_id.values_mut() {
-        result.cosine = result.drawer.similarity.max(0.0);
+        let floor = model.cosine_floor;
+        result.cosine = ((result.drawer.similarity - floor) / (1.0 - floor)).max(0.0);
     }
 
     let max_bm25 = by_id.values().map(|r| r.bm25).fold(0.0, f64::max);
@@ -113,8 +145,8 @@ pub fn hybrid_search(
         result.coding_boost = coding_agent_boost(query, &result.drawer.text, &result.drawer.room);
         result.preference_match = preference_match(query, &result.drawer.text, &result.drawer.room);
         let recency = recency_boost(&result.drawer.filed_at);
-        result.combined = (result.cosine * COSINE_WEIGHT)
-            + (normalized_bm25 * BM25_WEIGHT)
+        result.combined = (result.cosine * model.cosine_weight)
+            + (normalized_bm25 * model.bm25_weight)
             + result.coding_boost
             + result.preference_match
             + recency;

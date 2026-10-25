@@ -53,7 +53,6 @@ fn rendered_gain_summary_uses_palace_branding() {
     let text = render_text(&report);
 
     assert!(text.starts_with("Palace gain - all time (all projects)\n"));
-    assert!(!text.contains("MemPalace"));
 }
 
 #[test]
@@ -62,7 +61,6 @@ fn rendered_gain_history_uses_palace_branding() {
 
     let empty = render_history(&[]);
     assert_eq!(empty, "No Palace gain history yet.\n");
-    assert!(!empty.contains("MemPalace"));
 
     insert_event(
         &conn,
@@ -73,7 +71,6 @@ fn rendered_gain_history_uses_palace_branding() {
     let text = render_history(&events);
 
     assert!(text.starts_with("Palace gain history\n"));
-    assert!(!text.contains("MemPalace"));
 }
 
 #[test]

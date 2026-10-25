@@ -66,7 +66,7 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Run cargo audit
-        run: cargo audit
+        run: cargo audit --deny warnings
 
   test:
     runs-on: ubuntu-latest
@@ -84,6 +84,11 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-hf-all-minilm-l6-v2-onnx
       - name: Run tests
         run: cargo test --all-features
 
@@ -103,6 +108,11 @@ jobs:
           key: ${{ runner.os }}-cargo-evals-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-hf-all-minilm-l6-v2-onnx
       - name: Run coding-agent memory eval
         run: cargo test --all-features --test coding_agent_eval -- --nocapture
       - name: Check LongMemEval sampled baseline guard
@@ -119,7 +129,9 @@ jobs:
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
           - os: macos-latest
-            target: x86_64-apple-darwin
+            # macos-latest runners are Apple Silicon; matches the release
+            # matrix (aarch64 is the only published darwin target).
+            target: aarch64-apple-darwin
             archive: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc

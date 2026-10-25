@@ -3,7 +3,7 @@
 //! Embeds a query, does cosine similarity over all drawer embeddings,
 //! returns verbatim text with similarity scores. Port of searcher.py.
 
-use crate::embedder::embed_one;
+use crate::embedder::embed_query;
 use crate::query_intent::classify;
 use crate::ranker::{hybrid_search, HybridResult};
 use crate::store::{preference_search_filtered, source_context, DrawerFilter, SearchResult};
@@ -27,7 +27,7 @@ pub fn search_and_print(
         &sanitized_query
     };
     let intent = classify(effective_query);
-    let embedding = embed_one(effective_query)?;
+    let embedding = embed_query(effective_query)?;
     let filter = DrawerFilter {
         wing: wing.map(String::from),
         room: room.map(String::from),
@@ -105,7 +105,7 @@ pub fn search_memories_with_options(
         &sanitized_query
     };
     let intent = classify(effective_query);
-    let embedding = match embed_one(effective_query) {
+    let embedding = match embed_query(effective_query) {
         Ok(e) => e,
         Err(e) => {
             return serde_json::json!({
@@ -151,8 +151,17 @@ pub fn search_memories_with_options(
             let source_context = crate::store::get_drawer(conn, &r.drawer.id)
                 .ok()
                 .flatten()
+                .filter(|drawer| !drawer.source_file.is_empty())
                 .and_then(|drawer| {
-                    source_context(conn, &drawer.source_file, drawer.chunk_index, 1).ok()
+                    source_context(
+                        conn,
+                        &drawer.wing,
+                        &drawer.room,
+                        &drawer.source_file,
+                        drawer.chunk_index,
+                        1,
+                    )
+                    .ok()
                 })
                 .unwrap_or_default()
                 .into_iter()

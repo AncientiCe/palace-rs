@@ -39,12 +39,16 @@ Fix any failure before marking the task complete.
 
 ---
 
-## 4. Library-First Design
+## 4. Internal API Discipline
 
-- This crate is **consumed as a library** by Rust applications. Every public API change can break consumers.
-- Before changing public types, functions, or module structure, consider: downstream callers, the `Palace` facade, SQLite schema migrations, and embedding model compatibility.
-- Keep the public API surface minimal and ergonomic. The `Palace` struct in `src/palace.rs` is the primary facade for library consumers.
-- The CLI (`src/cli.rs`) is behind the `cli` feature flag and is secondary to the library API.
+- palace-rs is a **CLI/MCP tool**: it ships to users as compiled binaries via the Homebrew
+  tap, the install script, and the MCP registry `.mcpb` bundle.
+- Internally, the crate is split into a `[lib]` (the `Palace` facade in `src/palace.rs`)
+  and a `[[bin]]` (`src/cli.rs`, behind the `cli` feature flag). The CLI and the MCP
+  server (`src/mcp_server.rs`) both build on that internal API, so keep it clean and
+  minimal for maintainability.
+- Before changing public types, functions, or module structure, consider: the CLI and MCP
+  server call sites, SQLite schema migrations, and embedding model compatibility.
 
 ---
 
@@ -89,6 +93,15 @@ Fix any failure before marking the task complete.
 
 ---
 
+## 10. Keep the Changelog Current
+
+- **Update `CHANGELOG.md` as part of every feature, fix, or behaviour change** — not as an afterthought before release.
+- Add entries under a top **`## [Unreleased]`** section while work is in progress (create it if missing, above the most recent released version). Do not invent a version number or date for in-progress work.
+- Use the existing Keep a Changelog headings (`### Added`, `### Changed`, `### Fixed`, `### Removed`, `### Deprecated`). The release workflow extracts notes by version heading, so leaving `Unreleased` undated keeps it out of releases until it is cut.
+- When a release is tagged, the `## [Unreleased]` entries get renamed to `## [x.y.z] - YYYY-MM-DD`.
+
+---
+
 ## Quick Reference
 
 | Rule | Action |
@@ -96,11 +109,12 @@ Fix any failure before marking the task complete.
 | TDD | Tests first → see fail → implement → see pass |
 | Quality | `cargo fmt` \| `cargo clippy --all-targets --all-features -- -D warnings` \| `cargo audit` \| `cargo test --all-features` |
 | No plan files | No `.md` for plans; only real documentation |
-| Library-first | Protect public API; consider downstream consumers |
+| Internal API discipline | CLI/MCP tool; keep internal `Palace` API clean for the CLI/MCP server |
 | No dead code | No unused variables, dead code, or `#[allow(dead_code)]` |
 | No mocks | No mocks; use real impls, integration tests, or explicit test doubles |
 | No placeholders | No placeholders ever; only real implementations |
 | No unsafe unwrap/expect | Never use `unwrap()`/`expect()` in production code; handle errors safely |
 | Close running instances | Stop any long-running verification processes when done |
+| Keep changelog current | Add `### Added/Changed/Fixed` entries under `## [Unreleased]` in `CHANGELOG.md` as you build |
 
 @RTK.md
