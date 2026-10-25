@@ -117,6 +117,52 @@ fn hybrid_search_exposes_preference_match_score() {
 }
 
 #[test]
+fn intent_terms_inside_other_words_do_not_boost() {
+    // LongMemEval gpt4_e061b84f: "latest" contains "test", which used to fire the
+    // command intent and lift an unrelated drawer containing "--" into the top five.
+    let conn = db::open_in_memory().expect("db should open");
+    add_drawer(
+        &conn,
+        "wing",
+        "room",
+        "Upcoming events: rewards expire soon -- redeem them this month.",
+        None,
+        "rewards.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let results = hybrid_search(
+        &conn,
+        "What is the order of the events, from earliest to latest?",
+        None,
+        &DrawerFilter::default(),
+        5,
+    )
+    .expect("hybrid search should work");
+    assert!(!results.is_empty());
+    assert_eq!(
+        results[0].coding_boost, 0.0,
+        "\"latest\" must not count as the command term \"test\""
+    );
+
+    let results = hybrid_search(
+        &conn,
+        "which test command runs before the events",
+        None,
+        &DrawerFilter::default(),
+        5,
+    )
+    .expect("hybrid search should work");
+    assert!(
+        results[0].coding_boost > 0.0,
+        "a standalone \"test\" should still fire the command intent"
+    );
+}
+
+#[test]
 fn hybrid_search_result_has_filed_at() {
     // Verify the new filed_at field is populated on SearchResult.
     let conn = db::open_in_memory().expect("db should open");

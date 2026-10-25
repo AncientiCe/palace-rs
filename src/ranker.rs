@@ -463,7 +463,10 @@ fn intent_boost(
     rooms: &[&str],
     amount: f64,
 ) -> f64 {
-    if !query_terms.iter().any(|term| query.contains(term)) {
+    if !query_terms
+        .iter()
+        .any(|term| contains_at_word_start(query, term))
+    {
         return 0.0;
     }
     let text_match = text_terms.iter().any(|term| text.contains(term));
@@ -474,6 +477,19 @@ fn intent_boost(
         (false, true) => amount * 0.45,
         (false, false) => 0.0,
     }
+}
+
+/// True when `term` occurs in `text` starting at a word boundary.
+///
+/// Inflections still match ("fix" in "fixes", "prefer" in "preferences"), but a
+/// term buried inside another word does not ("test" in "latest", "now" in "know").
+fn contains_at_word_start(text: &str, term: &str) -> bool {
+    text.match_indices(term).any(|(index, _)| {
+        text[..index]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_alphanumeric())
+    })
 }
 
 pub(crate) fn tokenize(text: &str) -> Vec<String> {
