@@ -4,6 +4,26 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Fixed
+
+- **Intent boosts no longer fire on words buried inside other words.** The
+  ranker matched query intent terms anywhere in the query, so "latest"
+  counted as the command term "test", "know" as "now" and "prefix" as "fix",
+  and unrelated drawers got boosted. Terms now have to start at a word
+  boundary; inflections such as "fixes" and "preferences" still match.
+  LongMemEval `s_cleaned` R@5 goes from 0.977 to 0.979 (one question back in
+  the top five, no other hit changes); the coding-agent eval is unchanged.
+- **Mined conversations keep the whole assistant reply.** Exchange chunking
+  kept only the first 8 lines of each reply and dropped the rest, so long
+  answers such as recipes or step-by-step instructions lost everything after
+  line 8. Replies are now kept whole; an exchange longer than about 2,000
+  characters (the embedder's 512-token window) continues in further chunks
+  that each repeat the user turn. Applies to conversations mined from now
+  on: files already mined are skipped on re-runs, so their stored chunks
+  stay as they were.
+
 ## [0.18.0] - 2026-10-23
 
 ### Added
