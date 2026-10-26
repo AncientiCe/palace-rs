@@ -9,6 +9,7 @@
   <img alt="Platforms: Linux, macOS, Windows" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-informational">
   <img alt="Rust 1.82+" src="https://img.shields.io/badge/rust-1.82%2B-orange?logo=rust">
   <a href="https://registry.modelcontextprotocol.io"><img alt="Listed in the MCP registry" src="https://img.shields.io/badge/MCP-registry-8250df"></a>
+  <a href="https://mcpservers.org/servers/ancientice/palace-rs"><img alt="Listed on mcpservers.org" src="https://mcpservers.org/badge.svg"></a>
   <img alt="Works with Claude Code, Codex, Cursor, Gemini CLI, VS Code, OpenCode, Cline, Zed, Goose, Windsurf and Claude Desktop" src="https://img.shields.io/badge/works%20with-11%20AI%20agents-8A2BE2">
 </p>
 
