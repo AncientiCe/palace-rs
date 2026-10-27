@@ -68,6 +68,26 @@ fn palace_tool_strips_the_mcp_prefix() {
     assert_eq!(palace_tool("mcp__other__palace_search"), None);
 }
 
+#[test]
+fn palace_tool_recognises_cursor_mcp_naming() {
+    assert_eq!(palace_tool("MCP:palace_search"), Some("palace_search"));
+    assert_eq!(
+        palace_tool("MCP:palace_diary_write"),
+        Some("palace_diary_write")
+    );
+    assert_eq!(palace_tool("MCP:impact_file"), None);
+}
+
+#[test]
+fn cursor_palace_calls_mark_the_session_used_and_saved() {
+    let conn = test_db();
+    record_tool(&conn, "s1", "/work/proj", "MCP:palace_search").unwrap();
+    record_tool(&conn, "s1", "/work/proj", "MCP:palace_diary_write").unwrap();
+    let s1 = activity(&conn, "s1").unwrap().unwrap();
+    assert!(s1.palace_used);
+    assert!(s1.saved);
+}
+
 fn tool_call(tool: &str) -> Value {
     json!({
         "session_id": "s1",
@@ -243,6 +263,19 @@ fn stop_silent_for_trivial_session_even_if_others_engaged() {
         stop_response(&conn, &stop_input(), HookClient::Claude),
         json!({})
     );
+}
+
+#[test]
+fn claude_stop_hook_run_by_cursor_stays_silent() {
+    // Cursor also runs ~/.claude/settings.json hooks and turns a block reason
+    // into a new user turn, so the Claude hook must not nudge there.
+    let conn = test_db();
+    busy_session(&conn);
+    let mut input = stop_input();
+    input["cursor_version"] = json!("3.27.14");
+    input["status"] = json!("completed");
+    input["loop_count"] = json!(0);
+    assert_eq!(stop_response(&conn, &input, HookClient::Claude), json!({}));
 }
 
 #[test]

@@ -4,6 +4,18 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Fixed
+
+- **The stop reminder no longer derails Cursor.** Cursor also runs the hooks
+  in `~/.claude/settings.json`, and it submitted Palace's Claude Code stop
+  reminder as a new user message after almost every turn. The Claude stop
+  hook now stays silent when Cursor is the caller. Cursor reports Palace
+  calls as `MCP:palace_*`, and the hooks now count those, so the
+  "Palace not consulted yet" prompt reminder stops once a Cursor session
+  has used Palace.
+
 ## [0.18.1] - 2026-10-25
 
 ### Fixed

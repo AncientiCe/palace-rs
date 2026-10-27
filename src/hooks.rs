@@ -79,7 +79,8 @@ impl HookClient {
 
     /// Whether this client's Palace calls reach the after-tool hook, so
     /// per-session palace use (and the reminders built on it) is reliable.
-    /// Only Claude Code's `mcp__palace__*` tool naming is confirmed so far.
+    /// Only Claude Code's `mcp__palace__*` tool naming (and Cursor's
+    /// `MCP:palace_*` when Cursor runs Claude's hooks) is confirmed so far.
     fn tracks_palace_use(self) -> bool {
         self == Self::Claude
     }
@@ -683,7 +684,9 @@ fn stop_should_skip(input: &Value, client: HookClient) -> bool {
             return true;
         }
     }
-    false
+    // Cursor also runs hooks from other clients' configs (~/.claude/settings.json)
+    // and submits their stop reason as a new user turn, derailing the agent.
+    client != HookClient::Cursor && input.get("cursor_version").is_some()
 }
 
 /// Run a hook end-to-end: read the JSON event from `stdin`, dispatch on the
