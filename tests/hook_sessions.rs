@@ -164,6 +164,31 @@ fn prompt_reminds_claude_until_palace_is_used() {
     assert_eq!(out, json!({}), "no reminder once palace was used: {out}");
 }
 
+fn worked_with_palace(conn: &rusqlite::Connection) {
+    record_tool(conn, "s1", "/work/proj", "MCP:palace_search").unwrap();
+    record_tool(conn, "s1", "/work/proj", "Read").unwrap();
+    record_tool(conn, "s1", "/work/proj", "Grep").unwrap();
+}
+
+#[test]
+fn prompt_reminds_to_save_once_real_work_saved_nothing() {
+    let conn = test_db();
+    worked_with_palace(&conn);
+    let out = user_prompt_submit_response(&conn, &session_prompt(PLAIN_PROMPT), HookClient::Claude);
+    let ctx = context(&out);
+    assert!(ctx.contains("palace_diary_write"), "{out}");
+    assert!(!ctx.contains("Palace not consulted yet"), "{out}");
+}
+
+#[test]
+fn prompt_save_reminder_clears_after_saving() {
+    let conn = test_db();
+    worked_with_palace(&conn);
+    record_tool(&conn, "s1", "/work/proj", "MCP:palace_diary_write").unwrap();
+    let out = user_prompt_submit_response(&conn, &session_prompt(PLAIN_PROMPT), HookClient::Claude);
+    assert_eq!(out, json!({}), "no save reminder once saved: {out}");
+}
+
 #[test]
 fn prompt_reminder_skips_trivial_prompts() {
     let conn = test_db();
@@ -276,6 +301,14 @@ fn claude_stop_hook_run_by_cursor_stays_silent() {
     input["status"] = json!("completed");
     input["loop_count"] = json!(0);
     assert_eq!(stop_response(&conn, &input, HookClient::Claude), json!({}));
+}
+
+#[test]
+fn cursor_stop_hook_never_submits_a_followup() {
+    let conn = test_db();
+    busy_session(&conn);
+    let input = json!({ "session_id": "s1", "status": "completed", "loop_count": 0 });
+    assert_eq!(stop_response(&conn, &input, HookClient::Cursor), json!({}));
 }
 
 #[test]

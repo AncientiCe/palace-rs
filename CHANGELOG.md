@@ -8,13 +8,19 @@ This Rust implementation uses its own `0.x` version track.
 
 ### Fixed
 
-- **The stop reminder no longer derails Cursor.** Cursor also runs the hooks
-  in `~/.claude/settings.json`, and it submitted Palace's Claude Code stop
-  reminder as a new user message after almost every turn. The Claude stop
-  hook now stays silent when Cursor is the caller. Cursor reports Palace
-  calls as `MCP:palace_*`, and the hooks now count those, so the
-  "Palace not consulted yet" prompt reminder stops once a Cursor session
-  has used Palace.
+- **The stop reminder no longer derails Cursor.** Cursor posts a stop hook's
+  reply as a new user message. It also runs the hooks in
+  `~/.claude/settings.json`, so Palace's save reminder interrupted almost every
+  turn. No stop hook replies to Cursor now. `palace install` stops registering
+  the Cursor `stop` hook and removes the `palace-stop` entry and scripts left
+  by earlier installs.
+- **The prompt hook reminds the agent to save instead.** Once a session has
+  done real work and saved nothing, each prompt's context carries a one-line
+  reminder to call `palace_diary_write` and `palace_kg_add`. In Cursor this
+  arrives through the Claude Code prompt hook.
+- **Cursor's Palace calls count as Palace use.** Cursor reports them as
+  `MCP:palace_*`. The hooks now recognise that form, so a Cursor session that
+  used Palace is no longer told "Palace not consulted yet".
 
 ## [0.18.1] - 2026-10-25
 

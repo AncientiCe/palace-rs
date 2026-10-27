@@ -1587,14 +1587,11 @@ struct CursorHook {
     script_stem: &'static str,
     /// Optional tool matcher (postToolUse fires only for these tools).
     matcher: Option<&'static str>,
-    /// Optional auto-continue loop cap (used by `stop`).
-    loop_limit: Option<i64>,
 }
 
 /// The Cursor hooks Palace manages:
 /// - `sessionStart`: inject protocol + export session id.
 /// - `postToolUse`: auto-recall relevant memory when the agent investigates.
-/// - `stop`: nudge the agent to record its work if it engaged Palace but saved nothing.
 fn cursor_hooks() -> &'static [CursorHook] {
     &[
         CursorHook {
@@ -1602,24 +1599,20 @@ fn cursor_hooks() -> &'static [CursorHook] {
             cli_event: "session-start",
             script_stem: "palace-session-start",
             matcher: None,
-            loop_limit: None,
         },
         CursorHook {
             event: "postToolUse",
             cli_event: "post-tool-use",
             script_stem: "palace-post-tool-use",
             matcher: Some("Grep|Read|Glob"),
-            loop_limit: None,
-        },
-        CursorHook {
-            event: "stop",
-            cli_event: "stop",
-            script_stem: "palace-stop",
-            matcher: None,
-            loop_limit: Some(1),
         },
     ]
 }
+
+/// Cursor hooks older Palace versions installed, as (hooks.json event, script
+/// stem). Install and uninstall remove them. The `stop` hook went because
+/// Cursor posts its `followup_message` as a new user turn.
+const RETIRED_CURSOR_HOOKS: &[(&str, &str)] = &[("stop", "palace-stop")];
 
 pub fn install_cursor_hook(home_dir: &Path, binary_path: &Path, dry_run: bool) -> Result<bool> {
     let hooks_dir = home_dir.join(".cursor").join("hooks");
@@ -1638,7 +1631,23 @@ pub fn install_cursor_hook(home_dir: &Path, binary_path: &Path, dry_run: bool) -
         entries.push((hook, script_rel));
     }
     let changed = upsert_hooks_json(&hooks_json, &entries, dry_run)?;
+    if !dry_run {
+        remove_retired_hook_scripts(&hooks_dir)?;
+    }
     Ok(changed)
+}
+
+fn remove_retired_hook_scripts(hooks_dir: &Path) -> Result<()> {
+    for (_, stem) in RETIRED_CURSOR_HOOKS {
+        for name in script_names(stem) {
+            let path = hooks_dir.join(&name);
+            if path.exists() {
+                fs::remove_file(&path)
+                    .with_context(|| format!("failed to remove {}", path.display()))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Remove the palace `sessionStart` hook from `~/.cursor/hooks.json` and
@@ -1699,14 +1708,26 @@ pub fn run_hook(event: &str, client: &str) -> Result<()> {
 fn hook_script_names() -> Vec<String> {
     cursor_hooks()
         .iter()
-        .flat_map(|hook| {
-            [
-                format!("{}.bat", hook.script_stem),
-                format!("{}.sh", hook.script_stem),
-                hook.script_stem.to_string(),
-            ]
-        })
+        .map(|hook| hook.script_stem)
+        .chain(RETIRED_CURSOR_HOOKS.iter().map(|(_, stem)| *stem))
+        .flat_map(script_names)
         .collect()
+}
+
+fn script_names(stem: &str) -> [String; 3] {
+    [
+        format!("{stem}.bat"),
+        format!("{stem}.sh"),
+        stem.to_string(),
+    ]
+}
+
+/// Every hooks.json event that can hold a Palace entry, current or retired.
+fn cursor_hook_events() -> impl Iterator<Item = &'static str> {
+    cursor_hooks()
+        .iter()
+        .map(|hook| hook.event)
+        .chain(RETIRED_CURSOR_HOOKS.iter().map(|(event, _)| *event))
 }
 
 fn write_hook_script(
@@ -1787,9 +1808,6 @@ fn hook_entry(hook: &CursorHook, script_command: &str) -> Value {
     if let Some(matcher) = hook.matcher {
         obj.insert("matcher".to_string(), json!(matcher));
     }
-    if let Some(loop_limit) = hook.loop_limit {
-        obj.insert("loop_limit".to_string(), json!(loop_limit));
-    }
     Value::Object(obj)
 }
 
@@ -1826,6 +1844,19 @@ fn upsert_hooks_json(
                 arr.push(desired);
             }
         }
+
+        for (event, _) in RETIRED_CURSOR_HOOKS {
+            let emptied = hooks
+                .get_mut(*event)
+                .and_then(Value::as_array_mut)
+                .is_some_and(|arr| {
+                    arr.retain(|e| !is_palace_entry(e));
+                    arr.is_empty()
+                });
+            if emptied {
+                hooks.remove(*event);
+            }
+        }
     }
 
     if existing == next {
@@ -1859,8 +1890,8 @@ fn remove_hook_entry(path: &Path, dry_run: bool) -> Result<bool> {
     };
 
     let mut removed_any = false;
-    for hook in cursor_hooks() {
-        if let Some(arr) = hooks.get_mut(hook.event).and_then(Value::as_array_mut) {
+    for event in cursor_hook_events() {
+        if let Some(arr) = hooks.get_mut(event).and_then(Value::as_array_mut) {
             let before = arr.len();
             arr.retain(|e| !is_palace_entry(e));
             removed_any |= arr.len() != before;

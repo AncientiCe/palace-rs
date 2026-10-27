@@ -10,7 +10,8 @@
 //! - `stop` — when a session did real work but never recorded anything, return
 //!   a follow-up message so the agent saves its work before finishing. Claude
 //!   Code is judged per session (see [`crate::hook_sessions`]); other clients
-//!   use a recent-activity window.
+//!   use a recent-activity window. Cursor gets no stop reply: it would post it
+//!   as a new user turn. The prompt hook reminds it to save instead.
 //!
 //! The builders are pure functions over a [`Connection`] and the hook input
 //! JSON so they can be unit-tested without spawning Cursor. All paths fail open:
@@ -124,10 +125,11 @@ impl HookClient {
                     "reason": message,
                 }
             }),
-            Self::Cursor | Self::OpenCode => json!({ "followup_message": message }),
+            Self::OpenCode => json!({ "followup_message": message }),
             Self::Goose => json!({ "decision": "block", "reason": message }),
-            // Cline cannot continue a task after it completes.
-            Self::Cline => json!({}),
+            // Cline cannot continue a task after it completes, and Cursor would
+            // post the message as a new user turn.
+            Self::Cline | Self::Cursor => json!({}),
         }
     }
 }
@@ -285,6 +287,11 @@ const PALACE_REMINDER: &str = "Palace not consulted yet this session. Load the p
     they are deferred, run the SESSION START calls (palace_status, palace_session_context), and \
     call palace_search before answering questions about past work.";
 
+/// Reminder injected into prompts once a session did real work but saved nothing.
+const PROMPT_SAVE_REMINDER: &str = "Palace: this session has done real work but saved nothing \
+    yet. Before you finish this task, call palace_diary_write with what you did and decided, and \
+    palace_kg_add for any durable facts.";
+
 /// Build the user-prompt-submit response: recall memory relevant to the user's
 /// question *before* the agent starts answering, so Palace is consulted even
 /// when the agent would otherwise go straight to the code or its own knowledge.
@@ -322,14 +329,19 @@ fn substantive_prompt(input: &Value) -> Option<&str> {
     Some(prompt)
 }
 
-/// One-line reminder for a session that has not touched Palace yet, or
-/// `None` once it has (or when this client's palace calls are not tracked).
+/// One-line reminder for a session that has not touched Palace yet, or that
+/// did real work and saved nothing. `None` otherwise, or when this client's
+/// palace calls are not tracked.
 fn palace_reminder(conn: &Connection, input: &Value, client: HookClient) -> Option<String> {
     if !client.tracks_palace_use() {
         return None;
     }
     let activity = crate::hook_sessions::activity(conn, session_id(input)?).ok()??;
-    (!activity.palace_used).then(|| PALACE_REMINDER.to_string())
+    if !activity.palace_used {
+        return Some(PALACE_REMINDER.to_string());
+    }
+    (!activity.saved && activity.tool_calls >= BUSY_SESSION_TOOL_CALLS)
+        .then(|| PROMPT_SAVE_REMINDER.to_string())
 }
 
 /// Recall block (or search nudge) for a substantive prompt, or `None` when
@@ -678,15 +690,9 @@ fn stop_should_skip(input: &Value, client: HookClient) -> bool {
     if input.get("loop_count").and_then(Value::as_i64).unwrap_or(0) != 0 {
         return true;
     }
-    if client == HookClient::Cursor {
-        let status = input.get("status").and_then(Value::as_str).unwrap_or("");
-        if status != "completed" {
-            return true;
-        }
-    }
-    // Cursor also runs hooks from other clients' configs (~/.claude/settings.json)
-    // and submits their stop reason as a new user turn, derailing the agent.
-    client != HookClient::Cursor && input.get("cursor_version").is_some()
+    // Cursor submits a stop reply as a new user turn, derailing the agent, and
+    // it also runs other clients' hooks (~/.claude/settings.json).
+    client == HookClient::Cursor || input.get("cursor_version").is_some()
 }
 
 /// Run a hook end-to-end: read the JSON event from `stdin`, dispatch on the

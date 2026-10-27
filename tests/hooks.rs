@@ -270,11 +270,7 @@ fn stop_nudges_when_engaged_but_not_saved() {
     let conn = test_db();
     insert_event(&conn, &usage("palace_search")).unwrap();
 
-    let out: Value = stop_response(
-        &conn,
-        &json!({"status": "completed", "loop_count": 0}),
-        HookClient::Cursor,
-    );
+    let out: Value = stop_response(&conn, &json!({"loop_count": 0}), HookClient::OpenCode);
     let msg = out["followup_message"].as_str().unwrap_or("");
     assert!(
         msg.contains("palace_diary_write"),
@@ -322,11 +318,7 @@ fn stop_silent_when_work_was_saved() {
     insert_event(&conn, &usage("palace_search")).unwrap();
     insert_event(&conn, &usage("palace_diary_write")).unwrap();
 
-    let out: Value = stop_response(
-        &conn,
-        &json!({"status": "completed", "loop_count": 0}),
-        HookClient::Cursor,
-    );
+    let out: Value = stop_response(&conn, &json!({"loop_count": 0}), HookClient::OpenCode);
     assert!(
         out.get("followup_message").is_none(),
         "no nudge once the session recorded memory: {out}"
@@ -336,11 +328,7 @@ fn stop_silent_when_work_was_saved() {
 #[test]
 fn stop_silent_when_no_palace_engagement() {
     let conn = test_db();
-    let out: Value = stop_response(
-        &conn,
-        &json!({"status": "completed", "loop_count": 0}),
-        HookClient::Cursor,
-    );
+    let out: Value = stop_response(&conn, &json!({"loop_count": 0}), HookClient::OpenCode);
     assert!(
         out.get("followup_message").is_none(),
         "trivial sessions with no palace use are not nudged: {out}"
@@ -348,26 +336,23 @@ fn stop_silent_when_no_palace_engagement() {
 }
 
 #[test]
-fn stop_silent_when_not_completed() {
+fn stop_silent_for_cursor_even_when_engaged_but_not_saved() {
+    // Cursor posts a followup_message as a new user turn, which derails the agent.
     let conn = test_db();
     insert_event(&conn, &usage("palace_search")).unwrap();
     let out: Value = stop_response(
         &conn,
-        &json!({"status": "aborted", "loop_count": 0}),
+        &json!({"status": "completed", "loop_count": 0}),
         HookClient::Cursor,
     );
-    assert!(out.get("followup_message").is_none(), "{out}");
+    assert_eq!(out, json!({}), "{out}");
 }
 
 #[test]
 fn stop_silent_on_repeat_loop() {
     let conn = test_db();
     insert_event(&conn, &usage("palace_search")).unwrap();
-    let out: Value = stop_response(
-        &conn,
-        &json!({"status": "completed", "loop_count": 1}),
-        HookClient::Cursor,
-    );
+    let out: Value = stop_response(&conn, &json!({"loop_count": 1}), HookClient::OpenCode);
     assert!(
         out.get("followup_message").is_none(),
         "only nudge once per session: {out}"
