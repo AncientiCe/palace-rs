@@ -303,8 +303,11 @@ fn coding_agent_boost(query: &str, text: &str, room: &str) -> f64 {
         &["command", "commands"],
         0.12,
     );
+    // "should I ..." asks for advice for the speaker ("what should I serve?"),
+    // not for a shared norm, so it is not convention phrasing.
+    let convention_query = query_lower.replace("should i ", " ");
     boost += intent_boost(
-        &query_lower,
+        &convention_query,
         &text_lower,
         &room_lower,
         &["convention", "rule", "usually", "should", "how do we"],

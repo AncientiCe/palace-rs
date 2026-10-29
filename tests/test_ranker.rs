@@ -163,6 +163,39 @@ fn intent_terms_inside_other_words_do_not_boost() {
 }
 
 #[test]
+fn should_i_asks_for_advice_not_a_convention() {
+    // "What should I serve?" wants a suggestion for the speaker; it used to fire
+    // the convention intent and lift any drawer that says "always" or "never".
+    let conn = db::open_in_memory().expect("db should open");
+    add_drawer(
+        &conn,
+        "wing",
+        "room",
+        "We always serve the guests first at the dinner table.",
+        None,
+        "dinner.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let search = |query: &str| {
+        hybrid_search(&conn, query, None, &DrawerFilter::default(), 5)
+            .expect("hybrid search should work")
+    };
+    assert_eq!(
+        search("What should I serve for dinner?")[0].coding_boost,
+        0.0,
+        "\"should I\" must not count as convention phrasing"
+    );
+    assert!(
+        search("What should we serve for dinner?")[0].coding_boost > 0.0,
+        "\"should we\" still asks for a shared norm"
+    );
+}
+
+#[test]
 fn hybrid_search_result_has_filed_at() {
     // Verify the new filed_at field is populated on SearchResult.
     let conn = db::open_in_memory().expect("db should open");

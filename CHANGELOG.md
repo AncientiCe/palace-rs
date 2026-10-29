@@ -14,6 +14,15 @@ This Rust implementation uses its own `0.x` version track.
   `--force`, files already mined are still skipped. Library users get the same
   through `convo_miner::mine_convos_with`.
 
+### Changed
+
+- **"Should I ...?" no longer counts as asking about a convention.** Any
+  "should" in a query fired the convention boost, so an advice question such
+  as "what should I serve for dinner?" lifted drawers that merely say "always"
+  or "never". "Should we", "should agents" and other shared-norm phrasing
+  still count. Coding-agent eval: MiniLM hybrid R@1 0.902 to 0.922, other
+  models and real-palace probes unchanged.
+
 ## [0.18.2] - 2026-10-27
 
 ### Fixed
