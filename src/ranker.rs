@@ -1,11 +1,13 @@
 //! Hybrid retrieval: BM25 keyword scoring plus optional vector similarity.
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 
 use crate::embedding_models::ModelSpec;
 use crate::store::{get_drawer, vector_search_in, DrawerFilter, SearchResult, VectorSource};
+use crate::time_query::TimeTarget;
 
 const BM25_K1: f64 = 1.5;
 const BM25_B: f64 = 0.75;
@@ -15,16 +17,44 @@ const MAX_PREFERENCE_MATCH: f64 = 0.22;
 const RECENCY_WEIGHT: f64 = 0.05;
 /// Exponential decay constant — half-life ≈ 35 days.
 const RECENCY_LAMBDA: f64 = 0.02;
+/// Bonus for a drawer created on the day a query's time phrase points at
+/// ("two weeks ago"), the size of one intent boost.
+const DATE_WEIGHT: f64 = 0.12;
 
 /// Compute an exponential recency bonus based on `filed_at` (RFC 3339 string).
 /// Returns a value in [0, RECENCY_WEIGHT].
-fn recency_boost(filed_at: &str) -> f64 {
-    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(filed_at) else {
+fn recency_boost(filed_at: &str, now: DateTime<Utc>) -> f64 {
+    let Ok(ts) = DateTime::parse_from_rfc3339(filed_at) else {
         return 0.0;
     };
-    let now = chrono::Utc::now();
     let age_days = (now - ts.to_utc()).num_days().max(0) as f64;
     RECENCY_WEIGHT * (-RECENCY_LAMBDA * age_days).exp()
+}
+
+/// Bonus for a drawer whose `created_at` lies near what the query's time
+/// phrases point at. Returns a value in [0, DATE_WEIGHT].
+fn date_boost(targets: &[TimeTarget], created_at: &str) -> f64 {
+    if targets.is_empty() {
+        return 0.0;
+    }
+    let Ok(ts) = DateTime::parse_from_rfc3339(created_at) else {
+        return 0.0;
+    };
+    DATE_WEIGHT * crate::time_query::time_match(targets, ts.to_utc())
+}
+
+/// How a search is ranked, beyond the query and the model.
+#[derive(Debug, Clone)]
+pub struct RankOptions {
+    /// When the query is asked. Recency and relative time phrases ("last
+    /// week") count back from here.
+    pub now: DateTime<Utc>,
+}
+
+impl Default for RankOptions {
+    fn default() -> Self {
+        Self { now: Utc::now() }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +64,8 @@ pub struct HybridResult {
     pub bm25: f64,
     pub coding_boost: f64,
     pub preference_match: f64,
+    /// Bonus for matching the query's time phrases ("two weeks ago").
+    pub date_boost: f64,
     pub rerank_score: Option<f64>,
     pub combined: f64,
 }
@@ -68,6 +100,31 @@ pub fn hybrid_search_in(
     filter: &DrawerFilter,
     n_results: usize,
 ) -> Result<Vec<HybridResult>> {
+    hybrid_search_with(
+        conn,
+        query,
+        query_vec,
+        source,
+        model,
+        filter,
+        n_results,
+        &RankOptions::default(),
+    )
+}
+
+/// [`hybrid_search_in`] ranked with `options`, e.g. a query asked at a
+/// moment other than now.
+#[allow(clippy::too_many_arguments)]
+pub fn hybrid_search_with(
+    conn: &Connection,
+    query: &str,
+    query_vec: Option<&[f32]>,
+    source: VectorSource,
+    model: &ModelSpec,
+    filter: &DrawerFilter,
+    n_results: usize,
+    options: &RankOptions,
+) -> Result<Vec<HybridResult>> {
     let sanitized_query = crate::query_sanitizer::sanitize_query(query);
     let query = if sanitized_query.is_empty() {
         query
@@ -92,6 +149,7 @@ pub fn hybrid_search_in(
                     bm25: 0.0,
                     coding_boost: 0.0,
                     preference_match: 0.0,
+                    date_boost: 0.0,
                     rerank_score: None,
                     combined: 0.0,
                 },
@@ -120,6 +178,7 @@ pub fn hybrid_search_in(
                     bm25: score,
                     coding_boost: 0.0,
                     preference_match: 0.0,
+                    date_boost: 0.0,
                     rerank_score: None,
                     combined: 0.0,
                 },
@@ -135,6 +194,7 @@ pub fn hybrid_search_in(
         result.cosine = ((result.drawer.similarity - floor) / (1.0 - floor)).max(0.0);
     }
 
+    let time_targets = crate::time_query::time_targets(query, options.now);
     let max_bm25 = by_id.values().map(|r| r.bm25).fold(0.0, f64::max);
     for result in by_id.values_mut() {
         let normalized_bm25 = if max_bm25 > 0.0 {
@@ -144,11 +204,13 @@ pub fn hybrid_search_in(
         };
         result.coding_boost = coding_agent_boost(query, &result.drawer.text, &result.drawer.room);
         result.preference_match = preference_match(query, &result.drawer.text, &result.drawer.room);
-        let recency = recency_boost(&result.drawer.filed_at);
+        result.date_boost = date_boost(&time_targets, &result.drawer.created_at);
+        let recency = recency_boost(&result.drawer.filed_at, options.now);
         result.combined = (result.cosine * model.cosine_weight)
             + (normalized_bm25 * model.bm25_weight)
             + result.coding_boost
             + result.preference_match
+            + result.date_boost
             + recency;
         result.drawer.similarity = (result.combined * 1000.0).round() / 1000.0;
     }

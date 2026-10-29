@@ -43,6 +43,7 @@ pub mod searcher;
 pub mod split;
 pub mod store;
 pub mod sweep;
+pub mod time_query;
 pub mod usage;
 pub mod watcher;
 

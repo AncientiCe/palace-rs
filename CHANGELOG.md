@@ -14,6 +14,14 @@ This Rust implementation uses its own `0.x` version track.
   `--force`, files already mined are still skipped. Library users get the same
   through `convo_miner::mine_convos_with`.
 
+- **Search understands relative time.** A query such as "what did I buy 10
+  days ago?", "last Tuesday", "last week" or "in March" now favours drawers
+  created around that time, counted back from when the query is asked. The
+  window widens with distance: "yesterday" means about a day, "two months
+  ago" about half a month either side. Each result reports the bonus as
+  `date_boost`. `ranker::hybrid_search_with` takes `RankOptions` to rank as
+  if asked at another moment.
+
 ### Changed
 
 - **"Should I ...?" no longer counts as asking about a convention.** Any
