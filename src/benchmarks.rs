@@ -14,7 +14,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::embedding_models::ModelSpec;
-use crate::ranker::hybrid_search_in;
+use crate::ranker::{hybrid_search_with, RankOptions};
 use crate::store::{add_drawer_with_id, DrawerFilter, VectorSource};
 
 const TOP_K: usize = 10;
@@ -209,6 +209,9 @@ pub struct RunOptions {
     /// cosine/BM25 weights for ranking. Ignored with `bm25_only`.
     pub model: &'static ModelSpec,
     pub chunking: Chunking,
+    /// Write each case's best `dump_chunks` chunk scores to the cases file,
+    /// for comparing ranking rules offline. 0 writes none.
+    pub dump_chunks: usize,
 }
 
 /// How sessions become drawers. Chunked modes rank a session by its best chunk.
@@ -248,6 +251,16 @@ struct CaseOutput {
     query_ms: u128,
     drawer_count: usize,
     error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    chunks: Vec<ChunkScore>,
+}
+
+/// One ranked drawer, as `--dump-chunks` writes it.
+#[derive(Debug, Serialize)]
+struct ChunkScore {
+    session_id: String,
+    combined: f64,
+    date_boost: f64,
 }
 
 pub fn parse_longmemeval(raw: &str) -> Result<Vec<BenchmarkInstance>> {
@@ -438,6 +451,7 @@ pub fn run_benchmark(options: &RunOptions) -> Result<BenchmarkSummary> {
                     query_ms: 0,
                     drawer_count: 0,
                     error: Some(error.to_string()),
+                    chunks: Vec::new(),
                 }
             }
         };
@@ -568,6 +582,14 @@ fn run_case(
             "mempalace-bench",
             Some(&metadata),
         )?;
+        // Date drawers by their session, as a live palace dates them by when
+        // they were filed, so time phrases in the question can match.
+        if let Some(date) = session.date.as_deref().and_then(parse_dataset_date) {
+            conn.execute(
+                "UPDATE drawers SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![date.to_rfc3339(), drawer_id],
+            )?;
+        }
     }
     let ingest_ms = ingest_start.elapsed().as_millis();
 
@@ -588,16 +610,37 @@ fn run_case(
     } else {
         drawers.len()
     };
-    let results = hybrid_search_in(
+    // The question is asked on its own date, not today.
+    let rank_options = RankOptions {
+        now: instance
+            .question_date
+            .as_deref()
+            .and_then(parse_dataset_date)
+            .unwrap_or_else(chrono::Utc::now),
+    };
+    let results = hybrid_search_with(
         &conn,
         &instance.question,
         query_embedding.as_deref(),
         VectorSource::Hot,
         options.model,
         &DrawerFilter::default(),
-        n_results,
+        n_results.max(options.dump_chunks),
+        &rank_options,
     )?;
     let query_ms = query_start.elapsed().as_millis();
+
+    let chunks = results
+        .iter()
+        .take(options.dump_chunks)
+        .filter_map(|result| {
+            Some(ChunkScore {
+                session_id: source_to_session.get(&result.drawer.source_file)?.clone(),
+                combined: result.combined,
+                date_boost: result.date_boost,
+            })
+        })
+        .collect();
 
     let mut seen = HashSet::new();
     let ranked_session_ids: Vec<String> = results
@@ -622,7 +665,25 @@ fn run_case(
         query_ms,
         drawer_count: drawers.len(),
         error: None,
+        chunks,
     })
+}
+
+/// A dataset timestamp: LongMemEval's "2023/05/20 (Sat) 02:21", RFC 3339,
+/// or a bare "2023-05-20".
+fn parse_dataset_date(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
+    let text = text.trim();
+    if let Ok(date) = chrono::DateTime::parse_from_rfc3339(text) {
+        return Some(date.to_utc());
+    }
+    if let Ok(naive) = NaiveDateTime::parse_from_str(text, "%Y/%m/%d (%a) %H:%M") {
+        return Some(Utc.from_utc_datetime(&naive));
+    }
+    NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(12, 0, 0))
+        .map(|naive| Utc.from_utc_datetime(&naive))
 }
 
 fn parse_beam_instance(value: &Value, line_index: usize) -> Result<BenchmarkInstance> {
@@ -782,4 +843,26 @@ fn sanitize_id(text: &str) -> String {
         }
     }
     out.trim_matches('_').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_dataset_date;
+
+    #[test]
+    fn parses_dataset_dates() {
+        let expected = "2023-05-20T02:21:00+00:00";
+        for text in [
+            "2023/05/20 (Sat) 02:21",
+            "2023-05-20T02:21:00Z",
+            " 2023/05/20 (Sat) 02:21 ",
+        ] {
+            assert_eq!(parse_dataset_date(text).unwrap().to_rfc3339(), expected);
+        }
+        assert_eq!(
+            parse_dataset_date("2023-05-20").unwrap().to_rfc3339(),
+            "2023-05-20T12:00:00+00:00"
+        );
+        assert!(parse_dataset_date("last spring").is_none());
+    }
 }

@@ -44,6 +44,10 @@ struct RunArgs {
     /// chunk. Non-session modes write to <output_dir>/<model-id>-<mode>/.
     #[arg(long, value_enum, default_value_t = Chunking::Session)]
     chunking: Chunking,
+    /// Also write each case's best N chunk scores to the cases file, for
+    /// comparing ranking rules offline.
+    #[arg(long, default_value_t = 0)]
+    dump_chunks: usize,
 }
 
 #[cfg(feature = "benchmarks")]
@@ -105,6 +109,7 @@ fn run(benchmark: &str, args: RunArgs) -> Result<()> {
             bm25_only: args.bm25_only,
             model,
             chunking: args.chunking,
+            dump_chunks: args.dump_chunks,
         })?;
         println!("{}", serde_json::to_string_pretty(&summary)?);
         summaries.push(summary);
