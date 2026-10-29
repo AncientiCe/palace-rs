@@ -3,7 +3,7 @@ name = "beam-convert"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Convert BEAM parquet shards (Mohammadta/BEAM) into the canonical JSONL consumed by mempalace-bench."
+description = "Convert BEAM parquet shards (Mohammadta/BEAM) into the canonical JSONL consumed by palace-bench."
 
 [[bin]]
 name = "beam-convert"

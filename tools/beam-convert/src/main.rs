@@ -1,6 +1,6 @@
 //! Convert a BEAM parquet shard (Mohammadta/BEAM on Hugging Face) into the
-//! canonical JSONL shape consumed by `mempalace-bench prepare-beam` /
-//! `mempalace-bench beam`.
+//! canonical JSONL shape consumed by `palace-bench prepare-beam` /
+//! `palace-bench beam`.
 //!
 //! Each parquet row holds a single conversation (a list of sessions of turns)
 //! plus a `probing_questions` blob keyed by ability category. We emit one

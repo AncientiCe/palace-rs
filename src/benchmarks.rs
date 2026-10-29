@@ -579,7 +579,7 @@ fn run_case(
             text,
             embedding,
             &source_file,
-            "mempalace-bench",
+            "palace-bench",
             Some(&metadata),
         )?;
         // Date drawers by their session, as a live palace dates them by when

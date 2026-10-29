@@ -14,9 +14,9 @@ use std::path::PathBuf;
 #[cfg(feature = "benchmarks")]
 #[derive(Parser)]
 #[command(
-    name = "mempalace-bench",
+    name = "palace-bench",
     version = env!("CARGO_PKG_VERSION"),
-    about = "Retrieval benchmark harness for MemPalace"
+    about = "Retrieval benchmark harness for Palace"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -57,7 +57,7 @@ enum Command {
     LongMemEval(RunArgs),
     /// Run BEAM retrieval recall over canonical JSONL.
     Beam(RunArgs),
-    /// Normalize a JSONL BEAM export into the canonical MemPalace benchmark shape.
+    /// Normalize a JSONL BEAM export into the canonical Palace benchmark shape.
     PrepareBeam {
         /// Input JSONL exported from BEAM/Hugging Face tooling.
         input: PathBuf,

@@ -1,6 +1,6 @@
 # Benchmarks Runbook
 
-Runbook for the `mempalace-bench` retrieval benchmarks (LongMemEval and BEAM).
+Runbook for the `palace-bench` retrieval benchmarks (LongMemEval and BEAM).
 Copy/paste commands one at a time and watch each summary print before moving on.
 
 > Heads-up on cost (single-CPU, model already cached):
@@ -15,11 +15,11 @@ Copy/paste commands one at a time and watch each summary print before moving on.
 ## 0. Prerequisites
 
 ```bash
-# Build + install the binary once (drops it at ~/.cargo/bin/mempalace-bench)
-cargo install --path . --no-default-features --features benchmarks --bin mempalace-bench
+# Build + install the binary once (drops it at ~/.cargo/bin/palace-bench)
+cargo install --path . --no-default-features --features benchmarks --bin palace-bench
 
 # Sanity check
-which mempalace-bench && mempalace-bench --version
+which palace-bench && palace-bench --version
 
 # Output dirs
 mkdir -p data/out/longmemeval data/out/beam
@@ -28,7 +28,7 @@ mkdir -p data/out/longmemeval data/out/beam
 If you'd rather not install, alias for the session instead:
 
 ```bash
-alias mempalace-bench='cargo run --release --no-default-features --features benchmarks --bin mempalace-bench --'
+alias palace-bench='cargo run --release --no-default-features --features benchmarks --bin palace-bench --'
 ```
 
 ---
@@ -78,10 +78,10 @@ cargo run --manifest-path tools/beam-convert/Cargo.toml --release -- \
 Validates the full pipeline in seconds without touching the embedding model:
 
 ```bash
-mempalace-bench long-mem-eval data/longmemeval/longmemeval_oracle.json \
+palace-bench long-mem-eval data/longmemeval/longmemeval_oracle.json \
   data/out/smoke --limit 3 --bm25-only
 
-mempalace-bench beam data/beam/canonical/beam_100K.jsonl \
+palace-bench beam data/beam/canonical/beam_100K.jsonl \
   data/out/smoke --limit 3 --bm25-only
 ```
 
@@ -95,20 +95,20 @@ Skip the embedding model; tests lexical retrieval only.
 
 ```bash
 # LongMemEval
-mempalace-bench long-mem-eval data/longmemeval/longmemeval_oracle.json \
+palace-bench long-mem-eval data/longmemeval/longmemeval_oracle.json \
   data/out/longmemeval/oracle_bm25 --bm25-only
 
-mempalace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
+palace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
   data/out/longmemeval/s_cleaned_bm25 --bm25-only
 
 # BEAM
-mempalace-bench beam data/beam/canonical/beam_100K.jsonl \
+palace-bench beam data/beam/canonical/beam_100K.jsonl \
   data/out/beam/100K_bm25 --bm25-only
 
-mempalace-bench beam data/beam/canonical/beam_500K.jsonl \
+palace-bench beam data/beam/canonical/beam_500K.jsonl \
   data/out/beam/500K_bm25 --bm25-only
 
-mempalace-bench beam data/beam/canonical/beam_1M.jsonl \
+palace-bench beam data/beam/canonical/beam_1M.jsonl \
   data/out/beam/1M_bm25 --bm25-only
 ```
 
@@ -126,7 +126,7 @@ floor and cosine/BM25 weights from `embedding_models`.
 
 ```bash
 # Every embedding model on LongMemEval s_cleaned (~1–1.5 h on 16 threads)
-mempalace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
+palace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
   data/out/longmemeval/s_cleaned --model all
 ```
 
@@ -138,27 +138,27 @@ to `<output_dir>/<model-id>-<mode>/`. `exchange` is how Palace stores mined
 chats, and gives the README's exchange-pair row (~20 min on 16 threads):
 
 ```bash
-mempalace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
+palace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
   data/out/longmemeval/s_cleaned --model minilm-l6-v2-q8 --chunking exchange
 ```
 
 ```bash
 # LongMemEval — fast
-mempalace-bench long-mem-eval data/longmemeval/longmemeval_oracle.json \
+palace-bench long-mem-eval data/longmemeval/longmemeval_oracle.json \
   data/out/longmemeval/oracle
 
 # LongMemEval — long (~20–60 min)
-mempalace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
+palace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
   data/out/longmemeval/s_cleaned
 
 # BEAM
-mempalace-bench beam data/beam/canonical/beam_100K.jsonl \
+palace-bench beam data/beam/canonical/beam_100K.jsonl \
   data/out/beam/100K
 
-mempalace-bench beam data/beam/canonical/beam_500K.jsonl \
+palace-bench beam data/beam/canonical/beam_500K.jsonl \
   data/out/beam/500K
 
-mempalace-bench beam data/beam/canonical/beam_1M.jsonl \
+palace-bench beam data/beam/canonical/beam_1M.jsonl \
   data/out/beam/1M
 ```
 
@@ -169,7 +169,7 @@ mempalace-bench beam data/beam/canonical/beam_1M.jsonl \
 The runner now prints a progress line to **stderr** every N questions (interval scales with total: 1/10/25/50). The final JSON summary still goes to **stdout**, so you can split them:
 
 ```bash
-mempalace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
+palace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
   data/out/longmemeval/s_cleaned \
   > summary.json 2> progress.log
 tail -f progress.log    # in another terminal
@@ -178,7 +178,7 @@ tail -f progress.log    # in another terminal
 Or watch progress live while still seeing the summary:
 
 ```bash
-mempalace-bench long-mem-eval ... 2>&1 | tee run.log
+palace-bench long-mem-eval ... 2>&1 | tee run.log
 ```
 
 A progress line looks like:
@@ -191,7 +191,7 @@ For lower-level monitoring, from a second terminal:
 
 ```bash
 # CPU / runtime
-ps -o pid,pcpu,pmem,etime,command -p "$(pgrep -f mempalace-bench)"
+ps -o pid,pcpu,pmem,etime,command -p "$(pgrep -f palace-bench)"
 
 # Per-question progress (BufWriter flushes the cases file every few KB)
 watch -n 5 'wc -l data/out/longmemeval/s_cleaned/longmemeval_cases.jsonl'
@@ -205,7 +205,7 @@ Healthy signs: `pcpu` ≈ 95–100%, line count climbs steadily.
 To abort:
 
 ```bash
-pkill -INT mempalace-bench
+pkill -INT palace-bench
 ```
 
 ---
@@ -223,7 +223,7 @@ Where `<benchmark>` is `longmemeval` or `beam`.
 
 ## 7. Notes on BEAM scoring
 
-BEAM labels evidence at *turn* (`chat_id`) granularity, while `mempalace-bench` retrieves at *session* granularity. The Rust converter (`tools/beam-convert/`) maps each evidence chat_id back to the session that contains it.
+BEAM labels evidence at *turn* (`chat_id`) granularity, while `palace-bench` retrieves at *session* granularity. The Rust converter (`tools/beam-convert/`) maps each evidence chat_id back to the session that contains it.
 
 - `abstention` questions have `source_chat_ids: None` → they ingest+query but show up as `unscored_questions` in the summary. Expected, not a bug.
 - All other categories (`information_extraction`, `multi_session_reasoning`, `temporal_reasoning`, etc.) score normally against Recall@k.
