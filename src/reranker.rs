@@ -101,6 +101,7 @@ mod tests {
             coding_boost: 0.0,
             preference_match: 0.0,
             date_boost: 0.0,
+            source_boost: 0.0,
             rerank_score: None,
             combined: 0.3,
         }

@@ -225,6 +225,7 @@ fn time_phrases_lift_drawers_from_that_day() {
         now: chrono::DateTime::parse_from_rfc3339("2023-03-25T18:00:00+00:00")
             .unwrap()
             .to_utc(),
+        ..RankOptions::default()
     };
     let results = hybrid_search_with(
         &conn,
@@ -240,6 +241,51 @@ fn time_phrases_lift_drawers_from_that_day() {
     assert_eq!(results[0].drawer.source_file, "march.txt");
     assert!(results[0].date_boost > 0.1);
     assert!(results[1].date_boost < 0.001);
+}
+
+#[test]
+fn sources_matching_in_several_places_rank_higher() {
+    let conn = db::open_in_memory().expect("db should open");
+    for (source, chunk, text) in [
+        ("single.txt", 0, "garden tomatoes basil"),
+        ("several.txt", 0, "garden tomatoes"),
+        ("several.txt", 1, "tomatoes basil"),
+        ("", 0, "garden basil"),
+        ("", 1, "basil tomatoes"),
+    ] {
+        add_drawer(&conn, "w", "r", text, None, source, chunk, "test", 3.0).unwrap();
+    }
+    let search = |source_weight: f64| {
+        hybrid_search_with(
+            &conn,
+            "garden tomatoes basil",
+            None,
+            VectorSource::Hot,
+            palace::embedder::active_model(),
+            &DrawerFilter::default(),
+            10,
+            &RankOptions {
+                source_weight,
+                ..RankOptions::default()
+            },
+        )
+        .expect("hybrid search should work")
+    };
+
+    let alone = search(0.0);
+    assert_eq!(alone[0].drawer.source_file, "single.txt");
+    assert!(alone.iter().all(|result| result.source_boost == 0.0));
+
+    let together = search(0.5);
+    assert_eq!(together[0].drawer.source_file, "several.txt");
+    assert!(together[0].source_boost > 0.0);
+    assert!(
+        together
+            .iter()
+            .filter(|result| result.drawer.source_file.is_empty())
+            .all(|result| result.source_boost == 0.0),
+        "drawers without a source are not one source"
+    );
 }
 
 #[test]

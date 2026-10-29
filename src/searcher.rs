@@ -198,6 +198,7 @@ pub fn search_memories_with_options(
                 "coding_boost": r.coding_boost,
                 "preference_match": r.preference_match,
                 "date_boost": r.date_boost,
+                "source_boost": r.source_boost,
                 "rerank_score": r.rerank_score,
                 "intent": intent.as_str(),
                 "source_context": source_context,
@@ -253,6 +254,7 @@ fn merge_preference_results(
             coding_boost: 0.0,
             preference_match: pref.similarity,
             date_boost: 0.0,
+            source_boost: 0.0,
             rerank_score: None,
             combined,
             drawer: SearchResult {
