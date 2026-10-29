@@ -90,7 +90,7 @@ pub const MODELS: &[ModelSpec] = &[
         cosine_weight: 0.65,
         bm25_weight: 0.35,
         experimental: false,
-        summary: "default; MiniLM in int8, ~2x faster indexing than fp32, same recall",
+        summary: "default; MiniLM in int8, same recall as fp32, smaller download, faster indexing",
     },
     ModelSpec {
         id: LEGACY_MODEL_ID,
@@ -128,7 +128,7 @@ pub const MODELS: &[ModelSpec] = &[
         cosine_weight: 0.5,
         bm25_weight: 0.5,
         experimental: true,
-        summary: "12 layers, ~2.5x slower indexing; below MiniLM on the coding eval",
+        summary: "12 layers, ~2x slower indexing; below MiniLM on the coding eval",
     },
     ModelSpec {
         id: "bge-small-q8",
@@ -147,7 +147,7 @@ pub const MODELS: &[ModelSpec] = &[
         cosine_weight: 0.5,
         bm25_weight: 0.5,
         experimental: true,
-        summary: "bge-small in int8; ~1.2x slower indexing than MiniLM",
+        summary: "bge-small in int8; ~1.7x slower indexing than MiniLM",
     },
     ModelSpec {
         id: "bge-base-q8",
@@ -166,7 +166,7 @@ pub const MODELS: &[ModelSpec] = &[
         cosine_weight: 0.5,
         bm25_weight: 0.5,
         experimental: true,
-        summary: "768-dim, largest download, ~2.5x slower indexing",
+        summary: "768-dim, largest download, ~3x slower indexing",
     },
 ];
 

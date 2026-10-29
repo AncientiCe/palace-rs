@@ -216,7 +216,7 @@ loses memory.
 |---|---|---|---|
 | `minilm-l6-v2-q8` | all-MiniLM-L6-v2 | int8 | Default for new palaces: same recall as fp32, faster indexing, 23 MB download |
 | `minilm-l6-v2` | all-MiniLM-L6-v2 | fp32 | Palaces created before 0.19 run on it (90 MB download) |
-| `bge-small` | bge-small-en-v1.5 | fp32 | Experimental, about 2.5x slower indexing |
+| `bge-small` | bge-small-en-v1.5 | fp32 | Experimental, about 2x slower indexing |
 | `bge-small-q8` | bge-small-en-v1.5 | int8 | Experimental |
 | `bge-base-q8` | bge-base-en-v1.5 | int8 | Experimental, 768-dim |
 

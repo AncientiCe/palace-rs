@@ -4,6 +4,15 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Fixed
+
+- **`palace embeddings list` gives current indexing speeds.** The q8 entry
+  still claimed about 2x faster indexing than fp32, which stopped being true
+  when 0.19.0 made int8 models embed one text per call. The speed notes for
+  every model now match the 0.19.0 bake-off.
+
 ## [0.19.0] - 2026-10-29
 
 ### Added
