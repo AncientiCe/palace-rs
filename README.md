@@ -743,7 +743,7 @@ neighbours. On longer drawers (the synthetic speed corpus) q8 indexes about
 1.7x faster than fp32. BGE ranks best with a 0.5 cosine floor and an even cosine/BM25
 split, which its registry entry carries. A model ships as non-experimental
 only if it matches MiniLM on the coding-agent eval, so the BGE models stay
-experimental for now even though they win on real-palace probes. `verify`
+experimental for now; on real-palace probes they are about level. `verify`
 measures the same thing on your own palace before it switches.
 
 ### LongMemEval
@@ -755,9 +755,9 @@ questions are excluded, as is standard.
 | Configuration | Model | R@1 | R@5 | R@10 |
 |---|---|---:|---:|---:|
 | `oracle` split (sanity check) | `minilm-l6-v2` | 1.000 | 1.000 | 1.000 |
-| One drawer per session | `minilm-l6-v2` | 0.889 | 0.979 | 0.991 |
-| One drawer per session | `minilm-l6-v2-q8` | 0.891 | 0.979 | 0.991 |
-| **Exchange pairs**, as Palace mines chats | `minilm-l6-v2-q8` | **0.906** | **0.985** | **0.994** |
+| One drawer per session | `minilm-l6-v2` | 0.896 | 0.981 | 0.991 |
+| One drawer per session | `minilm-l6-v2-q8` | 0.898 | 0.981 | 0.991 |
+| **Exchange pairs**, as Palace mines chats | `minilm-l6-v2-q8` | **0.915** | **0.987** | **0.996** |
 
 The exchange-pair row is how Palace actually stores conversations: each
 session goes through the same normaliser and chunker as `palace mine-convos`
@@ -773,29 +773,37 @@ for comparison with other systems.
 - **Embedder:** MiniLM-L6-v2 (384-dim, ONNX, full precision or int8),
   512-token cap, local.
 - **Retrieval:** Palace's normal hybrid search (BM25 fused with cosine plus the
-  ranking boosts), top-K 10.
-- **No LLM at any stage**, no GPU, nothing tuned on LongMemEval.
+  ranking boosts), top-K 10. Each question is asked on its own
+  `question_date`, and each drawer is dated by its session, so relative
+  dates ("two weeks ago") resolve as they would in a live palace.
+- **No LLM at any stage**, no GPU. Nothing was tuned on `s_cleaned`: the one
+  ranking weight chosen on LongMemEval data (how much a session's other
+  matching chunks count) was picked on the `m_cleaned` split together with
+  probes from a real palace, then frozen before this run.
 - **Metric:** `recall_any@K` at session granularity.
 - **Hardware:** Windows, 16 threads.
 
 | Question type | Per session, `minilm-l6-v2` R@1 / R@5 | Exchange pairs, `q8` R@1 / R@5 |
 |---|---:|---:|
 | knowledge-update | 0.944 / 1.000 | 0.958 / 1.000 |
-| multi-session | 0.909 / 0.983 | 0.901 / 0.992 |
+| multi-session | 0.909 / 0.983 | 0.909 / 0.992 |
 | single-session-assistant | 1.000 / 1.000 | 1.000 / 1.000 |
-| single-session-preference | 0.633 / 0.833 | 0.767 / 0.900 |
+| single-session-preference | 0.633 / 0.867 | 0.767 / 0.933 |
 | single-session-user | 0.922 / 1.000 | 0.984 / 1.000 |
-| temporal-reasoning | 0.835 / 0.976 | 0.835 / 0.976 |
+| temporal-reasoning | 0.858 / 0.976 | 0.858 / 0.976 |
 
 The `oracle` split only contains the gold sessions, so it checks the pipeline
 rather than measuring retrieval. Preference questions are the weakest
 category, because "I prefer…" sentences rarely share keywords with the
-question. Most remaining temporal misses ask about relative dates ("a week
-ago"), which ranking does not use yet.
+question. Ranking now favours drawers from the time a question points at
+("10 days ago", "last Tuesday", "in the past month"), but the three
+remaining temporal misses with exchange pairs lose on topic, not on date:
+the gold chunk scores below unrelated ones from the same days.
 
-An earlier run (May 2026, before the coding-agent boosts) scored 0.889 /
-0.981 / 0.991 per session. Later ranker changes cost two questions; one is
-fixed, the other comes from the convention boost firing on "should".
+The previous release scored 0.906 / 0.985 / 0.994 with exchange pairs and
+0.891 / 0.979 / 0.991 per session (`q8`). Date-aware ranking, weighting a
+session by its other matching chunks, and no longer reading "should I" as a
+convention question account for the difference.
 
 </details>
 
