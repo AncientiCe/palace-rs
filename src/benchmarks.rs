@@ -617,6 +617,7 @@ fn run_case(
             .as_deref()
             .and_then(parse_dataset_date)
             .unwrap_or_else(chrono::Utc::now),
+        ..RankOptions::default()
     };
     let results = hybrid_search_with(
         &conn,
