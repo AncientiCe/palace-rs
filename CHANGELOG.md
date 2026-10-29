@@ -30,6 +30,15 @@ This Rust implementation uses its own `0.x` version track.
 
 ### Changed
 
+- **New palaces start on `minilm-l6-v2-q8`.** The int8 MiniLM matches fp32
+  recall on LongMemEval and the coding-agent eval, downloads 23 MB instead of
+  90 MB, and indexes faster. Existing palaces keep the model they recorded;
+  a palace from before 0.18.0 with no recorded model is on fp32
+  `minilm-l6-v2` (now `embedding_models::LEGACY_MODEL_ID`). Nothing switches
+  without `palace embeddings migrate`, and `PALACE_EMBEDDING_MODEL` or
+  `embedding_model` in `config.json` still choose a new palace's model.
+  `embedding_models::DEFAULT_MODEL_ID` is now `minilm-l6-v2-q8` and is the
+  first entry of `MODELS`.
 - **"Should I ...?" no longer counts as asking about a convention.** Any
   "should" in a query fired the convention boost, so an advice question such
   as "what should I serve for dinner?" lifted drawers that merely say "always"

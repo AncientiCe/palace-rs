@@ -58,8 +58,12 @@ pub struct ModelSpec {
     pub summary: &'static str,
 }
 
-/// Id of the model new and existing palaces use unless told otherwise.
-pub const DEFAULT_MODEL_ID: &str = "minilm-l6-v2";
+/// Id of the model new palaces start on unless configured otherwise.
+pub const DEFAULT_MODEL_ID: &str = "minilm-l6-v2-q8";
+
+/// Id of the model every palace used before palaces recorded their model
+/// (before 0.18.0). A palace with vectors and no recorded model is on it.
+pub const LEGACY_MODEL_ID: &str = "minilm-l6-v2";
 
 const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
 
@@ -71,25 +75,6 @@ const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant p
 pub const MODELS: &[ModelSpec] = &[
     ModelSpec {
         id: DEFAULT_MODEL_ID,
-        name: "all-MiniLM-L6-v2",
-        precision: "fp32",
-        repo: "Qdrant/all-MiniLM-L6-v2-onnx",
-        model_file: "model.onnx",
-        vocab_file: "vocab.txt",
-        pooling: Pooling::Mean,
-        dim: 384,
-        max_seq_len: 512,
-        query_prefix: "",
-        doc_prefix: "",
-        download_bytes: 90_619_138,
-        cosine_floor: 0.0,
-        cosine_weight: 0.65,
-        bm25_weight: 0.35,
-        experimental: false,
-        summary: "default; 6 layers, fast, solid recall",
-    },
-    ModelSpec {
-        id: "minilm-l6-v2-q8",
         name: "all-MiniLM-L6-v2",
         precision: "int8",
         repo: "Xenova/all-MiniLM-L6-v2",
@@ -105,7 +90,26 @@ pub const MODELS: &[ModelSpec] = &[
         cosine_weight: 0.65,
         bm25_weight: 0.35,
         experimental: false,
-        summary: "MiniLM in int8: ~2x faster indexing, same recall in the bake-off",
+        summary: "default; MiniLM in int8, ~2x faster indexing than fp32, same recall",
+    },
+    ModelSpec {
+        id: LEGACY_MODEL_ID,
+        name: "all-MiniLM-L6-v2",
+        precision: "fp32",
+        repo: "Qdrant/all-MiniLM-L6-v2-onnx",
+        model_file: "model.onnx",
+        vocab_file: "vocab.txt",
+        pooling: Pooling::Mean,
+        dim: 384,
+        max_seq_len: 512,
+        query_prefix: "",
+        doc_prefix: "",
+        download_bytes: 90_619_138,
+        cosine_floor: 0.0,
+        cosine_weight: 0.65,
+        bm25_weight: 0.35,
+        experimental: false,
+        summary: "MiniLM in fp32; palaces made before 0.19 run on it",
     },
     ModelSpec {
         id: "bge-small",

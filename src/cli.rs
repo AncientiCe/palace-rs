@@ -1018,7 +1018,12 @@ fn handle_embeddings(config: &PalaceConfig, action: EmbeddingsAction) -> Result<
             let conn = crate::db::open(&palace_db)?;
             migration::active_model_id(&conn)?
         } else {
-            crate::embedding_models::DEFAULT_MODEL_ID.to_string()
+            // No palace yet: the model a new one would start on.
+            config
+                .embedding_model()
+                .and_then(|id| crate::embedding_models::find(&id))
+                .map_or(crate::embedding_models::DEFAULT_MODEL_ID, |spec| spec.id)
+                .to_string()
         };
         for spec in crate::embedding_models::MODELS {
             println!(

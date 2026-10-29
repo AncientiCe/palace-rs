@@ -54,7 +54,7 @@ pub fn run() -> Result<()> {
     info!(palace = %db_path.display(), "Palace MCP server starting");
 
     // Start loading the embedding model now, off the request path — otherwise
-    // the ~90MB HuggingFace download (on a cold cache) plus ONNX session
+    // the 23-90MB HuggingFace download (on a cold cache) plus ONNX session
     // build happens inside whichever tool call touches embeddings first,
     // which can exceed that call's timeout on its own.
     crate::embedder::warm_up_in_background();
