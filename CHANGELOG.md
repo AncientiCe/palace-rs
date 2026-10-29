@@ -21,6 +21,13 @@ This Rust implementation uses its own `0.x` version track.
   ago" about half a month either side. Each result reports the bonus as
   `date_boost`. `ranker::hybrid_search_with` takes `RankOptions` to rank as
   if asked at another moment.
+- **A source that matches in several places ranks higher.** Each drawer gets
+  a tenth of the score of the best other matching drawer from the same
+  conversation or file, so a source with several relevant chunks beats one
+  with a single lucky chunk. Order within a source is unchanged, and drawers
+  without a source file are never grouped. Results report the bonus as
+  `source_boost`; `RankOptions::source_weight` sets the share (0 turns it
+  off).
 
 ### Changed
 

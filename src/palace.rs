@@ -130,6 +130,9 @@ pub struct PalaceSearchResult {
     /// Bonus for matching the query's time phrases ("two weeks ago").
     #[serde(default)]
     pub date_boost: f64,
+    /// Bonus from other matching drawers of the same source.
+    #[serde(default)]
+    pub source_boost: f64,
     pub combined: f64,
     pub intent: Option<QueryIntent>,
     pub rerank_score: Option<f64>,
@@ -265,6 +268,7 @@ impl Palace {
                 coding_boost: result.coding_boost,
                 preference_match: result.preference_match,
                 date_boost: result.date_boost,
+                source_boost: result.source_boost,
                 combined: result.combined,
                 intent: Some(intent),
                 rerank_score: result.rerank_score,
@@ -454,6 +458,7 @@ fn merge_preference_results(
             coding_boost: 0.0,
             preference_match: pref.similarity,
             date_boost: 0.0,
+            source_boost: 0.0,
             rerank_score: None,
             combined,
             drawer: SearchResult {

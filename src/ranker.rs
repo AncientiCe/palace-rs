@@ -20,6 +20,11 @@ const RECENCY_LAMBDA: f64 = 0.02;
 /// Bonus for a drawer created on the day a query's time phrase points at
 /// ("two weeks ago"), the size of one intent boost.
 const DATE_WEIGHT: f64 = 0.12;
+/// Share of a source's best other matching drawer added to a drawer's score
+/// (see `add_source_evidence`). Chosen on LongMemEval M and known-item probes
+/// over whole sources of a real palace, not on S: M holds its best R@5 from
+/// 0.05 to 0.2, and the real palace starts losing probes above 0.1.
+const SOURCE_WEIGHT: f64 = 0.1;
 
 /// Compute an exponential recency bonus based on `filed_at` (RFC 3339 string).
 /// Returns a value in [0, RECENCY_WEIGHT].
@@ -49,11 +54,17 @@ pub struct RankOptions {
     /// When the query is asked. Recency and relative time phrases ("last
     /// week") count back from here.
     pub now: DateTime<Utc>,
+    /// Share of the best other matching drawer from the same source added to
+    /// each drawer's score; 0 ranks every drawer on its own.
+    pub source_weight: f64,
 }
 
 impl Default for RankOptions {
     fn default() -> Self {
-        Self { now: Utc::now() }
+        Self {
+            now: Utc::now(),
+            source_weight: SOURCE_WEIGHT,
+        }
     }
 }
 
@@ -66,6 +77,8 @@ pub struct HybridResult {
     pub preference_match: f64,
     /// Bonus for matching the query's time phrases ("two weeks ago").
     pub date_boost: f64,
+    /// Bonus from other matching drawers of the same source.
+    pub source_boost: f64,
     pub rerank_score: Option<f64>,
     pub combined: f64,
 }
@@ -150,6 +163,7 @@ pub fn hybrid_search_with(
                     coding_boost: 0.0,
                     preference_match: 0.0,
                     date_boost: 0.0,
+                    source_boost: 0.0,
                     rerank_score: None,
                     combined: 0.0,
                 },
@@ -179,6 +193,7 @@ pub fn hybrid_search_with(
                     coding_boost: 0.0,
                     preference_match: 0.0,
                     date_boost: 0.0,
+                    source_boost: 0.0,
                     rerank_score: None,
                     combined: 0.0,
                 },
@@ -212,10 +227,13 @@ pub fn hybrid_search_with(
             + result.preference_match
             + result.date_boost
             + recency;
-        result.drawer.similarity = (result.combined * 1000.0).round() / 1000.0;
     }
 
     let mut results: Vec<_> = by_id.into_values().collect();
+    add_source_evidence(&mut results, options.source_weight);
+    for result in &mut results {
+        result.drawer.similarity = (result.combined * 1000.0).round() / 1000.0;
+    }
     results.sort_by(|a, b| {
         b.combined
             .partial_cmp(&a.combined)
@@ -223,6 +241,43 @@ pub fn hybrid_search_with(
     });
     results.truncate(n_results);
     Ok(results)
+}
+
+/// Lift each drawer by `weight` times the best other matching drawer from the
+/// same source. A conversation or file that matches in several places is
+/// likelier the one meant than one with a single lucky chunk. A source's top
+/// drawer scores best + weight × second best, and order within a source holds.
+fn add_source_evidence(results: &mut [HybridResult], weight: f64) {
+    if weight <= 0.0 {
+        return;
+    }
+    let mut top_two: HashMap<String, (f64, f64)> = HashMap::new();
+    for result in results.iter() {
+        if result.drawer.source_file.is_empty() {
+            continue;
+        }
+        let (best, second) = top_two
+            .entry(result.drawer.source_file.clone())
+            .or_insert((0.0, 0.0));
+        if result.combined > *best {
+            *second = *best;
+            *best = result.combined;
+        } else if result.combined > *second {
+            *second = result.combined;
+        }
+    }
+    for result in results.iter_mut() {
+        let Some(&(best, second)) = top_two.get(&result.drawer.source_file) else {
+            continue;
+        };
+        let sibling = if result.combined >= best {
+            second
+        } else {
+            best
+        };
+        result.source_boost = weight * sibling;
+        result.combined += result.source_boost;
+    }
 }
 
 fn bm25_scores(
