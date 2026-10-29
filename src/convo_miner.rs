@@ -294,6 +294,33 @@ pub fn mine_convos(
     dry_run: bool,
     extract_mode: ExtractMode,
 ) -> Result<()> {
+    mine_convos_with(
+        conn,
+        convo_dir,
+        wing,
+        agent,
+        limit,
+        dry_run,
+        extract_mode,
+        false,
+    )
+}
+
+/// [`mine_convos`], optionally re-mining files that were already filed.
+///
+/// With `force`, an already-mined file loses its drawers and is chunked
+/// again, so palaces mined by an older chunker pick up the current one.
+#[allow(clippy::too_many_arguments)]
+pub fn mine_convos_with(
+    conn: &mut Connection,
+    convo_dir: &Path,
+    wing: Option<&str>,
+    agent: &str,
+    limit: usize,
+    dry_run: bool,
+    extract_mode: ExtractMode,
+    force: bool,
+) -> Result<()> {
     let convo_path = convo_dir.canonicalize().context("resolving convo dir")?;
     let wing = wing
         .unwrap_or_else(|| {
@@ -324,6 +351,7 @@ pub fn mine_convos(
 
     let mut total_drawers = 0usize;
     let mut files_skipped = 0usize;
+    let mut files_remined = 0usize;
     let mut room_counts: HashMap<String, usize> = HashMap::new();
 
     // Batched into `MINE_BATCH_SIZE`-file transactions for the same reason as
@@ -345,11 +373,13 @@ pub fn mine_convos(
             let i = batch_index * crate::miner::MINE_BATCH_SIZE + offset;
             let source_file = filepath.to_string_lossy().to_string();
 
-            if let Some(tx) = &tx {
-                if file_already_mined(tx, &source_file)? {
-                    files_skipped += 1;
-                    continue;
-                }
+            let already_mined = match &tx {
+                Some(tx) => file_already_mined(tx, &source_file)?,
+                None => false,
+            };
+            if already_mined && !force {
+                files_skipped += 1;
+                continue;
             }
 
             let content = match normalize_file(filepath) {
@@ -400,6 +430,13 @@ pub fn mine_convos(
             // panicking if that invariant ever changes.
             let Some(tx) = &tx else { continue };
 
+            // Old drawers go only once the file has chunks to replace them, so
+            // a file that no longer reads or chunks keeps what it had.
+            if already_mined {
+                crate::store::delete_drawers_for_file(tx, &source_file)?;
+                files_remined += 1;
+            }
+
             let mut drawers_added = 0usize;
             let chunk_texts: Vec<&str> = chunks_with_rooms
                 .iter()
@@ -444,6 +481,9 @@ pub fn mine_convos(
     println!("  Done.");
     println!("  Files processed: {}", files.len() - files_skipped);
     println!("  Files skipped (already filed): {files_skipped}");
+    if force {
+        println!("  Files re-mined (--force): {files_remined}");
+    }
     println!("  Drawers filed: {total_drawers}");
     if !room_counts.is_empty() {
         println!("\n  By room:");

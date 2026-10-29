@@ -4,6 +4,16 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Added
+
+- **`palace mine-convos --force` re-mines conversations already filed.** Each
+  file's old drawers are replaced with fresh chunks, so conversations mined
+  before 0.18.1 can pick up the whole-reply exchange chunking. Without
+  `--force`, files already mined are still skipped. Library users get the same
+  through `convo_miner::mine_convos_with`.
+
 ## [0.18.2] - 2026-10-27
 
 ### Fixed
