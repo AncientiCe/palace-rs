@@ -408,7 +408,7 @@ pub fn set_active_model(id: &str) -> Result<&'static ModelSpec> {
 }
 
 /// Warm the active embedder in a background thread so the model download
-/// (~90MB on a cold HuggingFace cache) and ONNX session build don't happen
+/// (23-90MB on a cold HuggingFace cache) and ONNX session build don't happen
 /// inside a client's first `palace_mine` tool call, where they can exceed the
 /// client's timeout on their own. Idempotent — `get_or_try_init` inside
 /// `get_embedder` makes a redundant call a no-op.
@@ -453,8 +453,17 @@ fn run_inference(embedder: &Embedder, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
     let mut order: Vec<usize> = (0..encodings.len()).collect();
     order.sort_by_key(|&i| encodings[i].input_ids.len());
 
+    // int8 models quantize activations with scales taken over the whole
+    // batch, so a text's vector would shift with its neighbours (cosine as
+    // low as 0.976). One text per call keeps a text's vector the same
+    // whether it is embedded alone or with others.
+    let max_batch = if embedder.spec.precision == "int8" {
+        1
+    } else {
+        MAX_BATCH
+    };
     let mut results: Vec<Option<Vec<f32>>> = vec![None; encodings.len()];
-    for chunk in order.chunks(MAX_BATCH) {
+    for chunk in order.chunks(max_batch) {
         let batch: Vec<&EncodedInput> = chunk.iter().map(|&i| &encodings[i]).collect();
         let vectors = run_batch(embedder, &batch)?;
         for (&i, vector) in chunk.iter().zip(vectors) {
