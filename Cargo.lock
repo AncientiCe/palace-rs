@@ -1443,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "palace-rs"
-version = "0.18.2"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "blake3",
