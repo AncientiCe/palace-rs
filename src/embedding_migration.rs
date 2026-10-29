@@ -149,9 +149,10 @@ fn require_model(id: &str) -> Result<&'static ModelSpec> {
 }
 
 /// Record the active model for a palace that has none yet. A palace with no
-/// drawers starts on `wanted` (the configured model); one that already has
-/// vectors made before models were recorded is marked as the default, which
-/// is the only model older releases used. Stored vectors are not touched.
+/// drawers starts on `wanted` (the configured model) or the default; one that
+/// already has vectors made before models were recorded is marked as the
+/// legacy model, the only one older releases used. Stored vectors are not
+/// touched.
 pub fn ensure_active_model(conn: &Connection, wanted: Option<&str>) -> Result<()> {
     if meta_get(conn, META_ACTIVE)?.is_some() {
         return Ok(());
@@ -159,17 +160,21 @@ pub fn ensure_active_model(conn: &Connection, wanted: Option<&str>) -> Result<()
     let has_drawers: bool = conn
         .query_row("SELECT EXISTS(SELECT 1 FROM drawers)", [], |row| row.get(0))
         .context("checking for drawers")?;
-    let id = match wanted.and_then(embedding_models::find) {
-        Some(spec) if !has_drawers => spec.id,
-        _ => embedding_models::DEFAULT_MODEL_ID,
+    let id = if has_drawers {
+        embedding_models::LEGACY_MODEL_ID
+    } else {
+        wanted
+            .and_then(embedding_models::find)
+            .map_or(embedding_models::DEFAULT_MODEL_ID, |spec| spec.id)
     };
     meta_set(conn, META_ACTIVE, id)
 }
 
-/// The palace's active model id as recorded in `meta`.
+/// The palace's active model id as recorded in `meta`; a palace that never
+/// recorded one predates model choice and is on the legacy model.
 pub fn active_model_id(conn: &Connection) -> Result<String> {
     Ok(meta_get(conn, META_ACTIVE)?
-        .unwrap_or_else(|| embedding_models::DEFAULT_MODEL_ID.to_string()))
+        .unwrap_or_else(|| embedding_models::LEGACY_MODEL_ID.to_string()))
 }
 
 /// Point the process embedder at the palace's active model. Long-running

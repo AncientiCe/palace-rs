@@ -129,7 +129,7 @@ cargo build --release   # binary at target/release/palace
 | Windows x86_64 | Supported |
 | macOS Intel | Not supported (no ONNX Runtime build) |
 
-The embedding model (~90 MB) downloads from Hugging Face the first time you
+The embedding model (~23 MB) downloads from Hugging Face the first time you
 mine or search, then stays cached in `~/.cache/huggingface`.
 
 ---
@@ -214,21 +214,21 @@ loses memory.
 
 | Model id | Model | Precision | Notes |
 |---|---|---|---|
-| `minilm-l6-v2` | all-MiniLM-L6-v2 | fp32 | Default |
-| `minilm-l6-v2-q8` | all-MiniLM-L6-v2 | int8 | About 2x faster indexing, same recall in the bake-off |
+| `minilm-l6-v2-q8` | all-MiniLM-L6-v2 | int8 | Default for new palaces: same recall as fp32, faster indexing, 23 MB download |
+| `minilm-l6-v2` | all-MiniLM-L6-v2 | fp32 | Palaces created before 0.19 run on it (90 MB download) |
 | `bge-small` | bge-small-en-v1.5 | fp32 | Experimental, about 2.5x slower indexing |
 | `bge-small-q8` | bge-small-en-v1.5 | int8 | Experimental |
 | `bge-base-q8` | bge-base-en-v1.5 | int8 | Experimental, 768-dim |
 
-Experimental models scored below MiniLM on the coding-agent eval, though
-higher on probes from a real palace (see the
+Experimental models scored below MiniLM on the coding-agent eval and about
+level on probes from a real palace (see the
 [bake-off](#embedding-model-bake-off)). You can try them on your own palace:
 verification decides whether it switches.
 
 ```bash
 palace embeddings list                       # models, which is active, which are downloaded
 palace embeddings estimate minilm-l6-v2-q8   # time, disk and latency, measured on this machine
-palace embeddings migrate minilm-l6-v2-q8    # build, verify, switch
+palace embeddings migrate minilm-l6-v2-q8    # build, verify, switch (e.g. an older fp32 palace)
 palace embeddings rollback                   # back to the previous model, instantly
 palace embeddings cleanup                    # drop the previous model's vectors
 ```
@@ -649,7 +649,7 @@ Settings load in this order: environment variables, then
 | `PALACE_SOURCE_DIR` | `~/Desktop/transcripts` | Default source for `palace split` |
 | `PALACE_MINE_TRACE` | off | `1` prints per-stage mining timings |
 | `PALACE_MCP_MODE` | `local` | `local` or `remote` |
-| `PALACE_EMBEDDING_MODEL` | `minilm-l6-v2` | Embedding model for new palaces (see [embedding models](#embedding-models)) |
+| `PALACE_EMBEDDING_MODEL` | `minilm-l6-v2-q8` | Embedding model for new palaces (see [embedding models](#embedding-models)) |
 | `PALACE_EMBEDDING_LATENCY_BUDGET_MS` | 2x current p95 | Query-latency budget for `palace embeddings verify` |
 | `PALACE_EMBED_THREADS` | all cores | ONNX threads used for embedding |
 | `PALACE_REMOTE_ENDPOINT` | none | Palace Server URL (host, base URL, or full `/mcp` URL) |
@@ -730,14 +730,17 @@ PALACE_RUN_BAKEOFF=1 PALACE_BAKEOFF_DB=~/.palace/palace/palace.db \
 
 | Model | Coding eval R@1 / R@5 (tuned) | Palace probes R@1 / R@5 | Indexing | Query p95 |
 |---|---:|---:|---:|---:|
-| `minilm-l6-v2` (default) | 0.902 / 1.000 | 0.850 / 0.970 | 112 drawers/s | 2.3 ms |
-| `minilm-l6-v2-q8` | **0.922** / 1.000 | 0.860 / 0.980 | **204 drawers/s** | 2.6 ms |
-| `bge-small` | 0.863 / 1.000 | 0.910 / 0.985 | 55 drawers/s | 7.2 ms |
-| `bge-small-q8` | 0.863 / 1.000 | 0.915 / 0.985 | 103 drawers/s | 5.5 ms |
-| `bge-base-q8` | 0.863 / 1.000 | **0.920 / 0.985** | 39 drawers/s | 11.0 ms |
+| `minilm-l6-v2-q8` (default) | **0.922** / 1.000 | **0.900** / 0.970 | **150 drawers/s** | 2.0 ms |
+| `minilm-l6-v2` | **0.922** / 1.000 | 0.890 / 0.975 | 132 drawers/s | 2.1 ms |
+| `bge-small` | 0.882 / 1.000 | **0.905 / 0.980** | 68 drawers/s | 5.9 ms |
+| `bge-small-q8` | 0.882 / 1.000 | 0.890 / 0.980 | 79 drawers/s | 4.5 ms |
+| `bge-base-q8` | 0.882 / 1.000 | 0.900 / 0.980 | 40 drawers/s | 6.5 ms |
 
-Hybrid recall, 400 drawers sampled from a 10,700-drawer palace, Windows,
-16 threads. BGE ranks best with a 0.5 cosine floor and an even cosine/BM25
+Hybrid recall, 400 drawers sampled from a 10,800-drawer palace, Windows,
+16 threads. int8 models embed one text per call: their activation scales
+cover the whole batch, so batching would make a text's vector depend on its
+neighbours. On longer drawers (the synthetic speed corpus) q8 indexes about
+1.7x faster than fp32. BGE ranks best with a 0.5 cosine floor and an even cosine/BM25
 split, which its registry entry carries. A model ships as non-experimental
 only if it matches MiniLM on the coding-agent eval, so the BGE models stay
 experimental for now even though they win on real-palace probes. `verify`

@@ -1,7 +1,8 @@
 //! Switching a palace between embedding models.
 //!
-//! The target here is `minilm-l6-v2-q8`, the smallest download. The active
-//! model is process-wide, so tests that switch it hold `SERIAL`.
+//! New palaces start on the default model (`minilm-l6-v2-q8`); the target
+//! here is the legacy fp32 MiniLM. The active model is process-wide, so tests
+//! that switch it hold `SERIAL`.
 
 use palace::embedding_migration::{self as migration, OwnerKind};
 use palace::embedding_models;
@@ -10,7 +11,7 @@ use palace::store::{add_drawer, DrawerFilter};
 use rusqlite::Connection;
 use std::sync::Mutex;
 
-const TARGET: &str = "minilm-l6-v2-q8";
+const TARGET: &str = embedding_models::LEGACY_MODEL_ID;
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -97,7 +98,7 @@ fn new_palace_records_default_model_and_has_vector_table() {
 }
 
 #[test]
-fn legacy_palace_is_marked_default_without_rewriting_vectors() {
+fn legacy_palace_is_marked_legacy_without_rewriting_vectors() {
     let _guard = lock();
     let dir = tempfile::tempdir().unwrap();
     let conn = seeded_palace(&dir);
@@ -109,9 +110,10 @@ fn legacy_palace_is_marked_default_without_rewriting_vectors() {
     let conn = palace::db::open(&dir.path().join("palace.db")).unwrap();
     assert_eq!(
         migration::active_model_id(&conn).unwrap(),
-        embedding_models::DEFAULT_MODEL_ID
+        embedding_models::LEGACY_MODEL_ID
     );
     assert_eq!(hot_vectors(&conn), before);
+    palace::embedder::set_active_model(embedding_models::DEFAULT_MODEL_ID).unwrap();
 }
 
 #[test]
@@ -131,7 +133,8 @@ fn configured_model_applies_only_to_empty_palaces() {
     migration::ensure_active_model(&used, Some(TARGET)).unwrap();
     assert_eq!(
         migration::active_model_id(&used).unwrap(),
-        embedding_models::DEFAULT_MODEL_ID
+        embedding_models::LEGACY_MODEL_ID,
+        "a palace with vectors and no recorded model predates model choice"
     );
     palace::embedder::set_active_model(embedding_models::DEFAULT_MODEL_ID).unwrap();
 }

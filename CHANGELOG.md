@@ -13,7 +13,6 @@ This Rust implementation uses its own `0.x` version track.
   before 0.18.1 can pick up the whole-reply exchange chunking. Without
   `--force`, files already mined are still skipped. Library users get the same
   through `convo_miner::mine_convos_with`.
-
 - **Search understands relative time.** A query such as "what did I buy 10
   days ago?", "last Tuesday", "last week" or "in March" now favours drawers
   created around that time, counted back from when the query is asked. The
@@ -31,12 +30,32 @@ This Rust implementation uses its own `0.x` version track.
 
 ### Changed
 
+- **New palaces start on `minilm-l6-v2-q8`.** The int8 MiniLM matches fp32
+  recall on LongMemEval and the coding-agent eval, downloads 23 MB instead of
+  90 MB, and indexes faster. Existing palaces keep the model they recorded;
+  a palace from before 0.18.0 with no recorded model is on fp32
+  `minilm-l6-v2` (now `embedding_models::LEGACY_MODEL_ID`). Nothing switches
+  without `palace embeddings migrate`, and `PALACE_EMBEDDING_MODEL` or
+  `embedding_model` in `config.json` still choose a new palace's model.
+  `embedding_models::DEFAULT_MODEL_ID` is now `minilm-l6-v2-q8` and is the
+  first entry of `MODELS`.
 - **"Should I ...?" no longer counts as asking about a convention.** Any
   "should" in a query fired the convention boost, so an advice question such
   as "what should I serve for dinner?" lifted drawers that merely say "always"
   or "never". "Should we", "should agents" and other shared-norm phrasing
   still count. Coding-agent eval: MiniLM hybrid R@1 0.902 to 0.922, other
   models and real-palace probes unchanged.
+
+### Fixed
+
+- **int8 models give a text the same vector alone or in a batch.** ONNX
+  int8 models scale activations over the whole batch, so a drawer mined with
+  others got a vector up to 0.024 cosine away from the one it would get
+  alone, and from how its query side is embedded. int8 models
+  (`minilm-l6-v2-q8`, `bge-small-q8`, `bge-base-q8`) now embed one text per
+  call. Indexing is slower than batched int8 but still faster than fp32 in
+  the bake-off. Palaces already on an int8 model keep their vectors until
+  `palace upgrade-embeddings` rebuilds them.
 
 ## [0.18.2] - 2026-10-27
 
