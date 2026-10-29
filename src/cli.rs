@@ -80,6 +80,9 @@ enum Commands {
         /// Preview without storing
         #[arg(long)]
         dry_run: bool,
+        /// Re-mine files that were already filed, replacing their drawers
+        #[arg(long)]
+        force: bool,
     },
     /// Semantic search over the palace
     Search {
@@ -468,6 +471,7 @@ pub fn run() -> Result<()> {
             mode,
             limit,
             dry_run,
+            force,
         } => {
             let extract_mode = match mode.as_str() {
                 "general" => ExtractMode::General,
@@ -475,7 +479,7 @@ pub fn run() -> Result<()> {
             };
             let db_path = config.palace_db_path();
             let mut conn = crate::db::open(&db_path)?;
-            crate::convo_miner::mine_convos(
+            crate::convo_miner::mine_convos_with(
                 &mut conn,
                 &dir,
                 wing.as_deref(),
@@ -483,6 +487,7 @@ pub fn run() -> Result<()> {
                 limit,
                 dry_run,
                 extract_mode,
+                force,
             )?;
         }
 

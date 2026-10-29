@@ -1,4 +1,4 @@
-use palace::convo_miner::{mine_convos, ExtractMode};
+use palace::convo_miner::{mine_convos, mine_convos_with, ExtractMode};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -157,6 +157,57 @@ fn mine_convos_rerun_skips_already_mined_files() {
     assert_eq!(
         second_count, first_count,
         "re-mining the same conversation directory should not duplicate drawers"
+    );
+}
+
+#[test]
+fn mine_convos_force_replaces_drawers_of_already_mined_files() {
+    let convo_dir = TempDir::new().unwrap();
+    write_test_convos(convo_dir.path(), 3);
+    let mut conn = palace::db::open_in_memory().unwrap();
+    let mine = |conn: &mut rusqlite::Connection, force: bool| {
+        mine_convos_with(
+            conn,
+            convo_dir.path(),
+            Some("convo_force_test"),
+            "test",
+            0,
+            false,
+            ExtractMode::Exchange,
+            force,
+        )
+        .unwrap();
+    };
+
+    mine(&mut conn, false);
+    let first_count = palace::store::count_drawers(&conn).unwrap();
+
+    // A file edited after mining stays stale without --force.
+    let edited = convo_dir.path().join("chat_000.txt");
+    std::fs::write(
+        &edited,
+        "Edited conversation about a replacement marker named zebrafinch, long \
+         enough to be chunked into a drawer of its own.",
+    )
+    .unwrap();
+    mine(&mut conn, false);
+    let has_marker = |conn: &rusqlite::Connection| -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM drawers WHERE content LIKE '%zebrafinch%'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    };
+    assert!(!has_marker(&conn), "plain re-mine must skip mined files");
+
+    mine(&mut conn, true);
+    assert!(has_marker(&conn), "--force must re-chunk mined files");
+    assert_eq!(
+        palace::store::count_drawers(&conn).unwrap(),
+        first_count,
+        "--force must replace drawers, not add duplicates"
     );
 }
 

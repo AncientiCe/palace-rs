@@ -100,6 +100,7 @@ mod tests {
             bm25: 0.0,
             coding_boost: 0.0,
             preference_match: 0.0,
+            date_boost: 0.0,
             rerank_score: None,
             combined: 0.3,
         }

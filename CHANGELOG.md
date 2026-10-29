@@ -6,6 +6,51 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Added
+
+- **`palace mine-convos --force` re-mines conversations already filed.** Each
+  file's old drawers are replaced with fresh chunks, so conversations mined
+  before 0.18.1 can pick up the whole-reply exchange chunking. Without
+  `--force`, files already mined are still skipped. Library users get the same
+  through `convo_miner::mine_convos_with`.
+
+- **Search understands relative time.** A query such as "what did I buy 10
+  days ago?", "last Tuesday", "last week" or "in March" now favours drawers
+  created around that time, counted back from when the query is asked. The
+  window widens with distance: "yesterday" means about a day, "two months
+  ago" about half a month either side. Each result reports the bonus as
+  `date_boost`. `ranker::hybrid_search_with` takes `RankOptions` to rank as
+  if asked at another moment.
+
+### Changed
+
+- **"Should I ...?" no longer counts as asking about a convention.** Any
+  "should" in a query fired the convention boost, so an advice question such
+  as "what should I serve for dinner?" lifted drawers that merely say "always"
+  or "never". "Should we", "should agents" and other shared-norm phrasing
+  still count. Coding-agent eval: MiniLM hybrid R@1 0.902 to 0.922, other
+  models and real-palace probes unchanged.
+
+## [0.18.2] - 2026-10-27
+
+### Fixed
+
+- **The stop reminder no longer derails Cursor.** Cursor posts a stop hook's
+  reply as a new user message. It also runs the hooks in
+  `~/.claude/settings.json`, so Palace's save reminder interrupted almost every
+  turn. No stop hook replies to Cursor now. `palace install` stops registering
+  the Cursor `stop` hook and removes the `palace-stop` entry and scripts left
+  by earlier installs.
+- **The prompt hook reminds the agent to save instead.** Once a session has
+  done real work and saved nothing, each prompt's context carries a one-line
+  reminder to call `palace_diary_write` and `palace_kg_add`. In Cursor this
+  arrives through the Claude Code prompt hook.
+- **Cursor's Palace calls count as Palace use.** Cursor reports them as
+  `MCP:palace_*`. The hooks now recognise that form, so a Cursor session that
+  used Palace is no longer told "Palace not consulted yet".
+
+## [0.18.1] - 2026-10-25
+
 ### Fixed
 
 - **Intent boosts no longer fire on words buried inside other words.** The

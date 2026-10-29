@@ -811,7 +811,7 @@ fn palace_commands_for(val: &Value, event: &str) -> Vec<String> {
 }
 
 #[test]
-fn install_cursor_hook_registers_post_tool_use_and_stop() {
+fn install_cursor_hook_registers_post_tool_use_without_stop() {
     let temp = TempDir::new().unwrap();
     let binary = fake_binary(temp.path());
 
@@ -828,9 +828,10 @@ fn install_cursor_hook_registers_post_tool_use_and_stop() {
         !palace_commands_for(&val, "postToolUse").is_empty(),
         "postToolUse palace entry missing: {val}"
     );
+    // A Cursor stop followup becomes a new user turn, so Palace installs none.
     assert!(
-        !palace_commands_for(&val, "stop").is_empty(),
-        "stop palace entry missing: {val}"
+        palace_commands_for(&val, "stop").is_empty(),
+        "cursor must not get a palace stop entry: {val}"
     );
 
     // postToolUse should filter to investigation tools, not fire on everything.
@@ -861,13 +862,43 @@ fn install_cursor_hook_all_events_idempotent() {
 
     let hooks_json = temp.path().join(".cursor").join("hooks.json");
     let val: Value = read_json(&hooks_json);
-    for event in ["sessionStart", "postToolUse", "stop"] {
+    for event in ["sessionStart", "postToolUse"] {
         assert_eq!(
             palace_commands_for(&val, event).len(),
             1,
             "exactly one palace {event} entry expected: {val}"
         );
     }
+}
+
+#[test]
+fn install_cursor_hook_removes_a_stop_entry_from_older_installs() {
+    let temp = TempDir::new().unwrap();
+    let binary = fake_binary(temp.path());
+    let cursor_dir = temp.path().join(".cursor");
+    let hooks_dir = cursor_dir.join("hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+    fs::write(hooks_dir.join("palace-stop.bat"), "@echo off\r\n").unwrap();
+    fs::write(hooks_dir.join("palace-stop.sh"), "#!/bin/sh\n").unwrap();
+    fs::write(
+        cursor_dir.join("hooks.json"),
+        r#"{"version":1,"hooks":{"stop":[
+            {"command":"./hooks/palace-stop.bat","loop_limit":1},
+            {"command":"./hooks/other-stop.sh"}
+        ]}}"#,
+    )
+    .unwrap();
+
+    install_cursor_hook(temp.path(), &binary, false).unwrap();
+
+    let val: Value = read_json(&cursor_dir.join("hooks.json"));
+    assert!(palace_commands_for(&val, "stop").is_empty(), "{val}");
+    assert_eq!(
+        val["hooks"]["stop"][0]["command"], "./hooks/other-stop.sh",
+        "unrelated stop hooks stay: {val}"
+    );
+    assert!(!hooks_dir.join("palace-stop.bat").exists());
+    assert!(!hooks_dir.join("palace-stop.sh").exists());
 }
 
 #[test]

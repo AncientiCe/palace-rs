@@ -1,6 +1,6 @@
 use palace::db;
-use palace::ranker::hybrid_search;
-use palace::store::{add_drawer, DrawerFilter};
+use palace::ranker::{hybrid_search, hybrid_search_with, RankOptions};
+use palace::store::{add_drawer, DrawerFilter, VectorSource};
 
 #[test]
 fn hybrid_search_uses_bm25_when_embeddings_are_absent() {
@@ -160,6 +160,86 @@ fn intent_terms_inside_other_words_do_not_boost() {
         results[0].coding_boost > 0.0,
         "a standalone \"test\" should still fire the command intent"
     );
+}
+
+#[test]
+fn should_i_asks_for_advice_not_a_convention() {
+    // "What should I serve?" wants a suggestion for the speaker; it used to fire
+    // the convention intent and lift any drawer that says "always" or "never".
+    let conn = db::open_in_memory().expect("db should open");
+    add_drawer(
+        &conn,
+        "wing",
+        "room",
+        "We always serve the guests first at the dinner table.",
+        None,
+        "dinner.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let search = |query: &str| {
+        hybrid_search(&conn, query, None, &DrawerFilter::default(), 5)
+            .expect("hybrid search should work")
+    };
+    assert_eq!(
+        search("What should I serve for dinner?")[0].coding_boost,
+        0.0,
+        "\"should I\" must not count as convention phrasing"
+    );
+    assert!(
+        search("What should we serve for dinner?")[0].coding_boost > 0.0,
+        "\"should we\" still asks for a shared norm"
+    );
+}
+
+#[test]
+fn time_phrases_lift_drawers_from_that_day() {
+    let conn = db::open_in_memory().expect("db should open");
+    for (id, created_at) in [
+        ("march.txt", "2023-03-15T09:00:00+00:00"),
+        ("january.txt", "2023-01-20T09:00:00+00:00"),
+    ] {
+        add_drawer(
+            &conn,
+            "w",
+            "r",
+            "I bought a new kitchen appliance for the house.",
+            None,
+            id,
+            0,
+            "test",
+            3.0,
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE drawers SET created_at = ?1 WHERE source_file = ?2",
+            [created_at, id],
+        )
+        .unwrap();
+    }
+
+    let options = RankOptions {
+        now: chrono::DateTime::parse_from_rfc3339("2023-03-25T18:00:00+00:00")
+            .unwrap()
+            .to_utc(),
+    };
+    let results = hybrid_search_with(
+        &conn,
+        "What kitchen appliance did I buy 10 days ago?",
+        None,
+        VectorSource::Hot,
+        palace::embedder::active_model(),
+        &DrawerFilter::default(),
+        5,
+        &options,
+    )
+    .expect("hybrid search should work");
+    assert_eq!(results[0].drawer.source_file, "march.txt");
+    assert!(results[0].date_boost > 0.1);
+    assert!(results[1].date_boost < 0.001);
 }
 
 #[test]
