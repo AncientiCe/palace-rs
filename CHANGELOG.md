@@ -12,6 +12,11 @@ This Rust implementation uses its own `0.x` version track.
   still claimed about 2x faster indexing than fp32, which stopped being true
   when 0.19.0 made int8 models embed one text per call. The speed notes for
   every model now match the 0.19.0 bake-off.
+- **Conversation mining keeps replies past a `---` line.** Exchange chunking
+  treated a markdown horizontal rule, common in LLM answers, as the end of the
+  reply and dropped everything after it until the next user turn. The rule is
+  now skipped and the rest of the reply kept. Run `palace mine-convos --force`
+  to re-chunk conversations already mined.
 
 ## [0.19.0] - 2026-10-29
 

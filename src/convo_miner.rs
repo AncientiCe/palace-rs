@@ -136,10 +136,12 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<(String, usize)> {
             let mut ai_lines = Vec::new();
             while i < lines.len() {
                 let next = lines[i].trim();
-                if next.starts_with('>') || next.starts_with("---") {
+                if next.starts_with('>') {
                     break;
                 }
-                if !next.is_empty() {
+                // A horizontal rule is common inside LLM replies; skip the
+                // rule itself but keep reading the reply after it.
+                if !next.is_empty() && !is_horizontal_rule(next) {
                     ai_lines.push(next);
                 }
                 i += 1;
@@ -167,6 +169,10 @@ fn chunk_by_exchange(lines: &[&str]) -> Vec<(String, usize)> {
     }
 
     chunks
+}
+
+fn is_horizontal_rule(line: &str) -> bool {
+    line.len() >= 3 && line.chars().all(|c| c == '-')
 }
 
 /// Join reply lines with spaces into parts of at most `budget` bytes, breaking
