@@ -21,6 +21,12 @@ This Rust implementation uses its own `0.x` version track.
   conversation that opens with an assistant message, such as a greeting, lost
   that message because it had no user turn to pair with. It is now filed as a
   chunk of its own.
+- **Quoted lines in chat exports no longer split exchanges.** A line starting
+  with `>` inside an assistant reply, or on a later line of a user message,
+  looked like a new user turn, so the reply was cut in two and its second half
+  filed under the quote. When a chat export (Claude Code, Codex, Claude.ai,
+  ChatGPT, Slack) is turned into a transcript, those lines are now escaped as
+  `\>`. Transcripts already written with `>` turns are still read as they are.
 
 ## [0.19.0] - 2026-10-29
 

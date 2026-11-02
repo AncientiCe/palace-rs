@@ -72,3 +72,73 @@ fn plain_text_passes_through() {
     let result = normalize_content(text, "txt");
     assert_eq!(result, text);
 }
+
+fn claude_code_jsonl_from(messages: &[(&str, &str)]) -> String {
+    messages
+        .iter()
+        .map(|(kind, text)| {
+            serde_json::json!({"type": kind, "message": {"content": text}}).to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn quote_in_assistant_reply_is_not_a_user_turn() {
+    let jsonl = claude_code_jsonl_from(&[
+        ("human", "How do I configure the cache?"),
+        (
+            "assistant",
+            "Set the TTL in config.toml:\n> Note: values are in seconds, not minutes.\nThen restart the server so it picks up the change.",
+        ),
+        ("human", "Where do the cache files live?"),
+        ("assistant", "Under the data directory, in a folder named cache."),
+        ("human", "Can I clear it safely?"),
+        ("assistant", "Yes, deleting the folder only costs a slower first request."),
+    ]);
+
+    let transcript = normalize_content(&jsonl, "jsonl");
+    let chunks = palace::convo_miner::chunk_exchanges(&transcript);
+
+    assert_eq!(chunks.len(), 3, "one chunk per real exchange: {chunks:#?}");
+    let cache = &chunks[0].0;
+    assert!(
+        cache.starts_with("> How do I configure the cache?"),
+        "{cache}"
+    );
+    assert!(cache.contains("values are in seconds"), "{cache}");
+    assert!(cache.contains("Then restart the server"), "{cache}");
+}
+
+#[test]
+fn quote_on_a_later_line_of_a_user_message_is_not_a_new_turn() {
+    let jsonl = claude_code_jsonl_from(&[
+        (
+            "human",
+            "The deploy failed with this log:\n> error: migration 42 timed out\nWhat went wrong?",
+        ),
+        (
+            "assistant",
+            "Migration 42 holds a table lock longer than the timeout.",
+        ),
+        ("human", "How do I raise the timeout?"),
+        (
+            "assistant",
+            "Set lock_timeout in the migration settings file.",
+        ),
+        ("human", "Will that slow other queries?"),
+        (
+            "assistant",
+            "Only queries waiting on that table during the migration.",
+        ),
+    ]);
+
+    let transcript = normalize_content(&jsonl, "jsonl");
+    let chunks = palace::convo_miner::chunk_exchanges(&transcript);
+
+    assert_eq!(chunks.len(), 3, "one chunk per real exchange: {chunks:#?}");
+    let deploy = &chunks[0].0;
+    assert!(deploy.starts_with("> The deploy failed"), "{deploy}");
+    assert!(deploy.contains("migration 42 timed out"), "{deploy}");
+    assert!(deploy.contains("holds a table lock"), "{deploy}");
+}
