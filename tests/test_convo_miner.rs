@@ -316,6 +316,14 @@ fn chunk_exchanges_keeps_every_word_of_each_transcript() {
              > Root cause?\nA migration locked the orders table.\n\n\
              > Follow-ups?\nAdd lock timeouts to every migration.\n",
         ),
+        (
+            "assistant speaks before the first user turn",
+            "Hi! I'm your travel planner for the Lisbon trip.\n\
+             Ask me about flights, hotels or day trips.\n\n\
+             > Find a hotel near Alfama please.\nTry the small guesthouse by the cathedral.\n\n\
+             > Any day trips?\nSintra is forty minutes away by train.\n\n\
+             > Best food?\nGrilled sardines at the Mouraria market stalls.\n",
+        ),
     ];
     for (name, transcript) in transcripts {
         assert_every_word_is_chunked(name, transcript);

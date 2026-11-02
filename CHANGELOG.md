@@ -17,6 +17,10 @@ This Rust implementation uses its own `0.x` version track.
   reply and dropped everything after it until the next user turn. The rule is
   now skipped and the rest of the reply kept. Run `palace mine-convos --force`
   to re-chunk conversations already mined.
+- **Conversation mining keeps text before the first user turn.** A
+  conversation that opens with an assistant message, such as a greeting, lost
+  that message because it had no user turn to pair with. It is now filed as a
+  chunk of its own.
 
 ## [0.19.0] - 2026-10-29
 
