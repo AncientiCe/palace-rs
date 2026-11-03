@@ -262,3 +262,70 @@ fn chunk_exchanges_splits_a_reply_too_long_to_embed() {
         .sum();
     assert_eq!(kept, 80, "every sentence of the reply is kept exactly once");
 }
+
+/// Every word of `transcript` must land in at least one chunk. Horizontal
+/// rules are exempt: they separate text, they aren't text. Each exchange in
+/// the transcripts below is longer than the chunker's short-exchange filter.
+fn assert_every_word_is_chunked(name: &str, transcript: &str) {
+    let chunks = palace::convo_miner::chunk_exchanges(transcript);
+    let chunked: std::collections::HashSet<&str> = chunks
+        .iter()
+        .flat_map(|(text, _)| text.split_whitespace())
+        .collect();
+    for line in transcript.lines() {
+        let line = line.trim();
+        if line.len() >= 3 && line.chars().all(|c| c == '-') {
+            continue;
+        }
+        let line = line.strip_prefix('>').unwrap_or(line);
+        for word in line.split_whitespace() {
+            assert!(
+                chunked.contains(word),
+                "{name}: lost {word:?} from line {line:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn chunk_exchanges_keeps_every_word_of_each_transcript() {
+    let transcripts = [
+        (
+            "horizontal rule inside a reply",
+            "> How should I lay out the garden beds?\n\
+             Put tomatoes along the south fence.\n\
+             ---\n\
+             Then plant zucchini beside the compost bin.\n\n\
+             > What about watering?\nWater deeply twice a week at dawn.\n\n\
+             > And mulch?\nSpread straw mulch once seedlings sprout.\n",
+        ),
+        (
+            "rule between exchanges",
+            "> Which database should the ledger service use?\n\
+             Postgres, because we need serializable transactions.\n\n\
+             ---\n\n\
+             > How do we back it up?\nNightly pg_dump shipped to cold storage.\n\n\
+             ---\n\n\
+             > Who owns restores?\nThe platform rotation owns restore drills.\n",
+        ),
+        (
+            "rule-led line with text after it",
+            "> Summarise the incident please.\n\
+             --- Timeline follows ---\n\
+             Deploy at noon broke checkout for twelve minutes.\n\n\
+             > Root cause?\nA migration locked the orders table.\n\n\
+             > Follow-ups?\nAdd lock timeouts to every migration.\n",
+        ),
+        (
+            "assistant speaks before the first user turn",
+            "Hi! I'm your travel planner for the Lisbon trip.\n\
+             Ask me about flights, hotels or day trips.\n\n\
+             > Find a hotel near Alfama please.\nTry the small guesthouse by the cathedral.\n\n\
+             > Any day trips?\nSintra is forty minutes away by train.\n\n\
+             > Best food?\nGrilled sardines at the Mouraria market stalls.\n",
+        ),
+    ];
+    for (name, transcript) in transcripts {
+        assert_every_word_is_chunked(name, transcript);
+    }
+}

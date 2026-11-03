@@ -125,48 +125,69 @@ pub fn chunk_exchanges(content: &str) -> Vec<(String, usize)> {
 
 fn chunk_by_exchange(lines: &[&str]) -> Vec<(String, usize)> {
     let mut chunks = Vec::new();
-    let mut i = 0;
+    let is_text = |line: &&str| !line.is_empty() && !is_horizontal_rule(line);
 
+    // Text before the first user turn, such as an assistant greeting, has no
+    // turn to pair with, so it is chunked on its own.
+    let first_turn = lines
+        .iter()
+        .position(|line| line.trim().starts_with('>'))
+        .unwrap_or(lines.len());
+    let preamble: Vec<&str> = lines[..first_turn]
+        .iter()
+        .map(|line| line.trim())
+        .filter(is_text)
+        .collect();
+    for part in split_reply(&preamble, MAX_EXCHANGE_CHARS) {
+        if part.len() > MIN_CHUNK_SIZE {
+            chunks.push((part, chunks.len()));
+        }
+    }
+
+    // From here every iteration starts on a user turn: the reply loop below
+    // only stops at the next one.
+    let mut i = first_turn;
     while i < lines.len() {
-        let line = lines[i];
-        if line.trim().starts_with('>') {
-            let user_turn = line.trim().to_string();
-            i += 1;
+        let user_turn = lines[i].trim().to_string();
+        i += 1;
 
-            let mut ai_lines = Vec::new();
-            while i < lines.len() {
-                let next = lines[i].trim();
-                if next.starts_with('>') || next.starts_with("---") {
-                    break;
-                }
-                if !next.is_empty() {
-                    ai_lines.push(next);
-                }
-                i += 1;
+        let mut ai_lines = Vec::new();
+        while i < lines.len() {
+            let next = lines[i].trim();
+            if next.starts_with('>') {
+                break;
             }
+            // A horizontal rule is common inside LLM replies; skip the rule
+            // itself but keep reading the reply after it.
+            if is_text(&next) {
+                ai_lines.push(next);
+            }
+            i += 1;
+        }
 
-            let budget = MAX_EXCHANGE_CHARS
-                .saturating_sub(user_turn.len() + 1)
-                .max(MIN_REPLY_CHARS);
-            let parts = split_reply(&ai_lines, budget);
-            if parts.is_empty() {
-                if user_turn.len() > MIN_CHUNK_SIZE {
-                    chunks.push((user_turn, chunks.len()));
-                }
-            } else {
-                for part in parts {
-                    let content = format!("{user_turn}\n{part}");
-                    if content.trim().len() > MIN_CHUNK_SIZE {
-                        chunks.push((content, chunks.len()));
-                    }
-                }
+        let budget = MAX_EXCHANGE_CHARS
+            .saturating_sub(user_turn.len() + 1)
+            .max(MIN_REPLY_CHARS);
+        let parts = split_reply(&ai_lines, budget);
+        if parts.is_empty() {
+            if user_turn.len() > MIN_CHUNK_SIZE {
+                chunks.push((user_turn, chunks.len()));
             }
         } else {
-            i += 1;
+            for part in parts {
+                let content = format!("{user_turn}\n{part}");
+                if content.trim().len() > MIN_CHUNK_SIZE {
+                    chunks.push((content, chunks.len()));
+                }
+            }
         }
     }
 
     chunks
+}
+
+fn is_horizontal_rule(line: &str) -> bool {
+    line.len() >= 3 && line.chars().all(|c| c == '-')
 }
 
 /// Join reply lines with spaces into parts of at most `budget` bytes, breaking

@@ -338,21 +338,43 @@ fn extract_content(value: &serde_json::Value) -> String {
     }
 }
 
+/// Escape a leading `>` on each line, as markdown does with `\>`, so text
+/// quoted inside a message isn't read as a new user turn when chunked.
+fn escape_turn_markers(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let body = line.trim_start();
+            if body.starts_with('>') {
+                let indent = &line[..line.len() - body.len()];
+                format!("{indent}\\{body}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn messages_to_transcript(messages: &[(String, String)]) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut i = 0;
     while i < messages.len() {
         let (role, text) = &messages[i];
         if role == "user" {
-            lines.push(format!("> {text}"));
+            // Only the first line of a user message marks the turn.
+            let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
+            lines.push(format!("> {first}"));
+            if !rest.is_empty() {
+                lines.push(escape_turn_markers(rest));
+            }
             if i + 1 < messages.len() && messages[i + 1].0 == "assistant" {
-                lines.push(messages[i + 1].1.clone());
+                lines.push(escape_turn_markers(&messages[i + 1].1));
                 i += 2;
             } else {
                 i += 1;
             }
         } else {
-            lines.push(text.clone());
+            lines.push(escape_turn_markers(text));
             i += 1;
         }
         lines.push(String::new());
