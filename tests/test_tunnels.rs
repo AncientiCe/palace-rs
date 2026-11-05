@@ -26,5 +26,5 @@ fn persisted_tunnels_can_be_created_followed_and_deleted() {
 #[test]
 fn topic_tunnel_rooms_are_synthetic() {
     assert_eq!(topic_room("Angular"), "topic:angular");
-    assert_eq!(normalize_wing_name("mempalace-public"), "mempalace_public");
+    assert_eq!(normalize_wing_name("palace-public"), "palace_public");
 }

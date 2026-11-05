@@ -118,8 +118,8 @@ fn deduplication_prevents_duplicate_active_triples() {
 fn seed_agent_adoption_facts_is_idempotent() {
     let conn = test_db();
 
-    let first = seed_agent_adoption_facts(&conn, "mempalace-rs").unwrap();
-    let second = seed_agent_adoption_facts(&conn, "mempalace-rs").unwrap();
+    let first = seed_agent_adoption_facts(&conn, "palace-rs").unwrap();
+    let second = seed_agent_adoption_facts(&conn, "palace-rs").unwrap();
 
     assert!(first.inserted >= 10);
     assert_eq!(second.inserted, 0);
@@ -138,10 +138,10 @@ fn seed_agent_adoption_facts_is_idempotent() {
 fn seed_agent_adoption_fact_update_invalidates_old_fact() {
     let conn = test_db();
 
-    seed_agent_adoption_facts(&conn, "mempalace-rs").unwrap();
+    seed_agent_adoption_facts(&conn, "palace-rs").unwrap();
     let report = seed_or_update_fact(
         &conn,
-        "mempalace-rs",
+        "palace-rs",
         "has_role",
         "Rust memory engine for coding agents",
         "local-first memory engine",
@@ -151,7 +151,7 @@ fn seed_agent_adoption_fact_update_invalidates_old_fact() {
     assert_eq!(report.inserted, 1);
     assert_eq!(report.invalidated, 1);
 
-    let facts = query_entity(&conn, "mempalace-rs", None, "outgoing").unwrap();
+    let facts = query_entity(&conn, "palace-rs", None, "outgoing").unwrap();
     let old = facts
         .iter()
         .find(|fact| fact.object == "Rust memory engine for coding agents")

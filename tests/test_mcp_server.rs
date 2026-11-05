@@ -228,13 +228,13 @@ fn seed_adoption_facts_tool_is_idempotent() {
         &conn,
         &config,
         "palace_seed_adoption_facts",
-        &serde_json::json!({"project": "mempalace-rs"}),
+        &serde_json::json!({"project": "palace-rs"}),
     );
     let second = palace::mcp_server::dispatch_tool(
         &conn,
         &config,
         "palace_seed_adoption_facts",
-        &serde_json::json!({"project": "mempalace-rs"}),
+        &serde_json::json!({"project": "palace-rs"}),
     );
 
     assert_eq!(first["success"], true);

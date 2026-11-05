@@ -882,8 +882,8 @@ mod tests {
             Some("palace_server_license")
         );
         assert_eq!(
-            diary_project_tag("PROJ:mempalace_rs | fixed").as_deref(),
-            Some("mempalace_rs")
+            diary_project_tag("PROJ:palace_rs | fixed").as_deref(),
+            Some("palace_rs")
         );
         assert_eq!(diary_project_tag("no project named here"), None);
     }

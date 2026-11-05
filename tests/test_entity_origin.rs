@@ -5,12 +5,12 @@ use palace::origin::{detect_origin, OriginPlatform};
 
 #[test]
 fn entity_detector_handles_camelcase_and_dialogue_names() {
-    let entities = detect_entities("Alice: We should ship MemPalace with ChromaDB support.");
+    let entities = detect_entities("Alice: We should ship Palace with ChromaDB support.");
 
     assert!(entities
         .iter()
         .any(|entity| entity.name == "Alice" && entity.kind == EntityKind::Person));
-    assert!(entities.iter().any(|entity| entity.name == "MemPalace"));
+    assert!(entities.iter().any(|entity| entity.name == "Palace"));
     assert!(entities.iter().any(|entity| entity.name == "ChromaDB"));
 }
 

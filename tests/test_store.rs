@@ -63,7 +63,7 @@ fn opening_v3_schema_migrates_phase_one_columns() {
                 embedding   BLOB,
                 source_file TEXT NOT NULL DEFAULT '',
                 chunk_index INTEGER NOT NULL DEFAULT 0,
-                added_by    TEXT NOT NULL DEFAULT 'mempalace',
+                added_by    TEXT NOT NULL DEFAULT 'palace',
                 filed_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 importance  REAL NOT NULL DEFAULT 3.0
             );
@@ -118,7 +118,7 @@ fn add_drawer_records_hall_and_entity_metadata() {
         &conn,
         "wing_code",
         "backend",
-        "Alice fixed the Rust database error in MemPalace",
+        "Alice fixed the Rust database error in Palace",
         None,
         "test.py",
         0,
@@ -766,7 +766,7 @@ fn backfill_registers_existing_wings_with_inferred_kind() {
     let conn = open_test_db();
     add_drawer(
         &conn,
-        "mempalace_rs",
+        "palace_rs",
         "src",
         "c",
         None,
@@ -797,7 +797,7 @@ fn backfill_registers_existing_wings_with_inferred_kind() {
     assert!(inserted >= 3);
 
     assert_eq!(
-        get_wing(&conn, "mempalace_rs").unwrap().unwrap().kind,
+        get_wing(&conn, "palace_rs").unwrap().unwrap().kind,
         "project"
     );
     assert_eq!(

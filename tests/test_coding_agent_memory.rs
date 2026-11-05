@@ -13,7 +13,7 @@ fn test_db() -> rusqlite::Connection {
 fn add(conn: &rusqlite::Connection, room: &str, content: &str, source: &str, chunk: usize) {
     add_drawer(
         conn,
-        "mempalace_rs",
+        "palace_rs",
         room,
         content,
         None,
@@ -88,7 +88,7 @@ fn coding_agent_intents_boost_practical_memory_queries() {
         ),
         (
             "current",
-            "Current direction changed from broad MemPalace parity to a narrow coding-agent memory engine.",
+            "Current direction changed from broad Palace parity to a narrow coding-agent memory engine.",
             "what changed in the current direction?",
         ),
     ];
@@ -142,7 +142,7 @@ fn mcp_search_returns_bounded_source_context_and_score_provenance() {
     let value = search_memories(
         &conn,
         "why did we choose source context expansion?",
-        Some("mempalace_rs"),
+        Some("palace_rs"),
         None,
         1,
     );
@@ -254,7 +254,7 @@ fn palace_structured_search_exposes_score_provenance() {
     let palace = Palace::open_in_memory().expect("palace should open");
     add_drawer(
         palace.conn(),
-        "mempalace_rs",
+        "palace_rs",
         "decisions",
         "We chose bundled SQLite because coding agents should not need Chroma.",
         None,
@@ -289,10 +289,10 @@ fn session_context_returns_recent_diary_metadata_and_compact_text() {
         "palace_diary_write",
         &serde_json::json!({
             "agent_name": "Codex",
-            "entry": "PROJ:mempalace_rs | Implemented preference recall reliability.",
+            "entry": "PROJ:palace_rs | Implemented preference recall reliability.",
             "topic": "release",
             "session_id": "session-123",
-            "project_path": "D:\\Dev\\Projects\\mempalace-rs",
+            "project_path": "D:\\Dev\\Projects\\palace-rs",
             "tags": ["0.1.9", "reliability"]
         }),
     );
@@ -310,7 +310,7 @@ fn session_context_returns_recent_diary_metadata_and_compact_text() {
     assert_eq!(context["has_recent_session"], true);
     assert_eq!(
         context["last_active_project"],
-        "D:\\Dev\\Projects\\mempalace-rs"
+        "D:\\Dev\\Projects\\palace-rs"
     );
     let entries = context["recent_entries"]
         .as_array()
@@ -318,7 +318,7 @@ fn session_context_returns_recent_diary_metadata_and_compact_text() {
     let first = entries.first().expect("expected recent diary entry");
     assert_eq!(first["topic"], "release");
     assert_eq!(first["session_id"], "session-123");
-    assert_eq!(first["project_path"], "D:\\Dev\\Projects\\mempalace-rs");
+    assert_eq!(first["project_path"], "D:\\Dev\\Projects\\palace-rs");
     assert!(first["timestamp"].is_string());
     assert!(first["text"].as_str().expect("compact text").len() <= 240);
 }
