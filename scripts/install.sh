@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-repo="${PALACE_REPO:-${MEMPALACE_REPO:-AncientiCe/palace-rs}}"
-install_dir="${PALACE_INSTALL_DIR:-${MEMPALACE_INSTALL_DIR:-$HOME/.local/bin}}"
+repo="${PALACE_REPO:-AncientiCe/palace-rs}"
+install_dir="${PALACE_INSTALL_DIR:-$HOME/.local/bin}"
 tmp_dir="$(mktemp -d)"
 
 cleanup() {
@@ -46,8 +46,8 @@ checksum_verify() {
 
 target="$(detect_target)"
 
-version_override="${PALACE_VERSION:-${MEMPALACE_VERSION:-}}"
-local_archive="${PALACE_LOCAL_ARCHIVE:-${MEMPALACE_LOCAL_ARCHIVE:-}}"
+version_override="${PALACE_VERSION:-}"
+local_archive="${PALACE_LOCAL_ARCHIVE:-}"
 
 if [ "$version_override" = "local" ]; then
   if [ -z "$local_archive" ]; then

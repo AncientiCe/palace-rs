@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
-$Repo = if ($env:PALACE_REPO) { $env:PALACE_REPO } elseif ($env:MEMPALACE_REPO) { $env:MEMPALACE_REPO } else { "AncientiCe/palace-rs" }
-$InstallDir = if ($env:PALACE_INSTALL_DIR) { $env:PALACE_INSTALL_DIR } elseif ($env:MEMPALACE_INSTALL_DIR) { $env:MEMPALACE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\palace\bin" }
+$Repo = if ($env:PALACE_REPO) { $env:PALACE_REPO } else { "AncientiCe/palace-rs" }
+$InstallDir = if ($env:PALACE_INSTALL_DIR) { $env:PALACE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\palace\bin" }
 $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("palace-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
@@ -25,8 +25,8 @@ function Get-Target {
 try {
     $Target = Get-Target
 
-    $VersionOverride = if ($env:PALACE_VERSION) { $env:PALACE_VERSION } elseif ($env:MEMPALACE_VERSION) { $env:MEMPALACE_VERSION } else { $null }
-    $LocalArchive = if ($env:PALACE_LOCAL_ARCHIVE) { $env:PALACE_LOCAL_ARCHIVE } elseif ($env:MEMPALACE_LOCAL_ARCHIVE) { $env:MEMPALACE_LOCAL_ARCHIVE } else { $null }
+    $VersionOverride = if ($env:PALACE_VERSION) { $env:PALACE_VERSION } else { $null }
+    $LocalArchive = if ($env:PALACE_LOCAL_ARCHIVE) { $env:PALACE_LOCAL_ARCHIVE } else { $null }
 
     if ($VersionOverride -eq "local") {
         if (-not $LocalArchive) {
