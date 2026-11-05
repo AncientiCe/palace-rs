@@ -957,21 +957,6 @@ it. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
 ## 🚚 Migrating from older versions
 
 <details>
-<summary>From <code>mempalace</code> (0.1.x)</summary>
-
-Version 0.2.0 renamed the project from `mempalace` to `palace`. The 0.2.x line
-kept the old names working with warnings. They were removed in 0.3.0.
-
-To upgrade from 0.1.x, either install a 0.2.x release first and run
-`palace install`, which migrates configs and moves `~/.mempalace` to
-`~/.palace`, or rename by hand: `~/.mempalace` → `~/.palace`,
-`mempalace.yaml` → `palace.yaml`, `MEMPALACE_*` → `PALACE_*`, and the
-`mempalace_*` MCP tools → `palace_*`. Hooks that ran `mempalace mcp` or
-`python -m mempalace.mcp_server` should now run `palace mcp`.
-
-</details>
-
-<details>
 <summary>From the Python version</summary>
 
 The Rust version replaces ChromaDB plus SQLite with a single `palace.db`.
