@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# MemPalace Save Hook — Rust version
-# Drop-in replacement for the Python mempalace hook.
+# Palace Save Hook — Rust version
+# Drop-in replacement for the Python hook.
 # Pipe this script into your shell session to save conversations.
 #
 # Usage (in Claude Code):
-#   /hooks/mempal_save_hook.sh
+#   /hooks/palace_save_hook.sh
 
 set -euo pipefail
 
-MEMPALACE_BIN="${MEMPALACE_BIN:-mempalace}"
+PALACE_BIN="${PALACE_BIN:-palace}"
 
 # Call the MCP server for diary entry
-exec "$MEMPALACE_BIN" mcp
+exec "$PALACE_BIN" mcp
