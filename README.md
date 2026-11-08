@@ -954,24 +954,23 @@ it. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
 
 ---
 
-## 🚚 Migrating from older versions
+## 🚚 Coming from another memory tool
 
-<details>
-<summary>From the Python version</summary>
-
-The Rust version replaces ChromaDB plus SQLite with a single `palace.db`.
-ChromaDB data cannot be converted, so re-ingest:
+Palace does not import another tool's store. Many keep summaries,
+extracted "facts", or compressed text rather than what was actually said,
+and Palace keeps text verbatim. Mine the originals instead, and every drawer
+cites the file it came from:
 
 ```bash
-palace init ~/my-project --yes --auto-mine
-palace mine-convos ~/Desktop/transcripts
+palace init ~/my-project --yes --auto-mine   # your code and docs
+palace split --source ~/Desktop/transcripts  # only for concatenated Claude Code transcripts
+palace mine-convos ~/Desktop/transcripts     # Claude Code, Codex, Claude.ai, ChatGPT, Slack exports
 palace status
 ```
 
-`identity.txt`, `people_map.json`, and `known_names.json` in `~/.palace/` are
-still compatible and are read automatically.
-
-</details>
+Once your history is in Palace, remove the old tool's MCP server and hooks
+from your agent so the two don't compete. `palace install` sets up Palace's
+own.
 
 ---
 
