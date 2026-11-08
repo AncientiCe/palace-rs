@@ -48,6 +48,10 @@ struct RunArgs {
     /// comparing ranking rules offline.
     #[arg(long, default_value_t = 0)]
     dump_chunks: usize,
+    /// LongMemEval: also evaluate the 30 abstention (`_abs`) questions, for
+    /// the full 500-question set. Skipped by default.
+    #[arg(long)]
+    include_abstention: bool,
 }
 
 #[cfg(feature = "benchmarks")]
@@ -110,6 +114,7 @@ fn run(benchmark: &str, args: RunArgs) -> Result<()> {
             model,
             chunking: args.chunking,
             dump_chunks: args.dump_chunks,
+            include_abstention: args.include_abstention,
         })?;
         println!("{}", serde_json::to_string_pretty(&summary)?);
         summaries.push(summary);

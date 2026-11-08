@@ -40,7 +40,7 @@ fn longmemeval_parser_skips_abstention_and_flattens_sessions() {
     ]
     "#;
 
-    let parsed = parse_longmemeval(raw).expect("fixture should parse");
+    let parsed = parse_longmemeval(raw, false).expect("fixture should parse");
 
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0].question_id, "q1");
@@ -50,6 +50,10 @@ fn longmemeval_parser_skips_abstention_and_flattens_sessions() {
         .content
         .contains("user: I prefer green tea."));
     assert_eq!(parsed[0].answer_session_ids, vec!["s1"]);
+
+    let all = parse_longmemeval(raw, true).expect("fixture should parse");
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[1].question_id, "q2_abs");
 }
 
 #[test]
@@ -162,6 +166,7 @@ fn run_benchmark_processes_multiple_questions_in_bm25_only_mode() {
         model: palace::embedding_models::default_model(),
         chunking: Chunking::Session,
         dump_chunks: 0,
+        include_abstention: false,
     })
     .expect("benchmark should run end-to-end in bm25-only mode");
 
@@ -216,6 +221,7 @@ fn chunked_mode_ranks_each_session_once_by_its_best_chunk() {
         model: palace::embedding_models::default_model(),
         chunking: Chunking::Text,
         dump_chunks: 0,
+        include_abstention: false,
     })
     .expect("chunked benchmark should run");
 
@@ -280,6 +286,7 @@ fn exchange_mode_chunks_sessions_the_way_the_conversation_miner_does() {
         model: palace::embedding_models::default_model(),
         chunking: Chunking::Exchange,
         dump_chunks: 0,
+        include_abstention: false,
     })
     .expect("exchange benchmark should run");
 

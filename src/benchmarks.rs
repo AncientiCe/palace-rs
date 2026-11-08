@@ -212,6 +212,9 @@ pub struct RunOptions {
     /// Write each case's best `dump_chunks` chunk scores to the cases file,
     /// for comparing ranking rules offline. 0 writes none.
     pub dump_chunks: usize,
+    /// LongMemEval only: also evaluate the abstention (`_abs`) questions,
+    /// which are skipped by default. Each still names its gold sessions.
+    pub include_abstention: bool,
 }
 
 /// How sessions become drawers. Chunked modes rank a session by its best chunk.
@@ -263,13 +266,15 @@ struct ChunkScore {
     date_boost: f64,
 }
 
-pub fn parse_longmemeval(raw: &str) -> Result<Vec<BenchmarkInstance>> {
+/// Parses a LongMemEval JSON file. Abstention (`_abs`) questions are skipped
+/// unless `include_abstention` is set.
+pub fn parse_longmemeval(raw: &str, include_abstention: bool) -> Result<Vec<BenchmarkInstance>> {
     let values: Vec<Value> = serde_json::from_str(raw).context("parsing LongMemEval JSON")?;
     let mut instances = Vec::new();
 
     for value in values {
         let question_id = string_field(&value, "question_id").unwrap_or_default();
-        if question_id.ends_with("_abs") {
+        if !include_abstention && question_id.ends_with("_abs") {
             continue;
         }
 
@@ -372,12 +377,13 @@ pub fn run_benchmark(options: &RunOptions) -> Result<BenchmarkSummary> {
     let raw = fs::read_to_string(&options.input_path)
         .with_context(|| format!("reading {}", options.input_path.display()))?;
     let skipped_questions = match options.benchmark.as_str() {
+        "longmemeval" if options.include_abstention => 0,
         "longmemeval" => count_longmemeval_abstentions(&raw)?,
         "beam" => 0,
         other => anyhow::bail!("unsupported benchmark: {other}"),
     };
     let mut instances = match options.benchmark.as_str() {
-        "longmemeval" => parse_longmemeval(&raw)?,
+        "longmemeval" => parse_longmemeval(&raw, options.include_abstention)?,
         "beam" => parse_beam_jsonl(&raw)?,
         other => anyhow::bail!("unsupported benchmark: {other}"),
     };
