@@ -142,6 +142,10 @@ palace-bench long-mem-eval data/longmemeval/longmemeval_s_cleaned.json \
   data/out/longmemeval/s_cleaned --model minilm-l6-v2-q8 --chunking exchange
 ```
 
+The 30 abstention (`_abs`) questions are skipped by default, leaving 470.
+`--include-abstention` evaluates all 500; each abstention question still names
+its gold sessions, so it is scored like any other.
+
 ```bash
 # LongMemEval — fast
 palace-bench long-mem-eval data/longmemeval/longmemeval_oracle.json \
