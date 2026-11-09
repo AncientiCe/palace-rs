@@ -96,6 +96,9 @@ pub fn run() -> Result<()> {
         }
     }
 
+    // stdin closed. Let a model load that is still in flight finish first:
+    // exiting mid-load crashes ONNX Runtime on teardown.
+    crate::embedder::wait_for_warm_up(std::time::Duration::from_secs(60));
     Ok(())
 }
 

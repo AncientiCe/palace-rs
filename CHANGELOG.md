@@ -17,6 +17,14 @@ This Rust implementation uses its own `0.x` version track.
   then stays quiet for 30 days. Agents are told to mention it once, after the
   current task. Set `PALACE_FEEDBACK_DISABLED=1` to turn it off.
 
+### Fixed
+
+- **`palace mcp` no longer crashes when it exits while the embedding model is
+  loading.** A client that closed the connection right after starting, such
+  as a script or a health check, could make the process exit with a
+  segmentation fault while ONNX Runtime was still building its session. The
+  server now waits for the load to finish, up to 60 seconds, before exiting.
+
 ## [0.19.1] - 2026-11-02
 
 ### Fixed
