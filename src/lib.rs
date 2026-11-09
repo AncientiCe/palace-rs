@@ -13,6 +13,7 @@ pub mod embedding_migration;
 pub mod embedding_models;
 pub mod entity_detector;
 pub mod export;
+pub mod feedback;
 pub mod gain;
 pub mod general_extractor;
 pub mod hall_router;

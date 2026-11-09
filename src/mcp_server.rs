@@ -135,6 +135,11 @@ fn handle_request(
                 .get("protocolVersion")
                 .and_then(|value| value.as_str())
                 .unwrap_or("2024-11-05");
+            let client = params
+                .pointer("/clientInfo/name")
+                .and_then(|value| value.as_str());
+            // Best-effort and local only: counts sessions for the feedback hint.
+            let _ = crate::feedback::note_mcp_session(conn, client);
             Some(initialize_result(protocol_version, config.profile()))
         }
         "notifications/initialized" => return None,
@@ -1516,6 +1521,14 @@ fn tool_session_context(conn: &Connection, config: &PalaceConfig, args: &Value) 
     if let (Some(notice), Some(object)) = (embedding_notice(conn, config), response.as_object_mut())
     {
         object.insert("embedding_notice".into(), json!(notice));
+    }
+    if response.get("error").is_none() {
+        if let (Ok(Some(hint)), Some(object)) = (
+            crate::feedback::take_due_prompt(conn, config.profile(), chrono::Utc::now()),
+            response.as_object_mut(),
+        ) {
+            object.insert("feedback".into(), hint);
+        }
     }
     response
 }
