@@ -61,19 +61,13 @@ impl FeedbackInfo {
     }
 }
 
-/// Link to a new discussion in the Feedback category with the environment
-/// pre-filled. `environment` targets the discussion form field; `body` is the
-/// fallback when the category has no form.
+/// Link to a new discussion in the Feedback category. `environment` fills the
+/// discussion form field of the same id (`.github/DISCUSSION_TEMPLATE/feedback.yml`).
 pub fn discussion_url(info: &FeedbackInfo) -> String {
-    let environment = info.environment();
-    let body = format!(
-        "**What helped**\n\n\n**What got in the way**\n\n\n**What's missing**\n\n\n**Environment**\n```\n{environment}\n```\n"
-    );
     format!(
-        "{DISCUSSION_URL}?category={CATEGORY}&title={}&environment={}&body={}",
+        "{DISCUSSION_URL}?category={CATEGORY}&title={}&environment={}",
         encode(&format!("feedback: palace {}", info.version)),
-        encode(&environment),
-        encode(&body)
+        encode(&info.environment())
     )
 }
 
