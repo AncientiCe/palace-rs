@@ -4,6 +4,15 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [0.19.3] - 2026-11-09
+
+### Added
+
+- **Palace is on crates.io.** Depend on it with
+  `palace-rs = { version = "0.19", default-features = false }` instead of a
+  git dependency. API docs are on [docs.rs](https://docs.rs/palace-rs).
+  Every release tag now publishes the crate after all platform builds pass.
+
 ## [0.19.2] - 2026-11-09
 
 ### Added
