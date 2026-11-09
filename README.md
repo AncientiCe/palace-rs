@@ -923,11 +923,12 @@ bundle and start without writing code.
 
 ## 📚 Using Palace as a library
 
-Palace is also a Rust crate (`palace`). Add it as a git dependency:
+Palace is also a Rust crate, [`palace-rs`](https://crates.io/crates/palace-rs),
+imported as `palace` ([API docs](https://docs.rs/palace-rs)):
 
 ```toml
 [dependencies]
-palace-rs = { git = "https://github.com/AncientiCe/palace-rs", default-features = false }
+palace-rs = { version = "0.19", default-features = false }
 ```
 
 ```rust
