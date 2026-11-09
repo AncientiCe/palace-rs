@@ -10,6 +10,14 @@ readme = "README.md"
 rust-version = "1.82"
 keywords = ["memory", "ai", "mcp", "llm", "embeddings"]
 categories = ["database", "text-processing"]
+include = [
+    "src/**",
+    "tests/**",
+    "examples/**",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+]
 
 [[bin]]
 name = "palace"
