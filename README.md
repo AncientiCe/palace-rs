@@ -434,6 +434,7 @@ Run `palace <command> --help` for every flag.
 | `palace uninstall` | Remove them again |
 | `palace doctor` | Check the binary, database, MCP configs, and rules |
 | `palace seed-adoption-facts` | Seed knowledge-graph facts that make agent recall measurable |
+| `palace feedback` | Open a pre-filled public GitHub discussion to share feedback (`--no-open` prints the link) |
 
 **Adding memory**
 
@@ -645,6 +646,7 @@ Settings load in this order: environment variables, then
 | `PALACE_RERANK_MODEL` | built-in | Override the reranker model |
 | `PALACE_ENTITY_LANGUAGES` | `en` | Comma-separated languages for entity detection |
 | `PALACE_GAIN_DISABLED` | off | `1` turns off usage recording |
+| `PALACE_FEEDBACK_DISABLED` | off | `1` stops the feedback-link hint in `palace_session_context` |
 | `PALACE_PROJECT` | auto | Project name used for gain attribution |
 | `PALACE_SOURCE_DIR` | `~/Desktop/transcripts` | Default source for `palace split` |
 | `PALACE_MINE_TRACE` | off | `1` prints per-stage mining timings |
@@ -817,6 +819,13 @@ convention question account for the difference.
   Face, and to your own Palace Server if you turn on remote mode.
 - **No telemetry.** `palace gain` statistics are written to your local
   database only.
+- **Feedback is something you post, never something Palace sends.** After 10
+  MCP sessions, and then at most every 30 days, `palace_session_context`
+  includes a link your agent may mention once. The link opens a public
+  [GitHub discussion](https://github.com/AncientiCe/palace-rs/discussions/categories/feedback)
+  pre-filled with your Palace version, OS, client name, and profile. You can
+  edit it before posting, or ignore it. `palace feedback` opens the same page.
+  Set `PALACE_FEEDBACK_DISABLED=1` to never see the hint.
 - **Back up** with `palace export`, or copy `palace.db`.
 - **Delete** a single memory with `palace_forget`, or everything by removing
   `~/.palace`.

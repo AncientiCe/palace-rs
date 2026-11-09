@@ -4,6 +4,19 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Added
+
+- **`palace feedback` opens a pre-filled GitHub discussion.** The page is in
+  the public Feedback category and pre-fills your Palace version, OS, client
+  name, and profile, which you can edit before posting. Palace sends nothing
+  itself.
+- **Agents mention the feedback link once in a while.** After 10 MCP
+  sessions, `palace_session_context` returns a `feedback` hint with the link,
+  then stays quiet for 30 days. Agents are told to mention it once, after the
+  current task. Set `PALACE_FEEDBACK_DISABLED=1` to turn it off.
+
 ## [0.19.1] - 2026-11-02
 
 ### Fixed
