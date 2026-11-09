@@ -974,7 +974,7 @@ fn refresh_preference_tags_retags_existing_drawers() {
 
 #[test]
 fn reembed_drawers_fills_vectors_in_batched_transactions() {
-    let conn = open_test_db();
+    let mut conn = open_test_db();
     let mut drawers = Vec::new();
     for i in 0..70 {
         let content = format!("drawer number {i} about batching re-embeds");
@@ -989,9 +989,11 @@ fn reembed_drawers_fills_vectors_in_batched_transactions() {
     conn.commit_hook(Some(move || {
         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         false
-    }));
+    }))
+    .expect("commit hook should install");
     let report = reembed_drawers(&conn, &drawers).expect("re-embed should run");
-    conn.commit_hook(None::<fn() -> bool>);
+    conn.commit_hook(None::<fn() -> bool>)
+        .expect("commit hook should clear");
 
     assert_eq!(report.errors, 0);
     assert_eq!(

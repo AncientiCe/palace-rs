@@ -12,6 +12,13 @@ This Rust implementation uses its own `0.x` version track.
   install on a machine ends with one line linking to the repository. Later
   installs and upgrades don't repeat it.
 
+### Security
+
+- **Bundled SQLite updated for RUSTSEC-2026-0459.** `rusqlite` moves from 0.32
+  to 0.41, which bundles a patched SQLite through `libsqlite3-sys` 0.39. If you
+  use `palace-rs` as a library and also depend on `rusqlite`, move to 0.41 as
+  well: the public API takes `rusqlite::Connection`.
+
 ## [0.19.3] - 2026-11-09
 
 ### Added
