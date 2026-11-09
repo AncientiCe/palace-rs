@@ -10,6 +10,7 @@ use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use std::sync::OnceLock;
 
 /// Where feedback goes: the repo's Discussions, "Feedback" category.
 pub const DISCUSSION_URL: &str = "https://github.com/AncientiCe/palace-rs/discussions/new";
@@ -81,19 +82,34 @@ pub fn disabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Count one MCP session and remember which client opened it. Best-effort.
+/// The client that opened this process's MCP session. Each client connection
+/// starts its own `palace mcp` process, so the process is the session and
+/// concurrent agents never see each other's name.
+static SESSION_CLIENT: OnceLock<String> = OnceLock::new();
+
+/// Count one MCP session and remember which client opened it, for this
+/// process and as the last-seen client for `palace feedback`. Best-effort.
 pub fn note_mcp_session(conn: &Connection, client: Option<&str>) -> Result<()> {
+    let client = client.map(str::trim).filter(|c| !c.is_empty());
+    if let Some(client) = client {
+        let _ = SESSION_CLIENT.set(client.to_string());
+    }
     let sessions = read_u64(conn, KEY_SESSIONS)?.unwrap_or(0) + 1;
     write(conn, KEY_SESSIONS, &sessions.to_string())?;
-    if let Some(client) = client.map(str::trim).filter(|c| !c.is_empty()) {
+    if let Some(client) = client {
         write(conn, KEY_CLIENT, client)?;
     }
     Ok(())
 }
 
-/// The client name from the most recent MCP `initialize`, if any.
+/// The client name from the most recent MCP `initialize` on this machine.
 pub fn last_client(conn: &Connection) -> Option<String> {
     read(conn, KEY_CLIENT).ok().flatten()
+}
+
+/// The client of this process's MCP session, if it sent one.
+pub fn session_client() -> Option<String> {
+    SESSION_CLIENT.get().cloned()
 }
 
 /// The hint for `palace_session_context`, when one is due. Records that it was
@@ -118,7 +134,7 @@ pub fn take_due_prompt(
     }
     write(conn, KEY_LAST_PROMPT, &now.to_rfc3339())?;
 
-    let info = FeedbackInfo::current(profile, last_client(conn));
+    let info = FeedbackInfo::current(profile, session_client());
     Ok(Some(json!({
         "url": discussion_url(&info),
         "instruction": format!(
