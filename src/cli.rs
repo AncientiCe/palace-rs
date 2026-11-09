@@ -112,6 +112,12 @@ enum Commands {
     Status,
     /// List registered wings (projects and topics) with mined status
     Wings,
+    /// Open a pre-filled public GitHub discussion to share feedback (nothing is sent by Palace)
+    Feedback {
+        /// Print the link without opening a browser
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Show automatic MCP usage gains and estimated savings
     Gain {
         /// Filter to one project
@@ -544,6 +550,28 @@ pub fn run() -> Result<()> {
             }
             let conn = crate::db::open(&db_path)?;
             crate::miner::status(&conn, &db_path)?;
+        }
+
+        Commands::Feedback { no_open } => {
+            let db_path = config.palace_db_path();
+            let client = if db_path.exists() {
+                crate::db::open(&db_path)
+                    .ok()
+                    .and_then(|conn| crate::feedback::last_client(&conn))
+            } else {
+                None
+            };
+            let info = crate::feedback::FeedbackInfo::current(config.profile(), client);
+            let url = crate::feedback::discussion_url(&info);
+            println!("\n  Share feedback as a public GitHub discussion. Nothing is sent until you post it.");
+            println!("  Pre-filled environment (edit or remove anything):\n");
+            for line in info.environment().lines() {
+                println!("    {line}");
+            }
+            println!("\n  {url}\n");
+            if !no_open && open_in_browser(&url).is_err() {
+                println!("  Could not open a browser; copy the link above.");
+            }
         }
 
         Commands::Wings => {
@@ -1310,4 +1338,23 @@ fn with_rule_option(
 ) -> crate::install::InstallOptions {
     options.install_rule = install_rule;
     options
+}
+
+/// Open a URL in the default browser without going through a shell, so `&` in
+/// the query string is passed through untouched.
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    let mut command = if cfg!(target_os = "windows") {
+        let mut command = std::process::Command::new("rundll32");
+        command.args(["url.dll,FileProtocolHandler", url]);
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = std::process::Command::new("open");
+        command.arg(url);
+        command
+    } else {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    command.spawn().map(|_| ())
 }
