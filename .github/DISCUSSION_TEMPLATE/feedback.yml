@@ -1,0 +1,29 @@
+title: "feedback: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking a minute. This post is public, so leave out code,
+        paths, and anything from your memory you would not share.
+        Palace sends nothing on its own; `palace feedback` only opens this page.
+  - type: textarea
+    id: helped
+    attributes:
+      label: What helped
+      description: A moment where Palace recalled something useful, or a tool you rely on.
+  - type: textarea
+    id: friction
+    attributes:
+      label: What got in the way
+      description: Setup trouble, noisy prompts, wrong or missing results, slow calls.
+  - type: textarea
+    id: missing
+    attributes:
+      label: What's missing
+      description: Something you expected Palace to do.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Filled in by `palace feedback`. Edit or remove anything you like.
+      render: text
