@@ -4,6 +4,14 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Added
+
+- **`palace install` asks for a GitHub star, once.** The first successful
+  install on a machine ends with one line linking to the repository. Later
+  installs and upgrades don't repeat it.
+
 ## [0.19.3] - 2026-11-09
 
 ### Added

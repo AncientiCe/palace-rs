@@ -754,6 +754,9 @@ pub fn run() -> Result<()> {
                 cfg.save_profile(profile)?;
                 println!("  Profile: {profile}");
                 println!("  Restart Cursor, Codex, Claude Code, or Claude Desktop to load the MCP server.");
+                if let Some(ask) = crate::feedback::take_star_ask(&cfg.config_dir) {
+                    println!("\n  {ask}");
+                }
             }
         }
 

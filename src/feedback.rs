@@ -12,6 +12,25 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 
+/// The project's GitHub page, for the one-time star ask after `palace install`.
+pub const REPO_URL: &str = "https://github.com/AncientiCe/palace-rs";
+const STAR_ASK_MARKER: &str = "star_ask_shown";
+
+/// The line `palace install` prints once per machine asking for a GitHub
+/// star. Returns `None` once it has been shown, and also when the marker can't
+/// be written, so a read-only config folder never makes it repeat.
+pub fn take_star_ask(config_dir: &std::path::Path) -> Option<String> {
+    let marker = config_dir.join(STAR_ASK_MARKER);
+    if marker.exists() {
+        return None;
+    }
+    std::fs::create_dir_all(config_dir).ok()?;
+    std::fs::write(&marker, Utc::now().to_rfc3339()).ok()?;
+    Some(format!(
+        "If Palace helps, a star on GitHub helps others find it: {REPO_URL}"
+    ))
+}
+
 /// Where feedback goes: the repo's Discussions, "Feedback" category.
 pub const DISCUSSION_URL: &str = "https://github.com/AncientiCe/palace-rs/discussions/new";
 const CATEGORY: &str = "feedback";
@@ -204,6 +223,15 @@ mod tests {
             client: Some("claude-ai".into()),
             profile: "coding".into(),
         }
+    }
+
+    #[test]
+    fn star_ask_is_shown_once_per_config_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_dir = dir.path().join("palace-config");
+        let first = take_star_ask(&config_dir).unwrap();
+        assert!(first.contains(REPO_URL));
+        assert!(take_star_ask(&config_dir).is_none());
     }
 
     #[test]
