@@ -120,8 +120,10 @@ pub const MIN_CHUNK_SIZE: usize = 50;
 pub(crate) const MINE_BATCH_SIZE: usize = 200;
 
 pub static READABLE_EXTENSIONS: &[&str] = &[
-    "txt", "md", "py", "js", "ts", "jsx", "tsx", "json", "yaml", "yml", "html", "css", "java",
-    "go", "rs", "rb", "sh", "csv", "sql", "toml",
+ "txt", "md", "py", "js", "ts", "jsx", "tsx", "json", "yaml", "yml", "html", "css", "java",
+ "go", "rs", "rb", "sh", "csv", "sql", "toml",
+ // PHP / Laravel (*.blade.php resolves to suffix "php")
+ "php", "phtml", "phps", "phpt",
 ];
 
 pub static SKIP_FILENAMES: &[&str] = &[
