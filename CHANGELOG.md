@@ -22,6 +22,14 @@ This Rust implementation uses its own `0.x` version track.
   importance. Pass `verbose: true` for the rest: hall, chunk index, creation
   time, metadata and detected entities.
 
+### Fixed
+
+- **Auto-recall no longer hands the Palace protocol back to the agent.** A
+  mined rules file such as `CLAUDE.md` holds a copy of the protocol, and the
+  recall hooks could surface it as a memory when a search named Palace tools.
+  Mined drawers that name three or more protocol tools are now left out of
+  hook recall. Memories you filed about those tools are still recalled.
+
 ## [0.19.4] - 2026-11-09
 
 ### Added
