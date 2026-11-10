@@ -353,3 +353,162 @@ fn recency_gives_fresh_drawers_higher_combined_score() {
         "combined score should be higher than cosine alone (recency bonus expected)"
     );
 }
+
+/// Mined project files next to memories an agent filed about the same topics.
+fn palace_with_mined_and_filed_drawers() -> rusqlite::Connection {
+    let conn = db::open_in_memory().expect("db should open");
+    let mined = [
+        (
+            "/repo/src/convo_miner.rs",
+            "(\"planning\", &[\"plan\", \"roadmap\", \"milestone\", \"deadline\", \"priority\", \
+             \"sprint\", \"backlog\", \"scope\", \"requirement\", \"spec\", \"release\"]),",
+        ),
+        (
+            "/repo/AGENTS.md",
+            "Do not create .md files for plans (PLAN.md, TODO.md, task plans). Keep the plan for \
+             the next task in conversation or tickets, not in the release.",
+        ),
+        (
+            "/repo/src/hooks.rs",
+            "const MUTATING_TOOL_TERMS: &[&str] = &[\"edit\", \"write\", \"replace\", \"patch\", \
+             \"create\", \"delete\", \"todo\", \"open\"];",
+        ),
+        (
+            "/repo/src/db.rs",
+            "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, installs INTEGER); \
+             -- how many installs the users have",
+        ),
+        (
+            "/repo/src/convo_miner.rs",
+            "const MIN_CHUNK_SIZE: usize = 30; pub fn chunk_exchanges(content: &str) -> Vec<(String, usize)> {",
+        ),
+    ];
+    for (chunk, (source, text)) in mined.iter().enumerate() {
+        add_drawer(
+            &conn, "proj", "src", text, None, source, chunk, "miner", 3.0,
+        )
+        .unwrap();
+        palace::store::upsert_mined_file(&conn, source, "proj", "hash", 1).unwrap();
+    }
+    let filed = [
+        (
+            "palace_remember/plan",
+            "Plan for the next release, 0.20.0: authored memory first and smaller responses. \
+             Scope is ranking, hook recall and search output size.",
+        ),
+        (
+            "palace_remember/todo",
+            "Open todo: opt-in encryption at rest behind a cargo feature, off by default.",
+        ),
+        (
+            "palace_remember/users",
+            "Who the users are: mostly Claude Desktop installs through the bundle, then \
+             developers with coding agents on macOS, Linux and Windows.",
+        ),
+        (
+            "palace_remember/chunks",
+            "Exchanges at or under MIN_CHUNK_SIZE are dropped on purpose by chunk_exchanges.",
+        ),
+    ];
+    for (source, text) in filed {
+        add_drawer(&conn, "proj", "notes", text, None, source, 0, "mcp", 3.0).unwrap();
+    }
+    conn
+}
+
+#[test]
+fn filed_memories_outrank_mined_files_for_plain_questions() {
+    let conn = palace_with_mined_and_filed_drawers();
+    for (query, gold) in [
+        ("which todo items are still open?", "palace_remember/todo"),
+        (
+            "who are the users and how many installs?",
+            "palace_remember/users",
+        ),
+    ] {
+        let alike = hybrid_search_with(
+            &conn,
+            query,
+            None,
+            VectorSource::Hot,
+            palace::embedder::active_model(),
+            &DrawerFilter::default(),
+            5,
+            &RankOptions {
+                mined_discount: 0.0,
+                ..RankOptions::default()
+            },
+        )
+        .expect("hybrid search should work");
+        assert!(alike.iter().all(|result| result.mined_discount == 0.0));
+        let top_mined = alike
+            .iter()
+            .find(|result| result.drawer.source_file.starts_with("/repo/"))
+            .expect("a mined file matches");
+        let filed = alike
+            .iter()
+            .find(|result| result.drawer.source_file == gold)
+            .expect("the filed memory matches");
+        assert!(
+            top_mined.combined >= filed.combined,
+            "without the discount a mined file ties or wins: {query}"
+        );
+
+        let results = hybrid_search(&conn, query, None, &DrawerFilter::default(), 5)
+            .expect("hybrid search should work");
+        assert_eq!(
+            results[0].drawer.source_file, gold,
+            "a filed memory should answer: {query}"
+        );
+        for result in &results {
+            let mined = result.drawer.source_file.starts_with("/repo/");
+            assert_eq!(result.mined_discount > 0.0, mined);
+        }
+    }
+}
+
+#[test]
+fn files_the_miner_recorded_are_discounted_whatever_their_extension() {
+    let conn = db::open_in_memory().expect("db should open");
+    for (source, text) in [
+        ("/repo/AGENTS.md", "release checklist: fmt, clippy, tests"),
+        ("/chats/october.md", "> what is on the release checklist?"),
+    ] {
+        add_drawer(&conn, "proj", "docs", text, None, source, 0, "miner", 3.0).unwrap();
+    }
+    palace::store::upsert_mined_file(&conn, "/repo/AGENTS.md", "proj", "hash", 1).unwrap();
+
+    let results = hybrid_search(
+        &conn,
+        "release checklist",
+        None,
+        &DrawerFilter::default(),
+        5,
+    )
+    .expect("hybrid search should work");
+    assert_eq!(results.len(), 2);
+    for result in &results {
+        let mined = result.drawer.source_file == "/repo/AGENTS.md";
+        assert_eq!(result.mined_discount > 0.0, mined);
+    }
+}
+
+#[test]
+fn code_lookups_rank_filed_and_mined_drawers_alike() {
+    let conn = palace_with_mined_and_filed_drawers();
+    for query in [
+        "MIN_CHUNK_SIZE",
+        "chunk_exchanges(content)",
+        "src/convo_miner.rs chunk size",
+        "store::add_drawer chunk",
+        "what does hooks.rs replace?",
+    ] {
+        let results = hybrid_search(&conn, query, None, &DrawerFilter::default(), 5)
+            .expect("hybrid search should work");
+        assert!(!results.is_empty(), "no results for: {query}");
+        assert!(
+            results.iter().all(|result| result.mined_discount == 0.0),
+            "a code lookup should not favour filed memories: {query}"
+        );
+    }
+}

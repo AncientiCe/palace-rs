@@ -25,6 +25,11 @@ const DATE_WEIGHT: f64 = 0.12;
 /// over whole sources of a real palace, not on S: M holds its best R@5 from
 /// 0.05 to 0.2, and the real palace starts losing probes above 0.1.
 const SOURCE_WEIGHT: f64 = 0.1;
+/// Taken off a mined project file's score when the query is a plain question
+/// (see `is_code_lookup`), the size of one intent boost. A question in plain
+/// words is likelier answered by a memory someone filed than by a file that
+/// happens to share its words. Order among mined files is unchanged.
+const MINED_DISCOUNT: f64 = 0.12;
 
 /// Compute an exponential recency bonus based on `filed_at` (RFC 3339 string).
 /// Returns a value in [0, RECENCY_WEIGHT].
@@ -57,6 +62,9 @@ pub struct RankOptions {
     /// Share of the best other matching drawer from the same source added to
     /// each drawer's score; 0 ranks every drawer on its own.
     pub source_weight: f64,
+    /// Amount taken off mined project files when the query is a plain
+    /// question; 0 ranks mined files and filed memories alike.
+    pub mined_discount: f64,
 }
 
 impl Default for RankOptions {
@@ -64,6 +72,7 @@ impl Default for RankOptions {
         Self {
             now: Utc::now(),
             source_weight: SOURCE_WEIGHT,
+            mined_discount: MINED_DISCOUNT,
         }
     }
 }
@@ -79,6 +88,9 @@ pub struct HybridResult {
     pub date_boost: f64,
     /// Bonus from other matching drawers of the same source.
     pub source_boost: f64,
+    /// Amount taken off a mined project file when the query is a plain
+    /// question, not a code lookup.
+    pub mined_discount: f64,
     pub rerank_score: Option<f64>,
     pub combined: f64,
 }
@@ -164,6 +176,7 @@ pub fn hybrid_search_with(
                     preference_match: 0.0,
                     date_boost: 0.0,
                     source_boost: 0.0,
+                    mined_discount: 0.0,
                     rerank_score: None,
                     combined: 0.0,
                 },
@@ -194,6 +207,7 @@ pub fn hybrid_search_with(
                     preference_match: 0.0,
                     date_boost: 0.0,
                     source_boost: 0.0,
+                    mined_discount: 0.0,
                     rerank_score: None,
                     combined: 0.0,
                 },
@@ -210,6 +224,11 @@ pub fn hybrid_search_with(
     }
 
     let time_targets = crate::time_query::time_targets(query, options.now);
+    let mined = if options.mined_discount > 0.0 && !is_code_lookup(query) {
+        Some(crate::store::mined_sources(conn)?)
+    } else {
+        None
+    };
     let max_bm25 = by_id.values().map(|r| r.bm25).fold(0.0, f64::max);
     for result in by_id.values_mut() {
         let normalized_bm25 = if max_bm25 > 0.0 {
@@ -221,12 +240,20 @@ pub fn hybrid_search_with(
         result.preference_match = preference_match(query, &result.drawer.text, &result.drawer.room);
         result.date_boost = date_boost(&time_targets, &result.drawer.created_at);
         let recency = recency_boost(&result.drawer.filed_at, options.now);
-        result.combined = (result.cosine * model.cosine_weight)
+        result.mined_discount = match &mined {
+            Some(mined) if is_mined_file(mined, &result.drawer.source_file) => {
+                options.mined_discount
+            }
+            _ => 0.0,
+        };
+        result.combined = ((result.cosine * model.cosine_weight)
             + (normalized_bm25 * model.bm25_weight)
             + result.coding_boost
             + result.preference_match
             + result.date_boost
-            + recency;
+            + recency
+            - result.mined_discount)
+            .max(0.0);
     }
 
     let mut results: Vec<_> = by_id.into_values().collect();
@@ -241,6 +268,50 @@ pub fn hybrid_search_with(
     });
     results.truncate(n_results);
     Ok(results)
+}
+
+/// True when `source_file` is a project file the miner read: one it recorded,
+/// or (for files mined before it kept records) an absolute path that is not
+/// a conversation transcript.
+pub(crate) fn is_mined_file(mined: &HashSet<String>, source_file: &str) -> bool {
+    mined.contains(source_file)
+        || crate::preference::PreferenceSource::infer(source_file)
+            == crate::preference::PreferenceSource::Code
+}
+
+/// True when the query names code rather than asking in plain words: an
+/// identifier (`snake_case`, `Type::method`, `call()`), a path, or a file name.
+fn is_code_lookup(query: &str) -> bool {
+    query.split_whitespace().any(|token| {
+        let token = token.trim_matches(|ch: char| "?!,;\"'.".contains(ch));
+        token.contains("::")
+            || token.contains('(')
+            || token.contains('/')
+            || token.contains('\\')
+            || has_inner(token, '_')
+            || is_file_name(token)
+    })
+}
+
+/// True when `mark` sits between two letters or digits of `token`.
+fn has_inner(token: &str, mark: char) -> bool {
+    token.match_indices(mark).any(|(index, _)| {
+        let before = token[..index].chars().next_back();
+        let after = token[index + mark.len_utf8()..].chars().next();
+        before.is_some_and(char::is_alphanumeric) && after.is_some_and(char::is_alphanumeric)
+    })
+}
+
+/// True for `name.ext`: a stem of two or more characters and a short
+/// alphabetic extension, so "main.rs" but not "e.g" or "0.19.4".
+fn is_file_name(token: &str) -> bool {
+    let Some((stem, ext)) = token.rsplit_once('.') else {
+        return false;
+    };
+    stem.chars().count() >= 2
+        && stem.chars().any(char::is_alphabetic)
+        && (2..=4).contains(&ext.len())
+        && ext.chars().all(|ch| ch.is_ascii_alphabetic())
 }
 
 /// Lift each drawer by `weight` times the best other matching drawer from the

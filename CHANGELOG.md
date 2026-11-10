@@ -8,6 +8,15 @@ This Rust implementation uses its own `0.x` version track.
 
 ### Changed
 
+- **Filed memories outrank mined project files for plain questions.** When a
+  query is a question in plain words, drawers from mined project files lose
+  0.12 from their score, so a memory filed with `palace_remember`, the diary
+  or `palace_add_drawer` wins over a file that only shares the question's
+  words. A query that names code (an identifier such as `snake_case` or
+  `Type::method`, a path, or a file name) ranks as before, and so does the
+  order among mined files. Search results report the amount as
+  `mined_discount`. On the maintainer's palace this moved the expected memory
+  up for 4 of 8 real questions and down for none.
 - **`palace_list_drawers` is compact by default.** Each drawer comes back
   with its id, wing, room, content, source file, author, filing time and
   importance. Pass `verbose: true` for the rest: hall, chunk index, creation

@@ -252,8 +252,12 @@ the server). In remote mode the server owns the model, so these commands run on 
 
 Agent-generated query dumps are cleaned up before retrieval. Results come back
 with score provenance (`combined`, `cosine`, `bm25`, `coding_boost`,
-`preference_match`, `rerank_score`, `intent`) and the neighbouring chunks from
-the same source file.
+`preference_match`, `mined_discount`, `rerank_score`, `intent`) and the
+neighbouring chunks from the same source file.
+
+A question in plain words favours memories you or your agent filed over mined
+project files that share its words. A query that names code (an identifier, a
+path, a file name) ranks filed and mined drawers alike.
 
 ### Automatic recall (hooks)
 
