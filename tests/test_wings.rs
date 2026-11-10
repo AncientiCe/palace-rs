@@ -59,6 +59,37 @@ fn diary_wings_keep_their_name() {
     );
 }
 
+#[test]
+fn remember_and_add_drawer_file_into_the_existing_wing() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    file(&conn, "my_proj", "notes", "first note", "a");
+
+    let remembered = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &json!({"text": "We chose tokio for the HTTP server.", "wing": "my-proj", "room": "notes"}),
+    );
+    assert_eq!(remembered["wing"], "my_proj", "{remembered}");
+
+    let added = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_add_drawer",
+        &json!({"content": "Release checklist lives in the wiki.", "wing": "My Proj", "room": "notes"}),
+    );
+    assert_eq!(added["wing"], "my_proj", "{added}");
+    assert!(added["drawer_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("drawer_my_proj_"));
+
+    let wings = store::wing_counts(&conn).unwrap();
+    assert_eq!(wings.len(), 1, "no second wing: {wings:?}");
+    assert_eq!(wings["my_proj"], 3);
+}
+
 // ── rename ────────────────────────────────────────────────────────────────
 
 #[test]

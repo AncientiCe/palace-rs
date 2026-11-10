@@ -970,6 +970,10 @@ fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         Some(c) => c,
         None => return json!({"success": false, "error": "content is required"}),
     };
+    let wing = match crate::wings::resolve_wing(conn, &wing) {
+        Ok(wing) => wing,
+        Err(e) => return json!({"success": false, "error": e.to_string()}),
+    };
     let source_file = str_arg(args, "source_file").unwrap_or_default();
     let added_by = str_arg(args, "added_by").unwrap_or_else(|| "mcp".to_string());
 
@@ -1716,8 +1720,11 @@ fn tool_remember(conn: &Connection, args: &Value) -> Value {
     let wing = args
         .get("wing")
         .and_then(|v| v.as_str())
-        .unwrap_or("general")
-        .to_string();
+        .unwrap_or("general");
+    let wing = match crate::wings::resolve_wing(conn, wing) {
+        Ok(wing) => wing,
+        Err(e) => return json!({"error": e.to_string()}),
+    };
     let room = args
         .get("room")
         .and_then(|v| v.as_str())

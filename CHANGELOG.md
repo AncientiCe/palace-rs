@@ -42,6 +42,13 @@ This Rust implementation uses its own `0.x` version track.
 
 ### Fixed
 
+- **A wing name spelled differently no longer starts a second wing.**
+  `palace_remember` and `palace_add_drawer` stored the wing name exactly as
+  the agent wrote it, so `my-proj` or `My Proj` became a new wing beside
+  `my_proj`, and searches scoped to the real wing missed those memories. A
+  write now goes to the wing that exists under the normalized name, and a new
+  wing gets a normalized name. A wing that already exists under an
+  unnormalized name keeps receiving writes to that exact name.
 - **Auto-recall no longer hands the Palace protocol back to the agent.** A
   mined rules file such as `CLAUDE.md` holds a copy of the protocol, and the
   recall hooks could surface it as a memory when a search named Palace tools.
