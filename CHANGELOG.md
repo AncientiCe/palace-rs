@@ -36,6 +36,14 @@ This Rust implementation uses its own `0.x` version track.
   recall hooks could surface it as a memory when a search named Palace tools.
   Mined drawers that name three or more protocol tools are now left out of
   hook recall. Memories you filed about those tools are still recalled.
+- **Status words and labels are no longer saved as entities.** Entity
+  detection treated any capitalized word as a name, so drawers collected
+  entries such as "DONE", "Still" and "Yes", and line labels such as
+  "Decision:" became people. Common words are now skipped in any case,
+  dropped from the ends of a two-word name ("Check Windows" gives
+  "Windows"), and a word that starts a sentence is skipped when the same
+  text also writes it in lower case. Drawers already filed keep their entity
+  list until their content is updated.
 
 ## [0.19.4] - 2026-11-09
 
