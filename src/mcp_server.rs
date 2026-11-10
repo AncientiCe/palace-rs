@@ -260,6 +260,7 @@ pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args:
         "palace_status" => tool_status(conn, config, args),
         "palace_list_wings" => tool_list_wings(conn),
         "palace_create_wing" => tool_create_wing(conn, args),
+        "palace_rename_wing" => tool_rename_wing(conn, args),
         "palace_project_status" => tool_project_status(conn, args),
         "palace_mine" => tool_mine(config, args, None),
         "palace_list_rooms" => tool_list_rooms(conn, args),
@@ -694,6 +695,29 @@ fn tool_create_wing(conn: &Connection, args: &Value) -> Value {
         },
         Err(e) => json!({"success": false, "error": e.to_string()}),
     }
+}
+
+/// Rename a wing, or merge it into an existing one, and keep the project's
+/// `palace.yaml` pointing at it.
+fn tool_rename_wing(conn: &Connection, args: &Value) -> Value {
+    let (Some(from), Some(to)) = (str_arg(args, "from"), str_arg(args, "to")) else {
+        return json!({"success": false, "error": "from and to are required"});
+    };
+    let report = match crate::wings::rename_wing(conn, &from, &to) {
+        Ok(report) => report,
+        Err(e) => return json!({"success": false, "error": e.to_string()}),
+    };
+    let palace_yaml = report.project_path.as_deref().and_then(|dir| {
+        crate::wings::sync_palace_yaml(std::path::Path::new(dir), &report.from, &report.to)
+            .ok()
+            .flatten()
+    });
+    let mut result = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
+    result["success"] = json!(true);
+    if let Some(path) = palace_yaml {
+        result["palace_yaml_updated"] = json!(path.to_string_lossy());
+    }
+    result
 }
 
 /// Report whether the current project/topic is known to the palace, with a
@@ -2300,6 +2324,18 @@ fn tool_list() -> Value {
                     "project_path": {"type": "string", "description": "Canonical path for project wings (optional)"}
                 },
                 "required": ["name"]
+            }
+        },
+        {
+            "name": "palace_rename_wing",
+            "description": "Rename a wing, or merge it into another wing when the new name already exists (e.g. 'my-proj' into 'my_proj'). Moves every drawer, closet, tunnel and mined-file record; drawer ids stay the same. Cannot be undone. Use only when the user asks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from": {"type": "string", "description": "The wing to rename or merge away"},
+                    "to": {"type": "string", "description": "The new name, or the existing wing to merge into"}
+                },
+                "required": ["from", "to"]
             }
         },
         {

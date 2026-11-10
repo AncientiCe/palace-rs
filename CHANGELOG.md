@@ -6,6 +6,17 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Added
+
+- **`palace rename-wing <from> <to>` renames a wing or merges two.** When the
+  new name is already a wing, everything filed under the old one moves into
+  it: drawers, closets, tunnels and mined-file records. Use it to repair a
+  wing that split over spelling, such as `my-proj` beside `my_proj`. Drawer
+  ids stay the same, so existing citations still resolve. If the renamed wing
+  is a mined project, the `wing:` line in its `palace.yaml` is updated too.
+  Agents get the same through the `palace_rename_wing` MCP tool. The change
+  cannot be undone.
+
 ### Changed
 
 - **Filed memories outrank mined project files for plain questions.** When a

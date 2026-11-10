@@ -106,6 +106,7 @@ pub mod sweep;
 pub mod time_query;
 pub mod usage;
 pub mod watcher;
+pub mod wings;
 
 #[cfg(feature = "cli")]
 pub mod cli;

@@ -460,6 +460,7 @@ Run `palace <command> --help` for every flag.
 | `palace wake-up` | Print the L0 identity and L1 essential story |
 | `palace status` | Drawer counts by wing and room |
 | `palace wings` | Registered wings, with kind, drawer count, and last mined time |
+| `palace rename-wing <from> <to>` | Rename a wing, or merge it into an existing wing |
 | `palace timeline` | Knowledge-graph facts in time order (`--entity` to filter) |
 | `palace gain` | How much your agents use Palace, and what it saves |
 
@@ -566,6 +567,7 @@ to turn recording off.
 | `palace_project_status` | Is this project mined, registered but unmined, or unknown? |
 | `palace_mine` | Mine a code repository on demand (after the user agrees) |
 | `palace_create_wing` | Declare a topic or project wing |
+| `palace_rename_wing` | Rename a wing, or merge it into an existing wing |
 | `palace_list_wings` | Registered wings with kind, path, last mined time, and counts |
 | `palace_list_rooms` | Rooms within a wing |
 | `palace_get_taxonomy` | Full wing → room → count tree |

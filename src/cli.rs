@@ -112,6 +112,17 @@ enum Commands {
     Status,
     /// List registered wings (projects and topics) with mined status
     Wings,
+    /// Rename a wing, or merge it into an existing wing
+    ///
+    /// When the new name is already a wing, everything filed under the old
+    /// one moves into it. Drawer ids stay the same. Cannot be undone.
+    #[command(name = "rename-wing")]
+    RenameWing {
+        /// The wing to rename or merge away
+        from: String,
+        /// The new name, or the existing wing to merge into
+        to: String,
+    },
     /// Open a pre-filled public GitHub discussion to share feedback (nothing is sent by Palace)
     Feedback {
         /// Print the link without opening a browser
@@ -592,6 +603,41 @@ pub fn run() -> Result<()> {
                 );
                 if !w.description.is_empty() {
                     println!("        {}", w.description);
+                }
+            }
+            println!();
+        }
+
+        Commands::RenameWing { from, to } => {
+            let db_path = config.palace_db_path();
+            if !db_path.exists() {
+                println!("\n  No palace found at {}", db_path.display());
+                return Ok(());
+            }
+            let conn = crate::db::open(&db_path)?;
+            let report = crate::wings::rename_wing(&conn, &from, &to)?;
+            let action = if report.merged {
+                "Merged wing"
+            } else {
+                "Renamed wing"
+            };
+            let link = if report.merged { "into" } else { "to" };
+            println!(
+                "\n  {action} {} {link} {}: {} drawers, {} closets, {} tunnels, {} mined files.",
+                report.from,
+                report.to,
+                report.drawers,
+                report.closets,
+                report.tunnels,
+                report.mined_files
+            );
+            if let Some(dir) = &report.project_path {
+                if let Some(path) = crate::wings::sync_palace_yaml(
+                    std::path::Path::new(dir),
+                    &report.from,
+                    &report.to,
+                )? {
+                    println!("  Updated the wing name in {}.", path.display());
                 }
             }
             println!();
