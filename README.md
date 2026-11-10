@@ -580,7 +580,7 @@ to turn recording off.
 | `palace_add_drawer` | Store content in a wing and room |
 | `palace_remember` | Store a key fact with importance 5 |
 | `palace_get_drawer` | Fetch a drawer by id |
-| `palace_list_drawers` | List drawers, with optional wing and room filters |
+| `palace_list_drawers` | List drawers, with optional wing and room filters (`verbose` adds hall, metadata, detected entities) |
 | `palace_update_drawer` | Update content and refresh metadata |
 | `palace_delete_drawer` / `palace_forget` | Remove a drawer |
 | `palace_explain` | Full provenance: who stored it, when, from where, importance |

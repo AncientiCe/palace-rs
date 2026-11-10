@@ -1213,10 +1213,33 @@ fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
         room: str_arg(args, "room"),
     };
     let limit = int_arg(args, "limit").unwrap_or(50) as usize;
-    match list_drawers(conn, &filter, limit) {
-        Ok(drawers) => json!({"drawers": drawers, "count": drawers.len()}),
-        Err(err) => json!({"error": err.to_string()}),
+    let drawers = match list_drawers(conn, &filter, limit) {
+        Ok(drawers) => drawers,
+        Err(err) => return json!({"error": err.to_string()}),
+    };
+    if bool_arg(args, "verbose") {
+        return json!({"drawers": drawers, "count": drawers.len()});
     }
+    let compact: Vec<Value> = drawers
+        .iter()
+        .map(|d| {
+            json!({
+                "id": d.id,
+                "wing": d.wing,
+                "room": d.room,
+                "content": d.content,
+                "source_file": d.source_file,
+                "added_by": d.added_by,
+                "filed_at": d.filed_at,
+                "importance": d.importance,
+            })
+        })
+        .collect();
+    json!({
+        "drawers": compact,
+        "count": compact.len(),
+        "more": "Pass verbose=true for hall, chunk_index, created_at, metadata and detected entities.",
+    })
 }
 
 fn tool_update_drawer(conn: &Connection, args: &Value) -> Value {
@@ -2490,11 +2513,12 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_list_drawers",
-            "description": "List drawers with optional wing/room filters.",
+            "description": "List drawers with optional wing/room filters. Pass verbose=true for hall, chunk_index, created_at, metadata and detected entities.",
             "inputSchema": {"type": "object", "properties": {
                 "wing": {"type": "string"},
                 "room": {"type": "string"},
-                "limit": {"type": "integer"}
+                "limit": {"type": "integer"},
+                "verbose": {"type": "boolean", "description": "Include every stored field of each drawer (default: false)"}
             }}
         },
         {

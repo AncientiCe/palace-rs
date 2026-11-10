@@ -4,6 +4,15 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Changed
+
+- **`palace_list_drawers` is compact by default.** Each drawer comes back
+  with its id, wing, room, content, source file, author, filing time and
+  importance. Pass `verbose: true` for the rest: hall, chunk index, creation
+  time, metadata and detected entities.
+
 ## [0.19.4] - 2026-11-09
 
 ### Added
