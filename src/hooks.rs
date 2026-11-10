@@ -383,7 +383,13 @@ fn recall_context(conn: &Connection, input: &Value) -> Option<String> {
 /// (and diary entries recorded for them) are dropped as noise, while this
 /// project's wing, topic wings, and unscoped diaries are kept.
 fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
-    let results = crate::searcher::search_memories(conn, query, None, None, RECALL_CANDIDATES);
+    // Recall prints one line per hit, so neighbouring chunks are not fetched.
+    let options = crate::searcher::SearchOptions {
+        rerank: false,
+        context: false,
+    };
+    let results =
+        crate::searcher::search_memories_with(conn, query, None, None, RECALL_CANDIDATES, options);
     let Some(hits) = results.get("results").and_then(Value::as_array) else {
         return Vec::new();
     };

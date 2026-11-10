@@ -14,7 +14,7 @@ use crate::config::PalaceConfig;
 use crate::dialect::AAAK_SPEC;
 use crate::knowledge_graph as kg;
 use crate::palace_graph;
-use crate::searcher::search_memories_with_options;
+use crate::searcher::{search_memories_with, SearchOptions};
 use crate::store::{
     add_drawer_with_id, check_duplicate, count_drawers, delete_drawer, diary_id, get_drawer,
     list_drawers, preference_search_filtered, room_counts, taxonomy, update_drawer_content,
@@ -891,14 +891,18 @@ fn tool_search(conn: &Connection, args: &Value) -> Value {
     let limit = int_arg(args, "limit").unwrap_or(5) as usize;
     let wing = str_arg(args, "wing");
     let room = str_arg(args, "room");
-    let rerank = bool_arg(args, "rerank");
-    search_memories_with_options(
+    let options = SearchOptions {
+        rerank: bool_arg(args, "rerank"),
+        // On unless the caller turns it off.
+        context: args.get("context").is_none() || bool_arg(args, "context"),
+    };
+    search_memories_with(
         conn,
         &query,
         wing.as_deref(),
         room.as_deref(),
         limit,
-        rerank,
+        options,
     )
 }
 
@@ -2320,7 +2324,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_search",
-            "description": "Semantic search. Returns verbatim drawer content with similarity scores.",
+            "description": "Semantic search. Returns verbatim drawer content with similarity scores, plus the chunks right before and after each hit (source_context).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2328,7 +2332,8 @@ fn tool_list() -> Value {
                     "limit": {"type": "integer", "description": "Max results (default 5)"},
                     "wing": {"type": "string", "description": "Filter by wing (optional)"},
                     "room": {"type": "string", "description": "Filter by room (optional)"},
-                    "rerank": {"type": "boolean", "description": "Rerank top hybrid candidates with the local interaction reranker"}
+                    "rerank": {"type": "boolean", "description": "Rerank top hybrid candidates with the local interaction reranker"},
+                    "context": {"type": "boolean", "description": "Include each hit's neighbouring chunks (default: true). Pass false for a smaller response."}
                 },
                 "required": ["query"]
             }

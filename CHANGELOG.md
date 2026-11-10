@@ -17,6 +17,13 @@ This Rust implementation uses its own `0.x` version track.
   order among mined files. Search results report the amount as
   `mined_discount`. On the maintainer's palace this moved the expected memory
   up for 4 of 8 real questions and down for none.
+- **`palace_search` responses are smaller.** `source_context` now holds only
+  the chunks right before and after a hit, each as `id`, `chunk_index` and
+  `text`. It no longer repeats the hit itself, a neighbour that is already a
+  hit of the same search, or each neighbour's wing, room, source file and
+  timestamps, which are the hit's own. Pass `context: false` to leave the
+  neighbours out. Library callers get the same switch through
+  `searcher::search_memories_with` and `SearchOptions`.
 - **`palace_list_drawers` is compact by default.** Each drawer comes back
   with its id, wing, room, content, source file, author, filing time and
   importance. Pass `verbose: true` for the rest: hall, chunk index, creation

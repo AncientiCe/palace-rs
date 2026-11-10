@@ -163,10 +163,72 @@ fn mcp_search_returns_bounded_source_context_and_score_provenance() {
         .iter()
         .map(|value| value["chunk_index"].as_i64().expect("chunk index"))
         .collect();
-    assert_eq!(chunks, vec![0, 1, 2]);
-    assert!(context
+    assert_eq!(chunks, vec![0, 2], "the hit itself is not repeated");
+    assert_eq!(context[0]["text"], "Earlier unrelated chunk.");
+    assert!(context[0]["id"].is_string());
+    assert!(
+        context[0].get("source_file").is_none(),
+        "neighbours share the hit's source, wing and room"
+    );
+}
+
+#[test]
+fn mcp_search_context_skips_other_hits_and_can_be_turned_off() {
+    let conn = test_db();
+    add(
+        &conn,
+        "decisions",
+        "We chose source context expansion because agents cite decisions.",
+        "sessions/source.md",
+        0,
+    );
+    add(
+        &conn,
+        "decisions",
+        "Source context expansion returns neighbouring chunks of a decision.",
+        "sessions/source.md",
+        1,
+    );
+    add(
+        &conn,
+        "decisions",
+        "Later implementation detail.",
+        "sessions/source.md",
+        2,
+    );
+    let config = palace::config::PalaceConfig::new();
+    let search = |context: Option<bool>| {
+        let mut args = serde_json::json!({
+            "query": "source context expansion decisions",
+            "wing": "palace_rs",
+            "limit": 2
+        });
+        if let Some(context) = context {
+            args["context"] = context.into();
+        }
+        palace::mcp_server::dispatch_tool(&conn, &config, "palace_search", &args)
+    };
+
+    let with_context = search(None);
+    let hits = with_context["results"].as_array().expect("results");
+    assert_eq!(hits.len(), 2);
+    let neighbours: Vec<i64> = hits
         .iter()
-        .all(|value| value["source_file"] == "sessions/source.md"));
+        .flat_map(|hit| hit["source_context"].as_array().expect("context").clone())
+        .map(|value| value["chunk_index"].as_i64().expect("chunk index"))
+        .collect();
+    assert!(
+        neighbours.iter().all(|&chunk| chunk == 2),
+        "a chunk that is a hit is not a neighbour: {neighbours:?}"
+    );
+    assert!(!neighbours.is_empty());
+
+    let without = search(Some(false));
+    assert!(without["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .all(|hit| hit.get("source_context").is_none()));
 }
 
 #[test]
