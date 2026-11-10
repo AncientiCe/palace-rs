@@ -45,6 +45,12 @@ This Rust implementation uses its own `0.x` version track.
   text also writes it in lower case. Drawers already filed keep their entity
   list until their content is updated.
 
+### Security
+
+- **`openssl` updated for RUSTSEC-2026-0463.** The lockfile moves `openssl`
+  from 0.10.76 to 0.10.82. Only Linux builds compile the crate, where
+  downloads use it for TLS.
+
 ## [0.19.4] - 2026-11-09
 
 ### Added
