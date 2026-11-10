@@ -935,7 +935,7 @@ imported as `palace` ([API docs](https://docs.rs/palace-rs)):
 
 ```toml
 [dependencies]
-palace-rs = { version = "0.19", default-features = false }
+palace-rs = { version = "0.20", default-features = false }
 ```
 
 ```rust
