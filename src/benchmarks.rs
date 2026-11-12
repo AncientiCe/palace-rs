@@ -87,6 +87,39 @@ pub struct HitEvaluation {
     pub hit_at_1: bool,
     pub hit_at_5: bool,
     pub hit_at_10: bool,
+    /// `recall_all`: every gold session is within the top K.
+    pub all_at_1: bool,
+    pub all_at_5: bool,
+    pub all_at_10: bool,
+}
+
+/// Gold sessions among the top K drawers as a search returns them, where one
+/// session can take several places. The recall figures rank sessions instead.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct DrawerView {
+    pub any_at_5: usize,
+    pub all_at_5: usize,
+    pub any_at_10: usize,
+    pub all_at_10: usize,
+}
+
+impl DrawerView {
+    fn of(drawer_session_ids: &[String], answer_session_ids: &[String]) -> Self {
+        let hits = evaluate_hits(drawer_session_ids, answer_session_ids);
+        Self {
+            any_at_5: usize::from(hits.hit_at_5),
+            all_at_5: usize::from(hits.all_at_5),
+            any_at_10: usize::from(hits.hit_at_10),
+            all_at_10: usize::from(hits.all_at_10),
+        }
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.any_at_5 += other.any_at_5;
+        self.all_at_5 += other.all_at_5;
+        self.any_at_10 += other.any_at_10;
+        self.all_at_10 += other.all_at_10;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +131,12 @@ pub struct TypeSummary {
     pub recall_at_1: f64,
     pub recall_at_5: f64,
     pub recall_at_10: f64,
+    pub all_hits_at_1: usize,
+    pub all_hits_at_5: usize,
+    pub all_hits_at_10: usize,
+    pub recall_all_at_1: f64,
+    pub recall_all_at_5: f64,
+    pub recall_all_at_10: f64,
 }
 
 impl TypeSummary {
@@ -110,6 +149,12 @@ impl TypeSummary {
             recall_at_1: 0.0,
             recall_at_5: 0.0,
             recall_at_10: 0.0,
+            all_hits_at_1: 0,
+            all_hits_at_5: 0,
+            all_hits_at_10: 0,
+            recall_all_at_1: 0.0,
+            recall_all_at_5: 0.0,
+            recall_all_at_10: 0.0,
         }
     }
 
@@ -118,6 +163,9 @@ impl TypeSummary {
         self.hits_at_1 += usize::from(hits.hit_at_1);
         self.hits_at_5 += usize::from(hits.hit_at_5);
         self.hits_at_10 += usize::from(hits.hit_at_10);
+        self.all_hits_at_1 += usize::from(hits.all_at_1);
+        self.all_hits_at_5 += usize::from(hits.all_at_5);
+        self.all_hits_at_10 += usize::from(hits.all_at_10);
         self.recompute();
     }
 
@@ -129,6 +177,9 @@ impl TypeSummary {
         self.recall_at_1 = self.hits_at_1 as f64 / denominator;
         self.recall_at_5 = self.hits_at_5 as f64 / denominator;
         self.recall_at_10 = self.hits_at_10 as f64 / denominator;
+        self.recall_all_at_1 = self.all_hits_at_1 as f64 / denominator;
+        self.recall_all_at_5 = self.all_hits_at_5 as f64 / denominator;
+        self.recall_all_at_10 = self.all_hits_at_10 as f64 / denominator;
     }
 }
 
@@ -150,6 +201,18 @@ pub struct BenchmarkSummary {
     pub recall_at_1: f64,
     pub recall_at_5: f64,
     pub recall_at_10: f64,
+    pub all_hits_at_1: usize,
+    pub all_hits_at_5: usize,
+    pub all_hits_at_10: usize,
+    pub recall_all_at_1: f64,
+    pub recall_all_at_5: f64,
+    pub recall_all_at_10: f64,
+    /// Questions whose gold sessions are among the top K drawers.
+    #[serde(default)]
+    pub drawer_view: DrawerView,
+    /// The same with `source_decay` off: one source may fill the results.
+    #[serde(default)]
+    pub drawer_view_without_source_decay: DrawerView,
     pub per_question_type: BTreeMap<String, TypeSummary>,
 }
 
@@ -171,6 +234,14 @@ impl BenchmarkSummary {
             recall_at_1: 0.0,
             recall_at_5: 0.0,
             recall_at_10: 0.0,
+            all_hits_at_1: 0,
+            all_hits_at_5: 0,
+            all_hits_at_10: 0,
+            recall_all_at_1: 0.0,
+            recall_all_at_5: 0.0,
+            recall_all_at_10: 0.0,
+            drawer_view: DrawerView::default(),
+            drawer_view_without_source_decay: DrawerView::default(),
             per_question_type: BTreeMap::new(),
         }
     }
@@ -180,6 +251,9 @@ impl BenchmarkSummary {
         self.hits_at_1 += usize::from(hits.hit_at_1);
         self.hits_at_5 += usize::from(hits.hit_at_5);
         self.hits_at_10 += usize::from(hits.hit_at_10);
+        self.all_hits_at_1 += usize::from(hits.all_at_1);
+        self.all_hits_at_5 += usize::from(hits.all_at_5);
+        self.all_hits_at_10 += usize::from(hits.all_at_10);
         self.per_question_type
             .entry(question_type.to_string())
             .or_insert_with(TypeSummary::new)
@@ -195,6 +269,9 @@ impl BenchmarkSummary {
         self.recall_at_1 = self.hits_at_1 as f64 / denominator;
         self.recall_at_5 = self.hits_at_5 as f64 / denominator;
         self.recall_at_10 = self.hits_at_10 as f64 / denominator;
+        self.recall_all_at_1 = self.all_hits_at_1 as f64 / denominator;
+        self.recall_all_at_5 = self.all_hits_at_5 as f64 / denominator;
+        self.recall_all_at_10 = self.all_hits_at_10 as f64 / denominator;
     }
 }
 
@@ -228,6 +305,10 @@ pub enum Chunking {
     /// The conversation miner's path: `normalize_content`, then one chunk per
     /// user turn and its reply (`chunk_exchanges`).
     Exchange,
+    /// Experiment: one drawer per user turn, without the reply.
+    User,
+    /// Experiment: every pair of neighbouring sentences of each user turn.
+    Sentence,
 }
 
 impl Chunking {
@@ -236,8 +317,52 @@ impl Chunking {
             Chunking::Session => "session",
             Chunking::Text => "text",
             Chunking::Exchange => "exchange",
+            Chunking::User => "user",
+            Chunking::Sentence => "sentence",
         }
     }
+}
+
+/// The user turns of a session stored as role/content turns.
+fn user_turns(raw: Option<&Value>) -> Vec<String> {
+    raw.and_then(Value::as_array)
+        .map(|turns| {
+            turns
+                .iter()
+                .filter(|turn| string_field(turn, "role").as_deref() == Some("user"))
+                .filter_map(|turn| string_field(turn, "content"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `text` as windows of `size` neighbouring sentences, one step apart. A text
+/// of `size` sentences or fewer stays whole.
+fn sentence_windows(text: &str, size: usize) -> Vec<String> {
+    let mut sentences: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        current.push(ch);
+        let ends = ch == '\n'
+            || (matches!(ch, '.' | '!' | '?') && chars.peek().is_none_or(|c| c.is_whitespace()));
+        if ends {
+            let sentence = current.trim();
+            // A fragment such as "1." joins the sentence after it.
+            if sentence.len() >= 12 {
+                sentences.push(sentence.to_string());
+                current.clear();
+            }
+        }
+    }
+    let rest = current.trim();
+    if !rest.is_empty() {
+        sentences.push(rest.to_string());
+    }
+    if sentences.len() <= size {
+        return vec![text.trim().to_string()];
+    }
+    sentences.windows(size).map(|w| w.join(" ")).collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -250,6 +375,11 @@ struct CaseOutput {
     hit_at_1: Option<bool>,
     hit_at_5: Option<bool>,
     hit_at_10: Option<bool>,
+    all_at_1: Option<bool>,
+    all_at_5: Option<bool>,
+    all_at_10: Option<bool>,
+    drawer_view: Option<DrawerView>,
+    drawer_view_without_source_decay: Option<DrawerView>,
     ingest_ms: u128,
     query_ms: u128,
     drawer_count: usize,
@@ -262,8 +392,16 @@ struct CaseOutput {
 #[derive(Debug, Serialize)]
 struct ChunkScore {
     session_id: String,
+    drawer_id: String,
     combined: f64,
+    cosine: f64,
+    bm25: f64,
+    coding_boost: f64,
+    preference_match: f64,
     date_boost: f64,
+    source_boost: f64,
+    repeat_discount: f64,
+    text: String,
 }
 
 /// Parses a LongMemEval JSON file. Abstention (`_abs`) questions are skipped
@@ -355,7 +493,18 @@ pub fn evaluate_hits(
     answer_session_ids: &[String],
 ) -> HitEvaluation {
     let answers: HashSet<&str> = answer_session_ids.iter().map(String::as_str).collect();
+    let covers_all = |k: usize| {
+        let top: HashSet<&str> = ranked_session_ids
+            .iter()
+            .take(k)
+            .map(String::as_str)
+            .collect();
+        !answers.is_empty() && answers.iter().all(|id| top.contains(id))
+    };
     HitEvaluation {
+        all_at_1: covers_all(1),
+        all_at_5: covers_all(5),
+        all_at_10: covers_all(10),
         hit_at_1: ranked_session_ids
             .iter()
             .take(1)
@@ -421,6 +570,8 @@ pub fn run_benchmark(options: &RunOptions) -> Result<BenchmarkSummary> {
             Chunking::Session => "one drawer per session",
             Chunking::Text => "text chunks, best chunk per session",
             Chunking::Exchange => "exchange chunks, best chunk per session",
+            Chunking::User => "user turns, best turn per session",
+            Chunking::Sentence => "user sentence pairs, best pair per session",
         }
     );
     let mut cache = EmbeddingCache::default();
@@ -435,8 +586,17 @@ pub fn run_benchmark(options: &RunOptions) -> Result<BenchmarkSummary> {
                         hit_at_1: case.hit_at_1.unwrap_or(false),
                         hit_at_5: case.hit_at_5.unwrap_or(false),
                         hit_at_10: case.hit_at_10.unwrap_or(false),
+                        all_at_1: case.all_at_1.unwrap_or(false),
+                        all_at_5: case.all_at_5.unwrap_or(false),
+                        all_at_10: case.all_at_10.unwrap_or(false),
                     };
                     summary.record(&instance.question_type, &hits);
+                    if let Some(view) = &case.drawer_view {
+                        summary.drawer_view.add(view);
+                    }
+                    if let Some(view) = &case.drawer_view_without_source_decay {
+                        summary.drawer_view_without_source_decay.add(view);
+                    }
                 } else {
                     summary.unscored_questions += 1;
                 }
@@ -453,6 +613,11 @@ pub fn run_benchmark(options: &RunOptions) -> Result<BenchmarkSummary> {
                     hit_at_1: None,
                     hit_at_5: None,
                     hit_at_10: None,
+                    all_at_1: None,
+                    all_at_5: None,
+                    all_at_10: None,
+                    drawer_view: None,
+                    drawer_view_without_source_decay: None,
                     ingest_ms: 0,
                     query_ms: 0,
                     drawer_count: 0,
@@ -474,12 +639,13 @@ pub fn run_benchmark(options: &RunOptions) -> Result<BenchmarkSummary> {
                 0
             };
             eprintln!(
-                "[{} {}] {}/{}  recall@5={:.3}  failed={}  unscored={}  {:.1}q/s  eta={}",
+                "[{} {}] {}/{}  recall_any@5={:.3}  recall_all@5={:.3}  failed={}  unscored={}  {:.1}q/s  eta={}",
                 options.benchmark,
                 summary.model,
                 done,
                 total,
                 summary.recall_at_5,
+                summary.recall_all_at_5,
                 summary.failed_questions,
                 summary.unscored_questions,
                 rate,
@@ -537,6 +703,17 @@ fn run_case(
                     };
                     crate::convo_miner::chunk_exchanges(&transcript)
                 }
+                Chunking::User => user_turns(session.raw.as_ref())
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, text)| (text, index))
+                    .collect(),
+                Chunking::Sentence => user_turns(session.raw.as_ref())
+                    .iter()
+                    .flat_map(|turn| sentence_windows(turn, 2))
+                    .enumerate()
+                    .map(|(index, text)| (text, index))
+                    .collect(),
             };
             if chunks.is_empty() {
                 // Sessions too short to chunk stay whole.
@@ -637,14 +814,54 @@ fn run_case(
     )?;
     let query_ms = query_start.elapsed().as_millis();
 
+    let scored = !instance.answer_session_ids.is_empty();
+    let drawer_sessions = |results: &[crate::ranker::HybridResult]| -> Vec<String> {
+        results
+            .iter()
+            .take(TOP_K)
+            .filter_map(|result| source_to_session.get(&result.drawer.source_file).cloned())
+            .collect()
+    };
+    let drawer_view =
+        scored.then(|| DrawerView::of(&drawer_sessions(&results), &instance.answer_session_ids));
+    let drawer_view_without_source_decay = if scored {
+        let plain = hybrid_search_with(
+            &conn,
+            &instance.question,
+            query_embedding.as_deref(),
+            VectorSource::Hot,
+            options.model,
+            &DrawerFilter::default(),
+            TOP_K,
+            &RankOptions {
+                source_decay: 1.0,
+                ..rank_options.clone()
+            },
+        )?;
+        Some(DrawerView::of(
+            &drawer_sessions(&plain),
+            &instance.answer_session_ids,
+        ))
+    } else {
+        None
+    };
+
     let chunks = results
         .iter()
         .take(options.dump_chunks)
         .filter_map(|result| {
             Some(ChunkScore {
                 session_id: source_to_session.get(&result.drawer.source_file)?.clone(),
+                drawer_id: result.drawer.id.clone(),
                 combined: result.combined,
+                cosine: result.cosine,
+                bm25: result.bm25,
+                coding_boost: result.coding_boost,
+                preference_match: result.preference_match,
                 date_boost: result.date_boost,
+                source_boost: result.source_boost,
+                repeat_discount: result.repeat_discount,
+                text: result.drawer.text.clone(),
             })
         })
         .collect();
@@ -656,7 +873,6 @@ fn run_case(
         .filter(|session_id| seen.insert(session_id.clone()))
         .take(TOP_K)
         .collect();
-    let scored = !instance.answer_session_ids.is_empty();
     let hits = scored.then(|| evaluate_hits(&ranked_session_ids, &instance.answer_session_ids));
 
     Ok(CaseOutput {
@@ -668,6 +884,11 @@ fn run_case(
         hit_at_1: hits.as_ref().map(|hit| hit.hit_at_1),
         hit_at_5: hits.as_ref().map(|hit| hit.hit_at_5),
         hit_at_10: hits.as_ref().map(|hit| hit.hit_at_10),
+        all_at_1: hits.as_ref().map(|hit| hit.all_at_1),
+        all_at_5: hits.as_ref().map(|hit| hit.all_at_5),
+        all_at_10: hits.as_ref().map(|hit| hit.all_at_10),
+        drawer_view,
+        drawer_view_without_source_decay,
         ingest_ms,
         query_ms,
         drawer_count: drawers.len(),

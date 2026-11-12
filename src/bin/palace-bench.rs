@@ -119,25 +119,28 @@ fn run(benchmark: &str, args: RunArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&summary)?);
         summaries.push(summary);
     }
-    if summaries.len() > 1 {
-        println!("{}", summary_table(&summaries));
-    }
+    println!("{}", summary_table(&summaries));
     Ok(())
 }
 
-/// Markdown table of aggregate and per-question-type recall@1/@5/@10.
+/// Markdown tables of aggregate and per-question-type recall at 1, 5 and 10:
+/// `any` counts a question when one gold session is in the top K, `all` when
+/// every gold session is.
 #[cfg(feature = "benchmarks")]
 fn summary_table(summaries: &[BenchmarkSummary]) -> String {
     let mut out = String::from(
-        "| Model | R@1 | R@5 | R@10 | Ingest | Query |\n|---|---:|---:|---:|---:|---:|\n",
+        "| Model | any@1 | any@5 | any@10 | all@1 | all@5 | all@10 | Ingest | Query |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     );
     for s in summaries {
         out.push_str(&format!(
-            "| `{}` | {:.3} | {:.3} | {:.3} | {}s | {}ms |\n",
+            "| `{}` | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {}s | {}ms |\n",
             s.model,
             s.recall_at_1,
             s.recall_at_5,
             s.recall_at_10,
+            s.recall_all_at_1,
+            s.recall_all_at_5,
+            s.recall_all_at_10,
             s.ingest_ms / 1000,
             s.query_ms
         ));
@@ -150,13 +153,19 @@ fn summary_table(summaries: &[BenchmarkSummary]) -> String {
         .collect();
     for question_type in types {
         out.push_str(&format!(
-            "\n{question_type}\n\n| Model | R@1 | R@5 | R@10 |\n|---|---:|---:|---:|\n"
+            "\n{question_type}\n\n| Model | any@1 | any@5 | any@10 | all@1 | all@5 | all@10 |\n|---|---:|---:|---:|---:|---:|---:|\n"
         ));
         for s in summaries {
             if let Some(t) = s.per_question_type.get(question_type) {
                 out.push_str(&format!(
-                    "| `{}` | {:.3} | {:.3} | {:.3} |\n",
-                    s.model, t.recall_at_1, t.recall_at_5, t.recall_at_10
+                    "| `{}` | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} |\n",
+                    s.model,
+                    t.recall_at_1,
+                    t.recall_at_5,
+                    t.recall_at_10,
+                    t.recall_all_at_1,
+                    t.recall_all_at_5,
+                    t.recall_all_at_10
                 ));
             }
         }
