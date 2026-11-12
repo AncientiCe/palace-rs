@@ -213,9 +213,9 @@ pub struct BenchmarkSummary {
     /// The same with `source_decay` off: one source may fill the results.
     #[serde(default)]
     pub drawer_view_without_source_decay: DrawerView,
-    /// Estimated tokens in the top 5 and top 10 drawers a search returns,
-    /// averaged over the evaluated questions. A token is counted as four
-    /// bytes of text, as `palace gain` counts them.
+    /// Estimated tokens in the best drawer of each of the top 5 and top 10
+    /// ranked sessions, averaged over the evaluated questions. A token is
+    /// counted as four bytes of text, as `palace gain` counts them.
     #[serde(default)]
     pub returned_tokens_at_5: f64,
     #[serde(default)]
@@ -296,10 +296,21 @@ impl BenchmarkSummary {
     }
 }
 
-/// Estimated tokens in the first `k` results' text: four bytes a token.
-fn returned_tokens(results: &[crate::ranker::HybridResult], k: usize) -> usize {
+/// Estimated tokens in the best drawer of each of the first `k` ranked
+/// sessions, the text the recall figures at `k` stand for: four bytes a token.
+fn returned_tokens(
+    results: &[crate::ranker::HybridResult],
+    source_to_session: &HashMap<String, String>,
+    k: usize,
+) -> usize {
+    let mut seen = HashSet::new();
     results
         .iter()
+        .filter(|result| {
+            source_to_session
+                .get(&result.drawer.source_file)
+                .is_some_and(|session_id| seen.insert(session_id))
+        })
         .take(k)
         .map(|result| result.drawer.text.len())
         .sum::<usize>()
@@ -854,8 +865,8 @@ fn run_case(
     )?;
     let query_ms = query_start.elapsed().as_millis();
 
-    let returned_tokens_at_5 = returned_tokens(&results, 5);
-    let returned_tokens_at_10 = returned_tokens(&results, 10);
+    let returned_tokens_at_5 = returned_tokens(&results, &source_to_session, 5);
+    let returned_tokens_at_10 = returned_tokens(&results, &source_to_session, 10);
     let scored = !instance.answer_session_ids.is_empty();
     let drawer_sessions = |results: &[crate::ranker::HybridResult]| -> Vec<String> {
         results

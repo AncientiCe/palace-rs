@@ -125,8 +125,8 @@ fn run(benchmark: &str, args: RunArgs) -> Result<()> {
 
 /// Markdown tables of aggregate and per-question-type recall at 1, 5 and 10:
 /// `any` counts a question when one gold session is in the top K, `all` when
-/// every gold session is. `tokens@5` is the estimated size of the top 5
-/// drawers a search returns, averaged per question.
+/// every gold session is. `tokens@5` is the estimated size of the best
+/// drawer of each of the top 5 sessions, averaged per question.
 #[cfg(feature = "benchmarks")]
 fn summary_table(summaries: &[BenchmarkSummary]) -> String {
     let mut out = String::from(

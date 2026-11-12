@@ -188,8 +188,13 @@ palace-bench long-mem-eval ... 2>&1 | tee run.log
 A progress line looks like:
 
 ```
-[longmemeval] 200/470  recall@5=0.978  failed=0  unscored=0  0.6q/s  eta=7m32s
+[longmemeval minilm-l6-v2-q8] 200/470  recall_any@5=0.985  recall_all@5=0.890  tokens@5=1702  failed=0  unscored=0  0.3q/s  eta=14m10s
 ```
+
+`recall_any@5` counts a question when one of its gold sessions is in the top
+5, `recall_all@5` only when every one is. `tokens@5` is the estimated size of
+the best drawer of each of the top 5 sessions (four bytes a token), averaged
+over the questions so far.
 
 For lower-level monitoring, from a second terminal:
 
@@ -218,8 +223,8 @@ pkill -INT palace-bench
 
 Each run writes two files into its `output_dir` (see `run_benchmark` in `src/benchmarks.rs`):
 
-- `<benchmark>_cases.jsonl` — one line per question with `ranked_session_ids`, `hit_at_{1,5,10}`, timings, error if any.
-- `<benchmark>_summary.json` — aggregate `recall@1/5/10`, `ingest_ms`, `query_ms`, `per_question_type` breakdown. Same JSON is also pretty-printed to stdout.
+- `<benchmark>_cases.jsonl` — one line per question with `ranked_session_ids`, `hit_at_{1,5,10}` (any gold session), `all_at_{1,5,10}` (every gold session), `returned_tokens_at_{5,10}`, the top-K drawer view, timings, error if any.
+- `<benchmark>_summary.json` — aggregate `recall_at_{1,5,10}` (any) and `recall_all_at_{1,5,10}`, `returned_tokens_at_{5,10}`, `drawer_view` (gold sessions among the top-K drawers a search returns, with and without source decay), `ingest_ms`, `query_ms`, `per_question_type` breakdown. Same JSON is also pretty-printed to stdout, followed by a markdown table.
 
 Where `<benchmark>` is `longmemeval` or `beam`.
 
