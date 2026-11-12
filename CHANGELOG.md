@@ -4,6 +4,20 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Changed
+
+- **One source no longer fills the search results.** Each drawer keeps 0.9 of
+  its score for every higher-ranked drawer from the same conversation or
+  file, so a second source with a slightly weaker match gets a place before
+  the first source's third or fourth chunk. A question whose answer is spread
+  over several conversations now finds more of them in the top results. A
+  source's best drawer keeps its score, so the first result is the same as
+  before, as is the order within a source; drawers without a source file are
+  left alone. Search results report the amount as `repeat_discount`, and
+  `RankOptions::source_decay` sets the share kept (1 turns it off).
+
 ## [0.20.0] - 2026-11-10
 
 ### Added

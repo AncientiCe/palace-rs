@@ -203,6 +203,7 @@ pub fn search_memories_with(
                 "date_boost": r.date_boost,
                 "source_boost": r.source_boost,
                 "mined_discount": r.mined_discount,
+                "repeat_discount": r.repeat_discount,
                 "rerank_score": r.rerank_score,
                 "intent": intent.as_str(),
             });
@@ -298,6 +299,7 @@ fn merge_preference_results(
             date_boost: 0.0,
             source_boost: 0.0,
             mined_discount: 0.0,
+            repeat_discount: 0.0,
             rerank_score: None,
             combined,
             drawer: SearchResult {
