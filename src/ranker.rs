@@ -25,6 +25,12 @@ const DATE_WEIGHT: f64 = 0.12;
 /// over whole sources of a real palace, not on S: M holds its best R@5 from
 /// 0.05 to 0.2, and the real palace starts losing probes above 0.1.
 const SOURCE_WEIGHT: f64 = 0.1;
+/// What a drawer keeps of its score for each higher-ranked drawer from the
+/// same source (see `spread_sources`). Measured on LongMemEval S exchange
+/// chunks, top 5 drawers: 0.9 covers every gold session for 395 of 470
+/// questions against 344 without it, and holds more of the evidence turns;
+/// below 0.85 further sources come in at the cost of evidence turns.
+const SOURCE_DECAY: f64 = 0.9;
 /// Taken off a mined project file's score when the query is a plain question
 /// (see `is_code_lookup`), the size of one intent boost. A question in plain
 /// words is likelier answered by a memory someone filed than by a file that
@@ -65,6 +71,9 @@ pub struct RankOptions {
     /// Amount taken off mined project files when the query is a plain
     /// question; 0 ranks mined files and filed memories alike.
     pub mined_discount: f64,
+    /// What a drawer keeps of its score for each higher-ranked drawer from
+    /// the same source; 1 lets one source fill the results.
+    pub source_decay: f64,
 }
 
 impl Default for RankOptions {
@@ -73,6 +82,7 @@ impl Default for RankOptions {
             now: Utc::now(),
             source_weight: SOURCE_WEIGHT,
             mined_discount: MINED_DISCOUNT,
+            source_decay: SOURCE_DECAY,
         }
     }
 }
@@ -91,6 +101,9 @@ pub struct HybridResult {
     /// Amount taken off a mined project file when the query is a plain
     /// question, not a code lookup.
     pub mined_discount: f64,
+    /// Amount taken off because higher-ranked drawers come from the same
+    /// source.
+    pub repeat_discount: f64,
     pub rerank_score: Option<f64>,
     pub combined: f64,
 }
@@ -177,6 +190,7 @@ pub fn hybrid_search_with(
                     date_boost: 0.0,
                     source_boost: 0.0,
                     mined_discount: 0.0,
+                    repeat_discount: 0.0,
                     rerank_score: None,
                     combined: 0.0,
                 },
@@ -208,6 +222,7 @@ pub fn hybrid_search_with(
                     date_boost: 0.0,
                     source_boost: 0.0,
                     mined_discount: 0.0,
+                    repeat_discount: 0.0,
                     rerank_score: None,
                     combined: 0.0,
                 },
@@ -258,14 +273,11 @@ pub fn hybrid_search_with(
 
     let mut results: Vec<_> = by_id.into_values().collect();
     add_source_evidence(&mut results, options.source_weight);
+    sort_by_score(&mut results);
+    spread_sources(&mut results, options.source_decay);
     for result in &mut results {
         result.drawer.similarity = (result.combined * 1000.0).round() / 1000.0;
     }
-    results.sort_by(|a, b| {
-        b.combined
-            .partial_cmp(&a.combined)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
     results.truncate(n_results);
     Ok(results)
 }
@@ -349,6 +361,37 @@ fn add_source_evidence(results: &mut [HybridResult], weight: f64) {
         result.source_boost = weight * sibling;
         result.combined += result.source_boost;
     }
+}
+
+fn sort_by_score(results: &mut [HybridResult]) {
+    results.sort_by(|a, b| {
+        b.combined
+            .partial_cmp(&a.combined)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+/// Keep one source from filling the results. `results` arrive best first;
+/// each drawer keeps `decay` of its score for every higher-ranked drawer from
+/// the same source, so a second source with a slightly weaker match gets a
+/// place before the first source's third or fourth chunk. A source's best
+/// drawer keeps its score, order within a source holds, and drawers without
+/// a source file are left alone.
+fn spread_sources(results: &mut [HybridResult], decay: f64) {
+    if !(0.0..1.0).contains(&decay) {
+        return;
+    }
+    let mut seen: HashMap<String, i32> = HashMap::new();
+    for result in results.iter_mut() {
+        if result.drawer.source_file.is_empty() {
+            continue;
+        }
+        let earlier = seen.entry(result.drawer.source_file.clone()).or_insert(0);
+        result.repeat_discount = result.combined * (1.0 - decay.powi(*earlier));
+        result.combined -= result.repeat_discount;
+        *earlier += 1;
+    }
+    sort_by_score(results);
 }
 
 fn bm25_scores(

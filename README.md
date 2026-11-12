@@ -252,7 +252,8 @@ the server). In remote mode the server owns the model, so these commands run on 
 
 Agent-generated query dumps are cleaned up before retrieval. Results come back
 with score provenance (`combined`, `cosine`, `bm25`, `coding_boost`,
-`preference_match`, `mined_discount`, `rerank_score`, `intent`) and the
+`preference_match`, `mined_discount`, `repeat_discount`, `rerank_score`,
+`intent`) and the
 chunks right before and after each hit in its source file. Pass
 `context: false` to `palace_search` to leave those out.
 

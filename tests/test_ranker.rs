@@ -289,6 +289,87 @@ fn sources_matching_in_several_places_rank_higher() {
 }
 
 #[test]
+fn one_source_does_not_fill_the_results() {
+    let conn = db::open_in_memory().expect("db should open");
+    for (source, chunk, text) in [
+        ("several.txt", 0, "garden tomatoes basil"),
+        ("several.txt", 1, "garden tomatoes basil beds"),
+        ("several.txt", 2, "garden tomatoes basil rows by the fence"),
+        (
+            "other.txt",
+            0,
+            "garden tomatoes basil for the long summer soup evenings",
+        ),
+        ("", 0, "garden basil"),
+        ("", 1, "basil tomatoes"),
+    ] {
+        add_drawer(&conn, "w", "r", text, None, source, chunk, "test", 3.0).unwrap();
+    }
+    let search = |source_decay: f64| {
+        hybrid_search_with(
+            &conn,
+            "garden tomatoes basil",
+            None,
+            VectorSource::Hot,
+            palace::embedder::active_model(),
+            &DrawerFilter::default(),
+            10,
+            &RankOptions {
+                source_decay,
+                ..RankOptions::default()
+            },
+        )
+        .expect("hybrid search should work")
+    };
+    let sources = |results: &[palace::ranker::HybridResult]| -> Vec<String> {
+        results
+            .iter()
+            .map(|result| result.drawer.source_file.clone())
+            .collect()
+    };
+    let chunks_of_several = |results: &[palace::ranker::HybridResult]| -> Vec<String> {
+        results
+            .iter()
+            .filter(|result| result.drawer.source_file == "several.txt")
+            .map(|result| result.drawer.text.clone())
+            .collect()
+    };
+
+    let filled = search(1.0);
+    assert_eq!(sources(&filled)[..3], ["several.txt"; 3]);
+    assert!(filled.iter().all(|result| result.repeat_discount == 0.0));
+
+    let spread = search(0.5);
+    assert_eq!(sources(&spread)[..2], ["several.txt", "other.txt"]);
+    assert_eq!(
+        spread[0].repeat_discount, 0.0,
+        "a source's best drawer keeps its score"
+    );
+    assert_eq!(spread[0].combined, filled[0].combined);
+    assert_eq!(
+        chunks_of_several(&spread),
+        chunks_of_several(&filled),
+        "order within a source holds"
+    );
+    assert!(
+        spread
+            .iter()
+            .filter(|result| result.drawer.source_file.is_empty())
+            .all(|result| result.repeat_discount == 0.0),
+        "drawers without a source are not one source"
+    );
+
+    let usual = search(RankOptions::default().source_decay);
+    let repeats: Vec<f64> = usual
+        .iter()
+        .filter(|result| result.drawer.source_file == "several.txt")
+        .map(|result| result.repeat_discount)
+        .collect();
+    assert_eq!(repeats[0], 0.0);
+    assert!(repeats[1] > 0.0 && repeats[2] > repeats[1]);
+}
+
+#[test]
 fn hybrid_search_result_has_filed_at() {
     // Verify the new filed_at field is populated on SearchResult.
     let conn = db::open_in_memory().expect("db should open");
