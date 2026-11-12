@@ -112,6 +112,23 @@ enum Commands {
     Status,
     /// List registered wings (projects and topics) with mined status
     Wings,
+    /// Rename a wing, or merge it into an existing wing
+    ///
+    /// When the new name is already a wing, everything filed under the old
+    /// one moves into it. Drawer ids stay the same. Cannot be undone.
+    #[command(name = "rename-wing")]
+    RenameWing {
+        /// The wing to rename or merge away
+        from: String,
+        /// The new name, or the existing wing to merge into
+        to: String,
+    },
+    /// Open a pre-filled public GitHub discussion to share feedback (nothing is sent by Palace)
+    Feedback {
+        /// Print the link without opening a browser
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Show automatic MCP usage gains and estimated savings
     Gain {
         /// Filter to one project
@@ -546,6 +563,28 @@ pub fn run() -> Result<()> {
             crate::miner::status(&conn, &db_path)?;
         }
 
+        Commands::Feedback { no_open } => {
+            let db_path = config.palace_db_path();
+            let client = if db_path.exists() {
+                crate::db::open(&db_path)
+                    .ok()
+                    .and_then(|conn| crate::feedback::last_client(&conn))
+            } else {
+                None
+            };
+            let info = crate::feedback::FeedbackInfo::current(config.profile(), client);
+            let url = crate::feedback::discussion_url(&info);
+            println!("\n  Share feedback as a public GitHub discussion. Nothing is sent until you post it.");
+            println!("  Pre-filled environment (edit or remove anything):\n");
+            for line in info.environment().lines() {
+                println!("    {line}");
+            }
+            println!("\n  {url}\n");
+            if !no_open && open_in_browser(&url).is_err() {
+                println!("  Could not open a browser; copy the link above.");
+            }
+        }
+
         Commands::Wings => {
             let db_path = config.palace_db_path();
             if !db_path.exists() {
@@ -564,6 +603,41 @@ pub fn run() -> Result<()> {
                 );
                 if !w.description.is_empty() {
                     println!("        {}", w.description);
+                }
+            }
+            println!();
+        }
+
+        Commands::RenameWing { from, to } => {
+            let db_path = config.palace_db_path();
+            if !db_path.exists() {
+                println!("\n  No palace found at {}", db_path.display());
+                return Ok(());
+            }
+            let conn = crate::db::open(&db_path)?;
+            let report = crate::wings::rename_wing(&conn, &from, &to)?;
+            let action = if report.merged {
+                "Merged wing"
+            } else {
+                "Renamed wing"
+            };
+            let link = if report.merged { "into" } else { "to" };
+            println!(
+                "\n  {action} {} {link} {}: {} drawers, {} closets, {} tunnels, {} mined files.",
+                report.from,
+                report.to,
+                report.drawers,
+                report.closets,
+                report.tunnels,
+                report.mined_files
+            );
+            if let Some(dir) = &report.project_path {
+                if let Some(path) = crate::wings::sync_palace_yaml(
+                    std::path::Path::new(dir),
+                    &report.from,
+                    &report.to,
+                )? {
+                    println!("  Updated the wing name in {}.", path.display());
                 }
             }
             println!();
@@ -726,6 +800,9 @@ pub fn run() -> Result<()> {
                 cfg.save_profile(profile)?;
                 println!("  Profile: {profile}");
                 println!("  Restart Cursor, Codex, Claude Code, or Claude Desktop to load the MCP server.");
+                if let Some(ask) = crate::feedback::take_star_ask(&cfg.config_dir) {
+                    println!("\n  {ask}");
+                }
             }
         }
 
@@ -1310,4 +1387,23 @@ fn with_rule_option(
 ) -> crate::install::InstallOptions {
     options.install_rule = install_rule;
     options
+}
+
+/// Open a URL in the default browser without going through a shell, so `&` in
+/// the query string is passed through untouched.
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    let mut command = if cfg!(target_os = "windows") {
+        let mut command = std::process::Command::new("rundll32");
+        command.args(["url.dll,FileProtocolHandler", url]);
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = std::process::Command::new("open");
+        command.arg(url);
+        command
+    } else {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    command.spawn().map(|_| ())
 }

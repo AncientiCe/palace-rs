@@ -709,3 +709,54 @@ fn goose_blocks_stop_but_never_injects_context() {
     let out = post_tool_use_response(&conn, &grep_tokio("/work/proj"), HookClient::Goose);
     assert_eq!(out, json!({}));
 }
+
+#[test]
+fn recall_skips_mined_copies_of_the_palace_protocol() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    let protocol_copy = "SESSION START: palace_status, then palace_session_context, then \
+        palace_diary_search. BEFORE ANSWERING: palace_search and palace_kg_query. AFTER WORK: \
+        palace_diary_write and palace_kg_add.";
+    let embedding = palace::embedder::embed_document(protocol_copy).unwrap();
+    palace::store::add_drawer(
+        &conn,
+        "notes",
+        "general",
+        protocol_copy,
+        Some(&embedding),
+        "/repo/CLAUDE.md",
+        0,
+        "miner",
+        3.0,
+    )
+    .unwrap();
+    palace::store::upsert_mined_file(&conn, "/repo/CLAUDE.md", "notes", "hash", 1).unwrap();
+    palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_remember",
+        &json!({
+            "text": "We decided agents call palace_search and palace_kg_query before answering \
+                     and palace_diary_write after work, because rules alone were skipped.",
+            "wing": "notes",
+            "room": "decisions"
+        }),
+    );
+
+    let input = json!({
+        "tool_name": "Grep",
+        "tool_input": {"pattern": "palace_search palace_kg_query palace_diary_write"},
+        "cwd": ""
+    });
+    let out: Value = post_tool_use_response(&conn, &input, HookClient::Cursor);
+    let ctx = out["additional_context"].as_str().unwrap_or("");
+
+    assert!(
+        ctx.contains("rules alone were skipped"),
+        "the filed decision should be recalled: {out}"
+    );
+    assert!(
+        !ctx.contains("SESSION START"),
+        "a mined copy of the protocol is already in every session: {out}"
+    );
+}

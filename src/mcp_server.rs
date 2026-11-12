@@ -14,7 +14,7 @@ use crate::config::PalaceConfig;
 use crate::dialect::AAAK_SPEC;
 use crate::knowledge_graph as kg;
 use crate::palace_graph;
-use crate::searcher::search_memories_with_options;
+use crate::searcher::{search_memories_with, SearchOptions};
 use crate::store::{
     add_drawer_with_id, check_duplicate, count_drawers, delete_drawer, diary_id, get_drawer,
     list_drawers, preference_search_filtered, room_counts, taxonomy, update_drawer_content,
@@ -96,6 +96,9 @@ pub fn run() -> Result<()> {
         }
     }
 
+    // stdin closed. Let a model load that is still in flight finish first:
+    // exiting mid-load crashes ONNX Runtime on teardown.
+    crate::embedder::wait_for_warm_up(std::time::Duration::from_secs(60));
     Ok(())
 }
 
@@ -135,6 +138,11 @@ fn handle_request(
                 .get("protocolVersion")
                 .and_then(|value| value.as_str())
                 .unwrap_or("2024-11-05");
+            let client = params
+                .pointer("/clientInfo/name")
+                .and_then(|value| value.as_str());
+            // Best-effort and local only: counts sessions for the feedback hint.
+            let _ = crate::feedback::note_mcp_session(conn, client);
             Some(initialize_result(protocol_version, config.profile()))
         }
         "notifications/initialized" => return None,
@@ -252,6 +260,7 @@ pub fn dispatch_tool(conn: &Connection, config: &PalaceConfig, name: &str, args:
         "palace_status" => tool_status(conn, config, args),
         "palace_list_wings" => tool_list_wings(conn),
         "palace_create_wing" => tool_create_wing(conn, args),
+        "palace_rename_wing" => tool_rename_wing(conn, args),
         "palace_project_status" => tool_project_status(conn, args),
         "palace_mine" => tool_mine(config, args, None),
         "palace_list_rooms" => tool_list_rooms(conn, args),
@@ -688,6 +697,29 @@ fn tool_create_wing(conn: &Connection, args: &Value) -> Value {
     }
 }
 
+/// Rename a wing, or merge it into an existing one, and keep the project's
+/// `palace.yaml` pointing at it.
+fn tool_rename_wing(conn: &Connection, args: &Value) -> Value {
+    let (Some(from), Some(to)) = (str_arg(args, "from"), str_arg(args, "to")) else {
+        return json!({"success": false, "error": "from and to are required"});
+    };
+    let report = match crate::wings::rename_wing(conn, &from, &to) {
+        Ok(report) => report,
+        Err(e) => return json!({"success": false, "error": e.to_string()}),
+    };
+    let palace_yaml = report.project_path.as_deref().and_then(|dir| {
+        crate::wings::sync_palace_yaml(std::path::Path::new(dir), &report.from, &report.to)
+            .ok()
+            .flatten()
+    });
+    let mut result = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
+    result["success"] = json!(true);
+    if let Some(path) = palace_yaml {
+        result["palace_yaml_updated"] = json!(path.to_string_lossy());
+    }
+    result
+}
+
 /// Report whether the current project/topic is known to the palace, with a
 /// recommendation the agent can act on (mine the repo, or create a topic wing).
 fn tool_project_status(conn: &Connection, args: &Value) -> Value {
@@ -883,14 +915,18 @@ fn tool_search(conn: &Connection, args: &Value) -> Value {
     let limit = int_arg(args, "limit").unwrap_or(5) as usize;
     let wing = str_arg(args, "wing");
     let room = str_arg(args, "room");
-    let rerank = bool_arg(args, "rerank");
-    search_memories_with_options(
+    let options = SearchOptions {
+        rerank: bool_arg(args, "rerank"),
+        // On unless the caller turns it off.
+        context: args.get("context").is_none() || bool_arg(args, "context"),
+    };
+    search_memories_with(
         conn,
         &query,
         wing.as_deref(),
         room.as_deref(),
         limit,
-        rerank,
+        options,
     )
 }
 
@@ -933,6 +969,10 @@ fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
     let content = match str_arg(args, "content") {
         Some(c) => c,
         None => return json!({"success": false, "error": "content is required"}),
+    };
+    let wing = match crate::wings::resolve_wing(conn, &wing) {
+        Ok(wing) => wing,
+        Err(e) => return json!({"success": false, "error": e.to_string()}),
     };
     let source_file = str_arg(args, "source_file").unwrap_or_default();
     let added_by = str_arg(args, "added_by").unwrap_or_else(|| "mcp".to_string());
@@ -1205,10 +1245,33 @@ fn tool_list_drawers(conn: &Connection, args: &Value) -> Value {
         room: str_arg(args, "room"),
     };
     let limit = int_arg(args, "limit").unwrap_or(50) as usize;
-    match list_drawers(conn, &filter, limit) {
-        Ok(drawers) => json!({"drawers": drawers, "count": drawers.len()}),
-        Err(err) => json!({"error": err.to_string()}),
+    let drawers = match list_drawers(conn, &filter, limit) {
+        Ok(drawers) => drawers,
+        Err(err) => return json!({"error": err.to_string()}),
+    };
+    if bool_arg(args, "verbose") {
+        return json!({"drawers": drawers, "count": drawers.len()});
     }
+    let compact: Vec<Value> = drawers
+        .iter()
+        .map(|d| {
+            json!({
+                "id": d.id,
+                "wing": d.wing,
+                "room": d.room,
+                "content": d.content,
+                "source_file": d.source_file,
+                "added_by": d.added_by,
+                "filed_at": d.filed_at,
+                "importance": d.importance,
+            })
+        })
+        .collect();
+    json!({
+        "drawers": compact,
+        "count": compact.len(),
+        "more": "Pass verbose=true for hall, chunk_index, created_at, metadata and detected entities.",
+    })
 }
 
 fn tool_update_drawer(conn: &Connection, args: &Value) -> Value {
@@ -1517,6 +1580,14 @@ fn tool_session_context(conn: &Connection, config: &PalaceConfig, args: &Value) 
     {
         object.insert("embedding_notice".into(), json!(notice));
     }
+    if response.get("error").is_none() {
+        if let (Ok(Some(hint)), Some(object)) = (
+            crate::feedback::take_due_prompt(conn, config.profile(), chrono::Utc::now()),
+            response.as_object_mut(),
+        ) {
+            object.insert("feedback".into(), hint);
+        }
+    }
     response
 }
 
@@ -1649,8 +1720,11 @@ fn tool_remember(conn: &Connection, args: &Value) -> Value {
     let wing = args
         .get("wing")
         .and_then(|v| v.as_str())
-        .unwrap_or("general")
-        .to_string();
+        .unwrap_or("general");
+    let wing = match crate::wings::resolve_wing(conn, wing) {
+        Ok(wing) => wing,
+        Err(e) => return json!({"error": e.to_string()}),
+    };
     let room = args
         .get("room")
         .and_then(|v| v.as_str())
@@ -2260,6 +2334,18 @@ fn tool_list() -> Value {
             }
         },
         {
+            "name": "palace_rename_wing",
+            "description": "Rename a wing, or merge it into another wing when the new name already exists (e.g. 'my-proj' into 'my_proj'). Moves every drawer, closet, tunnel and mined-file record; drawer ids stay the same. Cannot be undone. Use only when the user asks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from": {"type": "string", "description": "The wing to rename or merge away"},
+                    "to": {"type": "string", "description": "The new name, or the existing wing to merge into"}
+                },
+                "required": ["from", "to"]
+            }
+        },
+        {
             "name": "palace_list_rooms",
             "description": "List rooms within a wing (or all rooms if no wing given)",
             "inputSchema": {
@@ -2281,7 +2367,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_search",
-            "description": "Semantic search. Returns verbatim drawer content with similarity scores.",
+            "description": "Semantic search. Returns verbatim drawer content with similarity scores, plus the chunks right before and after each hit (source_context).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2289,7 +2375,8 @@ fn tool_list() -> Value {
                     "limit": {"type": "integer", "description": "Max results (default 5)"},
                     "wing": {"type": "string", "description": "Filter by wing (optional)"},
                     "room": {"type": "string", "description": "Filter by room (optional)"},
-                    "rerank": {"type": "boolean", "description": "Rerank top hybrid candidates with the local interaction reranker"}
+                    "rerank": {"type": "boolean", "description": "Rerank top hybrid candidates with the local interaction reranker"},
+                    "context": {"type": "boolean", "description": "Include each hit's neighbouring chunks (default: true). Pass false for a smaller response."}
                 },
                 "required": ["query"]
             }
@@ -2474,11 +2561,12 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_list_drawers",
-            "description": "List drawers with optional wing/room filters.",
+            "description": "List drawers with optional wing/room filters. Pass verbose=true for hall, chunk_index, created_at, metadata and detected entities.",
             "inputSchema": {"type": "object", "properties": {
                 "wing": {"type": "string"},
                 "room": {"type": "string"},
-                "limit": {"type": "integer"}
+                "limit": {"type": "integer"},
+                "verbose": {"type": "boolean", "description": "Include every stored field of each drawer (default: false)"}
             }}
         },
         {

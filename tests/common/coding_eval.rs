@@ -37,7 +37,7 @@ pub const DOCS: &[EvalDoc] = &[
     EvalDoc { id: "preferences/rust.md", room: "preferences", text: "The user values the Rust version as a dependable single-binary memory engine with one SQLite file." },
     EvalDoc { id: "preferences/public_api.md", room: "preferences", text: "I prefer small public APIs that route through the Palace facade instead of exposing internal modules." },
     EvalDoc { id: "preferences/retrieval.md", room: "preferences", text: "My style is to keep retrieval source-grounded with score provenance rather than returning opaque snippets." },
-    EvalDoc { id: "current/positioning.md", room: "current", text: "Current direction changed from broad MemPalace parity to a narrow local-first memory retrieval engine for coding agents." },
+    EvalDoc { id: "current/positioning.md", room: "current", text: "Current direction changed from broad Palace parity to a narrow local-first memory retrieval engine for coding agents." },
     EvalDoc { id: "current/benchmark.md", room: "current", text: "Current proof priority is a coding-agent eval suite with recall at one and recall at five over realistic project-memory questions." },
     EvalDoc { id: "current/readme.md", room: "current", text: "Current README positioning should lead with local-first memory retrieval for coding agents, not a wide personal-memory universe." },
     EvalDoc { id: "current/trust.md", room: "current", text: "Current trust model keeps verbatim drawers as source of truth and treats extracted memories as indexes or pointers." },
@@ -241,7 +241,7 @@ pub const QUESTIONS: &[EvalQuestion] = &[
         category: "command",
     },
     EvalQuestion {
-        query: "what changed away from MemPalace parity?",
+        query: "what changed away from Palace parity?",
         gold_source: "current/positioning.md",
         category: "temporal",
     },

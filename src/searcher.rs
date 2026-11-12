@@ -85,7 +85,7 @@ pub fn search_memories(
     room: Option<&str>,
     n_results: usize,
 ) -> serde_json::Value {
-    search_memories_with_options(conn, query, wing, room, n_results, false)
+    search_memories_with(conn, query, wing, room, n_results, SearchOptions::default())
 }
 
 /// Programmatic search with optional local reranking.
@@ -96,6 +96,40 @@ pub fn search_memories_with_options(
     room: Option<&str>,
     n_results: usize,
     rerank: bool,
+) -> serde_json::Value {
+    let options = SearchOptions {
+        rerank,
+        ..SearchOptions::default()
+    };
+    search_memories_with(conn, query, wing, room, n_results, options)
+}
+
+/// What a programmatic search does beyond ranking.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchOptions {
+    /// Rerank the top hybrid candidates with the local interaction reranker.
+    pub rerank: bool,
+    /// Attach each hit's neighbouring chunks from the same source.
+    pub context: bool,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            rerank: false,
+            context: true,
+        }
+    }
+}
+
+/// Programmatic search shaped by `options`.
+pub fn search_memories_with(
+    conn: &Connection,
+    query: &str,
+    wing: Option<&str>,
+    room: Option<&str>,
+    n_results: usize,
+    options: SearchOptions,
 ) -> serde_json::Value {
     let rewritten = crate::query_rewriter::rewrite(query);
     let sanitized_query = crate::query_sanitizer::sanitize_query(&rewritten);
@@ -133,7 +167,7 @@ pub fn search_memories_with_options(
     // Merge dedicated preference recall pass — surfaces preference drawers even
     // when BM25 has no keyword overlap (the known R@1 weakness).
     merge_preference_results(conn, &embedding, &filter, &mut results, n_results);
-    let rerank_enabled = crate::reranker::should_rerank(rerank);
+    let rerank_enabled = crate::reranker::should_rerank(options.rerank);
     if rerank_enabled {
         crate::reranker::rerank(effective_query, &mut results);
     }
@@ -145,52 +179,21 @@ pub fn search_memories_with_options(
             .collect::<Vec<_>>(),
     );
 
+    let hit_ids: std::collections::HashSet<&str> = results
+        .iter()
+        .map(|result| result.drawer.id.as_str())
+        .collect();
     let hits: Vec<serde_json::Value> = results
         .iter()
         .map(|r| {
-            let source_context = crate::store::get_drawer(conn, &r.drawer.id)
-                .ok()
-                .flatten()
-                .filter(|drawer| !drawer.source_file.is_empty())
-                .and_then(|drawer| {
-                    source_context(
-                        conn,
-                        &drawer.wing,
-                        &drawer.room,
-                        &drawer.source_file,
-                        drawer.chunk_index,
-                        1,
-                    )
-                    .ok()
-                })
-                .unwrap_or_default()
-                .into_iter()
-                .map(|drawer| {
-                    serde_json::json!({
-                        "id": drawer.id,
-                        "text": drawer.content,
-                        "wing": drawer.wing,
-                        "room": drawer.room,
-                        "source_file": drawer.source_file,
-                        "chunk_index": drawer.chunk_index,
-                        "created_at": drawer.created_at,
-                        "filed_at": drawer.filed_at,
-                    })
-                })
-                .collect::<Vec<_>>();
-            let filed_at = crate::store::get_drawer(conn, &r.drawer.id)
-                .ok()
-                .flatten()
-                .map(|drawer| drawer.filed_at)
-                .unwrap_or_default();
-            serde_json::json!({
+            let mut hit = serde_json::json!({
                 "id": r.drawer.id,
                 "text": r.drawer.text,
                 "wing": r.drawer.wing,
                 "room": r.drawer.room,
                 "source_file": r.drawer.source_file,
                 "created_at": r.drawer.created_at,
-                "filed_at": filed_at,
+                "filed_at": r.drawer.filed_at,
                 "similarity": r.combined,
                 "combined": r.combined,
                 "cosine": r.cosine,
@@ -199,10 +202,14 @@ pub fn search_memories_with_options(
                 "preference_match": r.preference_match,
                 "date_boost": r.date_boost,
                 "source_boost": r.source_boost,
+                "mined_discount": r.mined_discount,
                 "rerank_score": r.rerank_score,
                 "intent": intent.as_str(),
-                "source_context": source_context,
-            })
+            });
+            if options.context {
+                hit["source_context"] = neighbouring_chunks(conn, &r.drawer.id, &hit_ids).into();
+            }
+            hit
         })
         .collect();
 
@@ -218,6 +225,41 @@ pub fn search_memories_with_options(
         },
         "results": hits,
     })
+}
+
+/// The chunks right before and after a hit in its source, as `id`,
+/// `chunk_index` and `text`. The hit itself and chunks that are hits of the
+/// same search are left out: the response already carries them.
+fn neighbouring_chunks(
+    conn: &Connection,
+    drawer_id: &str,
+    hit_ids: &std::collections::HashSet<&str>,
+) -> Vec<serde_json::Value> {
+    let Some(drawer) = crate::store::get_drawer(conn, drawer_id).ok().flatten() else {
+        return Vec::new();
+    };
+    if drawer.source_file.is_empty() {
+        return Vec::new();
+    }
+    source_context(
+        conn,
+        &drawer.wing,
+        &drawer.room,
+        &drawer.source_file,
+        drawer.chunk_index,
+        1,
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|neighbour| !hit_ids.contains(neighbour.id.as_str()))
+    .map(|neighbour| {
+        serde_json::json!({
+            "id": neighbour.id,
+            "chunk_index": neighbour.chunk_index,
+            "text": neighbour.content,
+        })
+    })
+    .collect()
 }
 
 /// Merge preference-tagged drawers into hybrid results, deduplicating by ID.
@@ -255,6 +297,7 @@ fn merge_preference_results(
             preference_match: pref.similarity,
             date_boost: 0.0,
             source_boost: 0.0,
+            mined_discount: 0.0,
             rerank_score: None,
             combined,
             drawer: SearchResult {

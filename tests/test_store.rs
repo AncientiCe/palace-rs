@@ -63,7 +63,7 @@ fn opening_v3_schema_migrates_phase_one_columns() {
                 embedding   BLOB,
                 source_file TEXT NOT NULL DEFAULT '',
                 chunk_index INTEGER NOT NULL DEFAULT 0,
-                added_by    TEXT NOT NULL DEFAULT 'mempalace',
+                added_by    TEXT NOT NULL DEFAULT 'palace',
                 filed_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 importance  REAL NOT NULL DEFAULT 3.0
             );
@@ -118,7 +118,7 @@ fn add_drawer_records_hall_and_entity_metadata() {
         &conn,
         "wing_code",
         "backend",
-        "Alice fixed the Rust database error in MemPalace",
+        "Alice fixed the Rust database error in Palace",
         None,
         "test.py",
         0,
@@ -766,7 +766,7 @@ fn backfill_registers_existing_wings_with_inferred_kind() {
     let conn = open_test_db();
     add_drawer(
         &conn,
-        "mempalace_rs",
+        "palace_rs",
         "src",
         "c",
         None,
@@ -797,7 +797,7 @@ fn backfill_registers_existing_wings_with_inferred_kind() {
     assert!(inserted >= 3);
 
     assert_eq!(
-        get_wing(&conn, "mempalace_rs").unwrap().unwrap().kind,
+        get_wing(&conn, "palace_rs").unwrap().unwrap().kind,
         "project"
     );
     assert_eq!(
@@ -974,7 +974,7 @@ fn refresh_preference_tags_retags_existing_drawers() {
 
 #[test]
 fn reembed_drawers_fills_vectors_in_batched_transactions() {
-    let conn = open_test_db();
+    let mut conn = open_test_db();
     let mut drawers = Vec::new();
     for i in 0..70 {
         let content = format!("drawer number {i} about batching re-embeds");
@@ -989,9 +989,11 @@ fn reembed_drawers_fills_vectors_in_batched_transactions() {
     conn.commit_hook(Some(move || {
         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         false
-    }));
+    }))
+    .expect("commit hook should install");
     let report = reembed_drawers(&conn, &drawers).expect("re-embed should run");
-    conn.commit_hook(None::<fn() -> bool>);
+    conn.commit_hook(None::<fn() -> bool>)
+        .expect("commit hook should clear");
 
     assert_eq!(report.errors, 0);
     assert_eq!(

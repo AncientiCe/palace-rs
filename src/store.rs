@@ -455,6 +455,13 @@ pub fn count_drawers(conn: &Connection) -> Result<i64> {
         .context("counting drawers")
 }
 
+/// Every source file the project miner has recorded, across all wings.
+pub fn mined_sources(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare_cached("SELECT source_file FROM mined_files")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    rows.map(|r| r.context("mined_files row")).collect()
+}
+
 /// List drawers filtered by optional wing/room, ordered by filed_at DESC.
 pub fn list_drawers(conn: &Connection, filter: &DrawerFilter, limit: usize) -> Result<Vec<Drawer>> {
     let (where_clause, where_params) = build_where(filter);

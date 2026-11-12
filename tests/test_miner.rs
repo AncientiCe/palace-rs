@@ -268,7 +268,8 @@ fn mine_batches_writes_into_few_transactions() {
         conn.commit_hook(Some(move || {
             counter.fetch_add(1, Ordering::SeqCst);
             false
-        }));
+        }))
+        .expect("commit hook should install");
     }
 
     mine(
@@ -674,7 +675,8 @@ fn mine_rerun_with_no_changes_does_not_rewrite_drawers() {
         conn.commit_hook(Some(move || {
             counter.fetch_add(1, Ordering::SeqCst);
             false
-        }));
+        }))
+        .expect("commit hook should install");
     }
 
     let summary = mine(

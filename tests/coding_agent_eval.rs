@@ -12,7 +12,7 @@ fn coding_agent_memory_eval_has_stable_recall() {
     for doc in DOCS {
         add_drawer(
             &conn,
-            "mempalace_rs",
+            "palace_rs",
             doc.room,
             doc.text,
             None,

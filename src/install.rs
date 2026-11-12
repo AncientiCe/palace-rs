@@ -29,11 +29,6 @@ pub fn rule_body(profile: Profile) -> &'static str {
     }
 }
 
-// ── Legacy marker names (0.1.x) — recognized for migration, never written ────
-const LEGACY_RULE_BEGIN: &str = "<!-- BEGIN MEMPALACE -->";
-const LEGACY_RULE_END: &str = "<!-- END MEMPALACE -->";
-const LEGACY_MCP_KEY: &str = "mempalace";
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Client {
@@ -91,9 +86,6 @@ pub struct ClientStatus {
     pub command: Option<String>,
     pub rule_path: PathBuf,
     pub rule_installed: bool,
-    /// True if the rule file exists but contains stale/legacy content
-    /// (e.g. old `mempalace_*` tool names from 0.1.x).
-    pub rule_stale: bool,
     /// True if the rule exists but lacks memory-vs-code-search routing guidance.
     pub rule_weak: bool,
     pub hook_installed: bool,
@@ -199,24 +191,15 @@ impl InstallOptions {
 }
 
 /// Install the palace MCP server and rules.
-///
-/// Before writing new entries, this automatically removes any legacy
-/// `mempalace` entries left from palace-rs 0.1.x so users get a clean
-/// upgrade with no duplicated servers.
 pub fn install_clients(options: &InstallOptions) -> Result<InstallReport> {
     let mut report = InstallReport::default();
     for client in expand_clients(options) {
         let path = config_path(options, client)?;
 
         let changed = match mcp_format(client) {
-            McpFormat::Codex => {
-                remove_legacy_codex_entry(&path, options.dry_run)?;
-                write_codex_client(&path, &options.binary_path, options.dry_run)?
-            }
+            McpFormat::Codex => write_codex_client(&path, &options.binary_path, options.dry_run)?,
             McpFormat::Goose => write_goose_client(&path, &options.binary_path, options.dry_run)?,
             format => {
-                // Remove legacy 0.1.x entries before writing new ones.
-                remove_legacy_json_entry(&path, options.dry_run)?;
                 let instruction = opencode_instruction(options, client)?;
                 write_json_client(
                     &path,
@@ -267,25 +250,16 @@ pub fn install_clients(options: &InstallOptions) -> Result<InstallReport> {
 }
 
 /// Remove the palace MCP server and rules.
-///
-/// Removes both current (`palace`) and legacy (`mempalace`) entries so
-/// either install can be cleaned up with a single command.
 pub fn uninstall_clients(options: &InstallOptions) -> Result<InstallReport> {
     let mut report = InstallReport::default();
     for client in expand_clients(options) {
         let path = config_path(options, client)?;
         let changed = match mcp_format(client) {
-            McpFormat::Codex => {
-                let a = remove_codex_client(&path, options.dry_run)?;
-                let b = remove_legacy_codex_entry(&path, options.dry_run)?;
-                a || b
-            }
+            McpFormat::Codex => remove_codex_client(&path, options.dry_run)?,
             McpFormat::Goose => remove_goose_client(&path, options.dry_run)?,
             format => {
                 let instruction = opencode_instruction(options, client)?;
-                let a = remove_json_client(&path, format, instruction.as_deref(), options.dry_run)?;
-                let b = remove_legacy_json_entry(&path, options.dry_run)?;
-                a || b
+                remove_json_client(&path, format, instruction.as_deref(), options.dry_run)?
             }
         };
         if changed {
@@ -355,7 +329,6 @@ pub fn doctor(options: &InstallOptions) -> Result<DoctorReport> {
         let command = read_configured_command(client, &path)?;
         let expected = path_to_string(&options.binary_path);
         let rule_installed = rule_installed(&target)?;
-        let rule_stale = rule_is_stale(&target)?;
         let rule_weak = rule_is_weak(&target)?;
         let hook_installed =
             options.scope == Scope::User && client_hook_installed(&options.home_dir, client);
@@ -367,7 +340,6 @@ pub fn doctor(options: &InstallOptions) -> Result<DoctorReport> {
             command,
             rule_path: target.path,
             rule_installed,
-            rule_stale,
             rule_weak,
             hook_installed,
         });
@@ -500,9 +472,7 @@ pub fn print_doctor_report(report: &DoctorReport) {
         };
         println!("  {:<16} {state}", format!("{}:", status.client));
         println!("      config: {}", status.path.display());
-        let rule_state = if status.rule_stale {
-            "⚠ rule stale — run: palace install"
-        } else if status.rule_weak {
+        let rule_state = if status.rule_weak {
             "⚠ rule weak — run: palace install so agents search memory before grep"
         } else if status.rule_installed {
             "✓ rule installed"
@@ -914,22 +884,6 @@ fn ensure_instruction(config: &mut Value, instruction: &str) -> Result<()> {
     Ok(())
 }
 
-/// Remove the legacy `mempalace` entry from a JSON MCP config (0.1.x cleanup).
-fn remove_legacy_json_entry(path: &Path, dry_run: bool) -> Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    let existing = read_json_config(path)?;
-    let mut next = existing.clone();
-    let Some(servers) = next.get_mut("mcpServers").and_then(Value::as_object_mut) else {
-        return Ok(false);
-    };
-    if servers.remove(LEGACY_MCP_KEY).is_none() {
-        return Ok(false);
-    }
-    write_if_changed(path, existing, next, dry_run)
-}
-
 fn read_json_config(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(json!({}));
@@ -1071,25 +1025,6 @@ fn remove_codex_client(path: &Path, dry_run: bool) -> Result<bool> {
     write_toml_if_changed(path, &existing, &next, dry_run)
 }
 
-/// Remove the legacy `mempalace` entry from Codex config.toml (0.1.x cleanup).
-fn remove_legacy_codex_entry(path: &Path, dry_run: bool) -> Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    let existing = read_toml_document(path)?;
-    let mut next = existing.clone();
-    let Some(servers) = next
-        .get_mut("mcp_servers")
-        .and_then(Item::as_table_like_mut)
-    else {
-        return Ok(false);
-    };
-    if servers.remove(LEGACY_MCP_KEY).is_none() {
-        return Ok(false);
-    }
-    write_toml_if_changed(path, &existing, &next, dry_run)
-}
-
 fn write_goose_client(path: &Path, binary_path: &Path, dry_run: bool) -> Result<bool> {
     let existing = read_yaml_config(path)?;
     let mut next = existing.clone();
@@ -1218,14 +1153,10 @@ fn write_toml_if_changed(
 
 fn install_rule(target: &RuleTarget, profile: Profile, dry_run: bool) -> Result<bool> {
     let original = read_text_file(&target.path)?;
-    // Migrate any legacy block to the new markers before upserting.
-    let migrated = migrate_legacy_rule_block(&original)?;
     let next = match target.kind {
         RuleKind::Standalone => standalone_rule_text(target.client, profile),
-        RuleKind::ManagedBlock => upsert_managed_rule(&migrated, profile)?,
+        RuleKind::ManagedBlock => upsert_managed_rule(&original, profile)?,
     };
-    // Compare against the original file content so that a legacy-only migration
-    // (where migrated == next) still triggers a write.
     write_text_if_changed(&target.path, &original, &next, dry_run)
 }
 
@@ -1234,11 +1165,9 @@ fn uninstall_rule(target: &RuleTarget, dry_run: bool) -> Result<bool> {
         return Ok(false);
     }
     let existing = read_text_file(&target.path)?;
-    // Remove both the current and legacy blocks.
-    let without_legacy = remove_legacy_rule_block(&existing)?;
     let next = match target.kind {
         RuleKind::Standalone => String::new(),
-        RuleKind::ManagedBlock => remove_managed_rule(&without_legacy)?,
+        RuleKind::ManagedBlock => remove_managed_rule(&existing)?,
     };
     if target.kind == RuleKind::Standalone {
         if dry_run {
@@ -1268,21 +1197,6 @@ fn matches_any_standalone_rule(client: Client, text: &str) -> bool {
     Profile::all()
         .iter()
         .any(|p| text == standalone_rule_text(client, *p))
-}
-
-/// True if the rule file exists and contains legacy `mempalace_*` tool names
-/// but not the current `palace_*` names — i.e. needs `palace install` to refresh.
-fn rule_is_stale(target: &RuleTarget) -> Result<bool> {
-    if !target.path.exists() {
-        return Ok(false);
-    }
-    let text = read_text_file(&target.path)?;
-    let has_legacy = text.contains(LEGACY_RULE_BEGIN) || text.contains("mempalace_status");
-    let has_current = match target.kind {
-        RuleKind::Standalone => matches_any_standalone_rule(target.client, &text),
-        RuleKind::ManagedBlock => find_managed_block(&text)?.is_some(),
-    };
-    Ok(has_legacy && !has_current)
 }
 
 fn rule_is_weak(target: &RuleTarget) -> Result<bool> {
@@ -1330,11 +1244,7 @@ fn adoption_warnings(clients: &[ClientStatus]) -> Vec<String> {
                 "{client} has MCP config but no Palace rule file, so agents may skip memory."
             ));
         }
-        if status.rule_stale {
-            warnings.push(format!(
-                "{client} has a stale Palace rule; reinstall so it uses current memory tools."
-            ));
-        } else if status.rule_weak {
+        if status.rule_weak {
             warnings.push(format!(
                 "{client} rule lacks session warm-start (including loading deferred palace tools), KG/diary recall, or memory-vs-code routing; reinstall so remembered context is searched first."
             ));
@@ -1447,47 +1357,6 @@ fn find_managed_block(text: &str) -> Result<Option<(usize, usize)>> {
         .ok_or_else(|| anyhow!("managed Palace rule block is missing end marker"))?;
     let end = search_from + end_relative + RULE_END.len();
     Ok(Some((start, end)))
-}
-
-/// Replace a legacy `<!-- BEGIN MEMPALACE -->…<!-- END MEMPALACE -->` block
-/// with the new `<!-- BEGIN PALACE -->…<!-- END PALACE -->` block.
-fn migrate_legacy_rule_block(text: &str) -> Result<String> {
-    let Some(start) = text.find(LEGACY_RULE_BEGIN) else {
-        return Ok(text.to_string());
-    };
-    let search_from = start + LEGACY_RULE_BEGIN.len();
-    let end_relative = text[search_from..]
-        .find(LEGACY_RULE_END)
-        .ok_or_else(|| anyhow!("legacy Palace rule block is missing end marker"))?;
-    let block_end = search_from + end_relative + LEGACY_RULE_END.len();
-
-    // Build a new string with the legacy block replaced by the current block.
-    let block = managed_rule_block(Profile::default());
-    let mut result = String::with_capacity(text.len() + block.len());
-    result.push_str(&text[..start]);
-    result.push_str(&block);
-    result.push_str(&text[block_end..]);
-    Ok(result)
-}
-
-/// Remove a legacy `<!-- BEGIN MEMPALACE -->…<!-- END MEMPALACE -->` block.
-fn remove_legacy_rule_block(text: &str) -> Result<String> {
-    let Some(start) = text.find(LEGACY_RULE_BEGIN) else {
-        return Ok(text.to_string());
-    };
-    let search_from = start + LEGACY_RULE_BEGIN.len();
-    let end_relative = text[search_from..]
-        .find(LEGACY_RULE_END)
-        .ok_or_else(|| anyhow!("legacy Palace rule block is missing end marker"))?;
-    let block_end = search_from + end_relative + LEGACY_RULE_END.len();
-
-    let mut result = String::with_capacity(text.len());
-    result.push_str(&text[..start]);
-    result.push_str(&text[block_end..]);
-    while result.contains("\n\n\n") {
-        result = result.replace("\n\n\n", "\n\n");
-    }
-    Ok(result)
 }
 
 fn backup_existing(path: &Path) -> Result<()> {

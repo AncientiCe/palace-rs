@@ -383,7 +383,13 @@ fn recall_context(conn: &Connection, input: &Value) -> Option<String> {
 /// (and diary entries recorded for them) are dropped as noise, while this
 /// project's wing, topic wings, and unscoped diaries are kept.
 fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
-    let results = crate::searcher::search_memories(conn, query, None, None, RECALL_CANDIDATES);
+    // Recall prints one line per hit, so neighbouring chunks are not fetched.
+    let options = crate::searcher::SearchOptions {
+        rerank: false,
+        context: false,
+    };
+    let results =
+        crate::searcher::search_memories_with(conn, query, None, None, RECALL_CANDIDATES, options);
     let Some(hits) = results.get("results").and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -412,9 +418,44 @@ fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
         if !scope.allows(conn, id, wing, room, text) {
             continue;
         }
+        let source = hit.get("source_file").and_then(Value::as_str).unwrap_or("");
+        if names_protocol_tools(text) && is_mined_file(conn, source) {
+            continue;
+        }
         lines.push(format!("- [{wing}/{room}] {} ({id})", compact(text, 240)));
     }
     lines
+}
+
+/// Tools the Palace protocol tells agents to call.
+const PROTOCOL_TOOLS: &[&str] = &[
+    "palace_status",
+    "palace_session_context",
+    "palace_diary_search",
+    "palace_search",
+    "palace_kg_query",
+    "palace_preference_search",
+    "palace_diary_write",
+    "palace_kg_add",
+];
+/// How many protocol tools a text names before it reads as the protocol.
+const PROTOCOL_TOOLS_NAMED: usize = 3;
+
+/// True when `text` names several protocol tools. In a mined file that is a
+/// copy of the protocol (a rules file, CLAUDE.md), which a hooked session
+/// already has, so recalling it adds nothing.
+fn names_protocol_tools(text: &str) -> bool {
+    PROTOCOL_TOOLS
+        .iter()
+        .filter(|tool| text.contains(*tool))
+        .count()
+        >= PROTOCOL_TOOLS_NAMED
+}
+
+/// True when `source_file` is a project file the miner read.
+fn is_mined_file(conn: &Connection, source_file: &str) -> bool {
+    let mined = crate::store::mined_sources(conn).unwrap_or_default();
+    crate::ranker::is_mined_file(&mined, source_file)
 }
 
 /// The session's project, used to keep auto-recall from surfacing drawers that
@@ -882,8 +923,8 @@ mod tests {
             Some("palace_server_license")
         );
         assert_eq!(
-            diary_project_tag("PROJ:mempalace_rs | fixed").as_deref(),
-            Some("mempalace_rs")
+            diary_project_tag("PROJ:palace_rs | fixed").as_deref(),
+            Some("palace_rs")
         );
         assert_eq!(diary_project_tag("no project named here"), None);
     }

@@ -4,6 +4,116 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [0.20.0] - 2026-11-10
+
+### Added
+
+- **`palace rename-wing <from> <to>` renames a wing or merges two.** When the
+  new name is already a wing, everything filed under the old one moves into
+  it: drawers, closets, tunnels and mined-file records. Use it to repair a
+  wing that split over spelling, such as `my-proj` beside `my_proj`. Drawer
+  ids stay the same, so existing citations still resolve. If the renamed wing
+  is a mined project, the `wing:` line in its `palace.yaml` is updated too.
+  Agents get the same through the `palace_rename_wing` MCP tool. The change
+  cannot be undone.
+
+### Changed
+
+- **Filed memories outrank mined project files for plain questions.** When a
+  query is a question in plain words, drawers from mined project files lose
+  0.12 from their score, so a memory filed with `palace_remember`, the diary
+  or `palace_add_drawer` wins over a file that only shares the question's
+  words. A query that names code (an identifier such as `snake_case` or
+  `Type::method`, a path, or a file name) ranks as before, and so does the
+  order among mined files. Search results report the amount as
+  `mined_discount`. On the maintainer's palace this moved the expected memory
+  up for 4 of 8 real questions and down for none.
+- **`palace_search` responses are smaller.** `source_context` now holds only
+  the chunks right before and after a hit, each as `id`, `chunk_index` and
+  `text`. It no longer repeats the hit itself, a neighbour that is already a
+  hit of the same search, or each neighbour's wing, room, source file and
+  timestamps, which are the hit's own. Pass `context: false` to leave the
+  neighbours out. Library callers get the same switch through
+  `searcher::search_memories_with` and `SearchOptions`.
+- **`palace_list_drawers` is compact by default.** Each drawer comes back
+  with its id, wing, room, content, source file, author, filing time and
+  importance. Pass `verbose: true` for the rest: hall, chunk index, creation
+  time, metadata and detected entities.
+
+### Fixed
+
+- **A wing name spelled differently no longer starts a second wing.**
+  `palace_remember` and `palace_add_drawer` stored the wing name exactly as
+  the agent wrote it, so `my-proj` or `My Proj` became a new wing beside
+  `my_proj`, and searches scoped to the real wing missed those memories. A
+  write now goes to the wing that exists under the normalized name, and a new
+  wing gets a normalized name. A wing that already exists under an
+  unnormalized name keeps receiving writes to that exact name.
+- **Auto-recall no longer hands the Palace protocol back to the agent.** A
+  mined rules file such as `CLAUDE.md` holds a copy of the protocol, and the
+  recall hooks could surface it as a memory when a search named Palace tools.
+  Mined drawers that name three or more protocol tools are now left out of
+  hook recall. Memories you filed about those tools are still recalled.
+- **Status words and labels are no longer saved as entities.** Entity
+  detection treated any capitalized word as a name, so drawers collected
+  entries such as "DONE", "Still" and "Yes", and line labels such as
+  "Decision:" became people. Common words are now skipped in any case,
+  dropped from the ends of a two-word name ("Check Windows" gives
+  "Windows"), and a word that starts a sentence is skipped when the same
+  text also writes it in lower case. Drawers already filed keep their entity
+  list until their content is updated.
+
+### Security
+
+- **`openssl` updated for RUSTSEC-2026-0463.** The lockfile moves `openssl`
+  from 0.10.76 to 0.10.82. Only Linux builds compile the crate, where
+  downloads use it for TLS.
+
+## [0.19.4] - 2026-11-09
+
+### Added
+
+- **`palace install` asks for a GitHub star, once.** The first successful
+  install on a machine ends with one line linking to the repository. Later
+  installs and upgrades don't repeat it.
+
+### Security
+
+- **Bundled SQLite updated for RUSTSEC-2026-0459.** `rusqlite` moves from 0.32
+  to 0.41, which bundles a patched SQLite through `libsqlite3-sys` 0.39. If you
+  use `palace-rs` as a library and also depend on `rusqlite`, move to 0.41 as
+  well: the public API takes `rusqlite::Connection`.
+
+## [0.19.3] - 2026-11-09
+
+### Added
+
+- **Palace is on crates.io.** Depend on it with
+  `palace-rs = { version = "0.19", default-features = false }` instead of a
+  git dependency. API docs are on [docs.rs](https://docs.rs/palace-rs).
+  Every release tag now publishes the crate after all platform builds pass.
+
+## [0.19.2] - 2026-11-09
+
+### Added
+
+- **`palace feedback` opens a pre-filled GitHub discussion.** The page is in
+  the public Feedback category and pre-fills your Palace version, OS, client
+  name, and profile, which you can edit before posting. Palace sends nothing
+  itself.
+- **Agents mention the feedback link once in a while.** After 10 MCP
+  sessions, `palace_session_context` returns a `feedback` hint with the link,
+  then stays quiet for 30 days. Agents are told to mention it once, after the
+  current task. Set `PALACE_FEEDBACK_DISABLED=1` to turn it off.
+
+### Fixed
+
+- **`palace mcp` no longer crashes when it exits while the embedding model is
+  loading.** A client that closed the connection right after starting, such
+  as a script or a health check, could make the process exit with a
+  segmentation fault while ONNX Runtime was still building its session. The
+  server now waits for the load to finish, up to 60 seconds, before exiting.
+
 ## [0.19.1] - 2026-11-02
 
 ### Fixed

@@ -1,6 +1,6 @@
 [package]
 name = "palace-rs"
-version = "0.19.1"
+version = "0.20.0"
 edition = "2021"
 description = "Local memory palace for AI assistants — Rust edition"
 license = "MIT"
@@ -10,6 +10,14 @@ readme = "README.md"
 rust-version = "1.82"
 keywords = ["memory", "ai", "mcp", "llm", "embeddings"]
 categories = ["database", "text-processing"]
+include = [
+    "src/**",
+    "tests/**",
+    "examples/**",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+]
 
 [[bin]]
 name = "palace"
@@ -43,7 +51,7 @@ toml_edit = "0.22"
 # Database — bundled SQLite, no system dep
 # `hooks` unlocks Connection::commit_hook, used in tests to assert that mining
 # batches writes into a small number of transactions instead of one per row.
-rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.41", features = ["bundled", "hooks"] }
 
 # Embeddings — ONNX Runtime, all-MiniLM-L6-v2, lazy init
 ort = { version = "=2.0.0-rc.11", default-features = false, features = ["ndarray", "std", "download-binaries", "tls-native"] }

@@ -129,57 +129,6 @@ fn install_merges_into_existing_cursor_config() {
 }
 
 #[test]
-fn install_removes_legacy_mempalace_entry() {
-    let temp = TempDir::new().unwrap();
-    let cursor_dir = temp.path().join(".cursor");
-    fs::create_dir_all(&cursor_dir).unwrap();
-    // Simulate a 0.1.x install: has "mempalace" key
-    fs::write(
-        cursor_dir.join("mcp.json"),
-        r#"{"mcpServers":{"mempalace":{"command":"mempalace","args":["mcp"]},"other":{"command":"other-tool"}}}"#,
-    )
-    .unwrap();
-
-    let binary_path = fake_binary(temp.path());
-    install_clients(&options(temp.path(), &binary_path, vec![Client::Cursor])).unwrap();
-
-    let config = read_json(&cursor_dir.join("mcp.json"));
-    // Legacy entry gone
-    assert!(config["mcpServers"]["mempalace"].is_null());
-    // New entry written
-    assert_eq!(
-        config["mcpServers"]["palace"]["command"].as_str(),
-        Some(binary_path.to_string_lossy().as_ref())
-    );
-    // Other server preserved
-    assert_eq!(config["mcpServers"]["other"]["command"], "other-tool");
-}
-
-#[test]
-fn install_migrates_legacy_rule_block() {
-    let temp = TempDir::new().unwrap();
-    let claude_dir = temp.path().join(".claude");
-    fs::create_dir_all(&claude_dir).unwrap();
-    // Simulate a 0.1.x install: has old BEGIN MEMPALACE markers
-    fs::write(
-        claude_dir.join("CLAUDE.md"),
-        "before\n\n<!-- BEGIN MEMPALACE -->\nold_content\n<!-- END MEMPALACE -->\n\nafter\n",
-    )
-    .unwrap();
-
-    let binary_path = fake_binary(temp.path());
-    install_clients(&options(temp.path(), &binary_path, vec![Client::Claude])).unwrap();
-
-    let rule = fs::read_to_string(claude_dir.join("CLAUDE.md")).unwrap();
-    assert!(rule.contains("before"));
-    assert!(rule.contains("after"));
-    assert!(!rule.contains("old_content"));
-    assert!(!rule.contains("<!-- BEGIN MEMPALACE -->"));
-    assert!(rule.contains("<!-- BEGIN PALACE -->"));
-    assert!(rule.contains("palace_status"));
-}
-
-#[test]
 fn install_merges_codex_toml_preserving_comments() {
     let temp = TempDir::new().unwrap();
     let codex_dir = temp.path().join(".codex");
@@ -296,26 +245,6 @@ fn uninstall_removes_only_palace_entry() {
 }
 
 #[test]
-fn uninstall_removes_legacy_mempalace_entry() {
-    let temp = TempDir::new().unwrap();
-    let cursor_dir = temp.path().join(".cursor");
-    fs::create_dir_all(&cursor_dir).unwrap();
-    // User has only the old 0.1.x entry
-    fs::write(
-        cursor_dir.join("mcp.json"),
-        r#"{"mcpServers":{"mempalace":{"command":"mempalace","args":["mcp"]},"other":{"command":"other-tool"}}}"#,
-    )
-    .unwrap();
-
-    let binary_path = fake_binary(temp.path());
-    uninstall_clients(&options(temp.path(), &binary_path, vec![Client::Cursor])).unwrap();
-
-    let config = read_json(&cursor_dir.join("mcp.json"));
-    assert!(config["mcpServers"]["mempalace"].is_null());
-    assert_eq!(config["mcpServers"]["other"]["command"], "other-tool");
-}
-
-#[test]
 fn uninstall_removes_managed_block_only() {
     let temp = TempDir::new().unwrap();
     let codex_dir = temp.path().join(".codex");
@@ -334,27 +263,6 @@ fn uninstall_removes_managed_block_only() {
     assert!(rule.contains("after"));
     assert!(!rule.contains("managed"));
     assert!(!rule.contains("<!-- BEGIN PALACE -->"));
-}
-
-#[test]
-fn uninstall_removes_legacy_managed_block() {
-    let temp = TempDir::new().unwrap();
-    let codex_dir = temp.path().join(".codex");
-    fs::create_dir_all(&codex_dir).unwrap();
-    fs::write(
-        codex_dir.join("AGENTS.md"),
-        "before\n\n<!-- BEGIN MEMPALACE -->\nold\n<!-- END MEMPALACE -->\n\nafter\n",
-    )
-    .unwrap();
-
-    let binary_path = fake_binary(temp.path());
-    uninstall_clients(&options(temp.path(), &binary_path, vec![Client::Codex])).unwrap();
-
-    let rule = fs::read_to_string(codex_dir.join("AGENTS.md")).unwrap();
-    assert!(rule.contains("before"));
-    assert!(rule.contains("after"));
-    assert!(!rule.contains("old"));
-    assert!(!rule.contains("<!-- BEGIN MEMPALACE -->"));
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -747,28 +655,6 @@ fn doctor_reports_status_correctly() {
             && status.rule_installed
             && status.rule_path.ends_with(".cursor/rules/palace.mdc")
     }));
-}
-
-#[test]
-fn doctor_detects_stale_legacy_rule() {
-    let temp = TempDir::new().unwrap();
-    let cursor_dir = temp.path().join(".cursor/rules");
-    fs::create_dir_all(&cursor_dir).unwrap();
-    // Write an old 0.1.x rule file
-    fs::write(
-        cursor_dir.join("palace.mdc"),
-        "---\nalwaysApply: true\n---\n\nmempalace_status mempalace_search\n",
-    )
-    .unwrap();
-
-    let binary_path = fake_binary(temp.path());
-    let install_options = options(temp.path(), &binary_path, vec![Client::Cursor]);
-    let report = doctor(&install_options).unwrap();
-
-    assert!(report
-        .clients
-        .iter()
-        .any(|s| s.client == Client::Cursor && s.rule_stale));
 }
 
 // ── Cursor sessionStart hook tests ───────────────────────────────────────────

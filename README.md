@@ -252,8 +252,13 @@ the server). In remote mode the server owns the model, so these commands run on 
 
 Agent-generated query dumps are cleaned up before retrieval. Results come back
 with score provenance (`combined`, `cosine`, `bm25`, `coding_boost`,
-`preference_match`, `rerank_score`, `intent`) and the neighbouring chunks from
-the same source file.
+`preference_match`, `mined_discount`, `rerank_score`, `intent`) and the
+chunks right before and after each hit in its source file. Pass
+`context: false` to `palace_search` to leave those out.
+
+A question in plain words favours memories you or your agent filed over mined
+project files that share its words. A query that names code (an identifier, a
+path, a file name) ranks filed and mined drawers alike.
 
 ### Automatic recall (hooks)
 
@@ -434,6 +439,7 @@ Run `palace <command> --help` for every flag.
 | `palace uninstall` | Remove them again |
 | `palace doctor` | Check the binary, database, MCP configs, and rules |
 | `palace seed-adoption-facts` | Seed knowledge-graph facts that make agent recall measurable |
+| `palace feedback` | Open a pre-filled public GitHub discussion to share feedback (`--no-open` prints the link) |
 
 **Adding memory**
 
@@ -454,6 +460,7 @@ Run `palace <command> --help` for every flag.
 | `palace wake-up` | Print the L0 identity and L1 essential story |
 | `palace status` | Drawer counts by wing and room |
 | `palace wings` | Registered wings, with kind, drawer count, and last mined time |
+| `palace rename-wing <from> <to>` | Rename a wing, or merge it into an existing wing |
 | `palace timeline` | Knowledge-graph facts in time order (`--entity` to filter) |
 | `palace gain` | How much your agents use Palace, and what it saves |
 
@@ -560,6 +567,7 @@ to turn recording off.
 | `palace_project_status` | Is this project mined, registered but unmined, or unknown? |
 | `palace_mine` | Mine a code repository on demand (after the user agrees) |
 | `palace_create_wing` | Declare a topic or project wing |
+| `palace_rename_wing` | Rename a wing, or merge it into an existing wing |
 | `palace_list_wings` | Registered wings with kind, path, last mined time, and counts |
 | `palace_list_rooms` | Rooms within a wing |
 | `palace_get_taxonomy` | Full wing → room → count tree |
@@ -579,7 +587,7 @@ to turn recording off.
 | `palace_add_drawer` | Store content in a wing and room |
 | `palace_remember` | Store a key fact with importance 5 |
 | `palace_get_drawer` | Fetch a drawer by id |
-| `palace_list_drawers` | List drawers, with optional wing and room filters |
+| `palace_list_drawers` | List drawers, with optional wing and room filters (`verbose` adds hall, metadata, detected entities) |
 | `palace_update_drawer` | Update content and refresh metadata |
 | `palace_delete_drawer` / `palace_forget` | Remove a drawer |
 | `palace_explain` | Full provenance: who stored it, when, from where, importance |
@@ -645,6 +653,7 @@ Settings load in this order: environment variables, then
 | `PALACE_RERANK_MODEL` | built-in | Override the reranker model |
 | `PALACE_ENTITY_LANGUAGES` | `en` | Comma-separated languages for entity detection |
 | `PALACE_GAIN_DISABLED` | off | `1` turns off usage recording |
+| `PALACE_FEEDBACK_DISABLED` | off | `1` stops the feedback-link hint in `palace_session_context` |
 | `PALACE_PROJECT` | auto | Project name used for gain attribution |
 | `PALACE_SOURCE_DIR` | `~/Desktop/transcripts` | Default source for `palace split` |
 | `PALACE_MINE_TRACE` | off | `1` prints per-stage mining timings |
@@ -817,6 +826,13 @@ convention question account for the difference.
   Face, and to your own Palace Server if you turn on remote mode.
 - **No telemetry.** `palace gain` statistics are written to your local
   database only.
+- **Feedback is something you post, never something Palace sends.** After 10
+  MCP sessions, and then at most every 30 days, `palace_session_context`
+  includes a link your agent may mention once. The link opens a public
+  [GitHub discussion](https://github.com/AncientiCe/palace-rs/discussions/categories/feedback)
+  pre-filled with your Palace version, OS, client name, and profile. You can
+  edit it before posting, or ignore it. `palace feedback` opens the same page.
+  Set `PALACE_FEEDBACK_DISABLED=1` to never see the hint.
 - **Back up** with `palace export`, or copy `palace.db`.
 - **Delete** a single memory with `palace_forget`, or everything by removing
   `~/.palace`.
@@ -914,11 +930,12 @@ bundle and start without writing code.
 
 ## 📚 Using Palace as a library
 
-Palace is also a Rust crate (`palace`). Add it as a git dependency:
+Palace is also a Rust crate, [`palace-rs`](https://crates.io/crates/palace-rs),
+imported as `palace` ([API docs](https://docs.rs/palace-rs)):
 
 ```toml
 [dependencies]
-palace-rs = { git = "https://github.com/AncientiCe/palace-rs", default-features = false }
+palace-rs = { version = "0.20", default-features = false }
 ```
 
 ```rust
@@ -954,39 +971,23 @@ it. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
 
 ---
 
-## 🚚 Migrating from older versions
+## 🚚 Coming from another memory tool
 
-<details>
-<summary>From <code>mempalace</code> (0.1.x)</summary>
-
-Version 0.2.0 renamed the project from `mempalace` to `palace`. The 0.2.x line
-kept the old names working with warnings. They were removed in 0.3.0.
-
-To upgrade from 0.1.x, either install a 0.2.x release first and run
-`palace install`, which migrates configs and moves `~/.mempalace` to
-`~/.palace`, or rename by hand: `~/.mempalace` → `~/.palace`,
-`mempalace.yaml` → `palace.yaml`, `MEMPALACE_*` → `PALACE_*`, and the
-`mempalace_*` MCP tools → `palace_*`. Hooks that ran `mempalace mcp` or
-`python -m mempalace.mcp_server` should now run `palace mcp`.
-
-</details>
-
-<details>
-<summary>From the Python version</summary>
-
-The Rust version replaces ChromaDB plus SQLite with a single `palace.db`.
-ChromaDB data cannot be converted, so re-ingest:
+Palace does not import another tool's store. Many keep summaries,
+extracted "facts", or compressed text rather than what was actually said,
+and Palace keeps text verbatim. Mine the originals instead, and every drawer
+cites the file it came from:
 
 ```bash
-palace init ~/my-project --yes --auto-mine
-palace mine-convos ~/Desktop/transcripts
+palace init ~/my-project --yes --auto-mine   # your code and docs
+palace split --source ~/Desktop/transcripts  # only for concatenated Claude Code transcripts
+palace mine-convos ~/Desktop/transcripts     # Claude Code, Codex, Claude.ai, ChatGPT, Slack exports
 palace status
 ```
 
-`identity.txt`, `people_map.json`, and `known_names.json` in `~/.palace/` are
-still compatible and are read automatically.
-
-</details>
+Once your history is in Palace, remove the old tool's MCP server and hooks
+from your agent so the two don't compete. `palace install` sets up Palace's
+own.
 
 ---
 

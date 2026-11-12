@@ -6,8 +6,6 @@ target/
 /data/
 /tools/
 
-# Local mempalace project config
-/mempalace.yaml
 
 # SQLite runtime/test artifacts
 *.db

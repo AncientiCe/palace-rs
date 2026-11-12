@@ -228,13 +228,13 @@ fn seed_adoption_facts_tool_is_idempotent() {
         &conn,
         &config,
         "palace_seed_adoption_facts",
-        &serde_json::json!({"project": "mempalace-rs"}),
+        &serde_json::json!({"project": "palace-rs"}),
     );
     let second = palace::mcp_server::dispatch_tool(
         &conn,
         &config,
         "palace_seed_adoption_facts",
-        &serde_json::json!({"project": "mempalace-rs"}),
+        &serde_json::json!({"project": "palace-rs"}),
     );
 
     assert_eq!(first["success"], true);
@@ -1186,4 +1186,95 @@ fn embeddings_rejects_unknown_actions_and_models() {
         .as_str()
         .unwrap()
         .contains("unknown model"));
+}
+
+// ── List drawers ──────────────────────────────────────────────────────────
+
+#[test]
+fn list_drawers_is_compact_by_default() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    store::add_drawer(
+        &conn,
+        "wing_test",
+        "room_a",
+        "Alice Smith reviewed the ChromaDB migration.",
+        None,
+        "f.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_list_drawers",
+        &serde_json::json!({"wing": "wing_test"}),
+    );
+
+    assert_eq!(result["count"], 1);
+    let drawer = &result["drawers"][0];
+    assert_eq!(
+        drawer["content"],
+        "Alice Smith reviewed the ChromaDB migration."
+    );
+    for kept in [
+        "id",
+        "wing",
+        "room",
+        "source_file",
+        "added_by",
+        "filed_at",
+        "importance",
+    ] {
+        assert!(drawer.get(kept).is_some(), "{kept} should be listed");
+    }
+    for dropped in [
+        "entity_metadata",
+        "metadata",
+        "hall",
+        "chunk_index",
+        "created_at",
+        "normalize_version",
+    ] {
+        assert!(
+            drawer.get(dropped).is_none(),
+            "{dropped} belongs to the verbose listing"
+        );
+    }
+    assert!(result["more"].as_str().unwrap().contains("verbose=true"));
+}
+
+#[test]
+fn list_drawers_verbose_includes_every_field() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    store::add_drawer(
+        &conn,
+        "wing_test",
+        "room_a",
+        "Alice Smith reviewed the ChromaDB migration.",
+        None,
+        "f.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+
+    let result = palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_list_drawers",
+        &serde_json::json!({"wing": "wing_test", "verbose": true}),
+    );
+
+    let drawer = &result["drawers"][0];
+    assert!(drawer["entity_metadata"]["entities"].is_array());
+    assert!(drawer["metadata"].is_object());
+    assert!(drawer.get("hall").is_some());
+    assert_eq!(drawer["chunk_index"], 0);
+    assert!(result.get("more").is_none());
 }

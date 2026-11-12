@@ -414,11 +414,35 @@ pub fn set_active_model(id: &str) -> Result<&'static ModelSpec> {
 /// `get_embedder` makes a redundant call a no-op.
 pub fn warm_up_in_background() {
     let spec = active_model();
-    std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         if let Err(e) = get_embedder(spec) {
             tracing::warn!(error = %e, "Palace: background embedder warm-up failed");
         }
     });
+    if let Ok(mut slot) = WARM_UP.lock() {
+        *slot = Some(handle);
+    }
+}
+
+/// The background warm-up thread, so shutdown can wait for it.
+static WARM_UP: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(None);
+
+/// Wait up to `limit` for a background warm-up to finish. Exiting the process
+/// while ONNX Runtime is still building a session crashes it on teardown, so
+/// short-lived processes call this before returning from `main`.
+pub fn wait_for_warm_up(limit: Duration) {
+    let Some(handle) = WARM_UP.lock().ok().and_then(|mut slot| slot.take()) else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + limit;
+    while !handle.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!("Palace: exiting before the embedding model finished loading");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = handle.join();
 }
 
 /// Whether the active embedder has finished initializing. `mine()` uses this
