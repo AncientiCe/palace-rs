@@ -125,15 +125,16 @@ fn run(benchmark: &str, args: RunArgs) -> Result<()> {
 
 /// Markdown tables of aggregate and per-question-type recall at 1, 5 and 10:
 /// `any` counts a question when one gold session is in the top K, `all` when
-/// every gold session is.
+/// every gold session is. `tokens@5` is the estimated size of the top 5
+/// drawers a search returns, averaged per question.
 #[cfg(feature = "benchmarks")]
 fn summary_table(summaries: &[BenchmarkSummary]) -> String {
     let mut out = String::from(
-        "| Model | any@1 | any@5 | any@10 | all@1 | all@5 | all@10 | Ingest | Query |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "| Model | any@1 | any@5 | any@10 | all@1 | all@5 | all@10 | tokens@5 | Ingest | Query |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     );
     for s in summaries {
         out.push_str(&format!(
-            "| `{}` | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {}s | {}ms |\n",
+            "| `{}` | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.0} | {}s | {}ms |\n",
             s.model,
             s.recall_at_1,
             s.recall_at_5,
@@ -141,6 +142,7 @@ fn summary_table(summaries: &[BenchmarkSummary]) -> String {
             s.recall_all_at_1,
             s.recall_all_at_5,
             s.recall_all_at_10,
+            s.returned_tokens_at_5,
             s.ingest_ms / 1000,
             s.query_ms
         ));

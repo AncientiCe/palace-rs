@@ -213,6 +213,15 @@ pub struct BenchmarkSummary {
     /// The same with `source_decay` off: one source may fill the results.
     #[serde(default)]
     pub drawer_view_without_source_decay: DrawerView,
+    /// Estimated tokens in the top 5 and top 10 drawers a search returns,
+    /// averaged over the evaluated questions. A token is counted as four
+    /// bytes of text, as `palace gain` counts them.
+    #[serde(default)]
+    pub returned_tokens_at_5: f64,
+    #[serde(default)]
+    pub returned_tokens_at_10: f64,
+    #[serde(skip)]
+    returned_tokens_sum: (usize, usize),
     pub per_question_type: BTreeMap<String, TypeSummary>,
 }
 
@@ -242,6 +251,9 @@ impl BenchmarkSummary {
             recall_all_at_10: 0.0,
             drawer_view: DrawerView::default(),
             drawer_view_without_source_decay: DrawerView::default(),
+            returned_tokens_at_5: 0.0,
+            returned_tokens_at_10: 0.0,
+            returned_tokens_sum: (0, 0),
             per_question_type: BTreeMap::new(),
         }
     }
@@ -272,7 +284,26 @@ impl BenchmarkSummary {
         self.recall_all_at_1 = self.all_hits_at_1 as f64 / denominator;
         self.recall_all_at_5 = self.all_hits_at_5 as f64 / denominator;
         self.recall_all_at_10 = self.all_hits_at_10 as f64 / denominator;
+        self.returned_tokens_at_5 = self.returned_tokens_sum.0 as f64 / denominator;
+        self.returned_tokens_at_10 = self.returned_tokens_sum.1 as f64 / denominator;
     }
+
+    /// Count one evaluated question's returned tokens. Call after `record`.
+    fn record_returned_tokens(&mut self, at_5: usize, at_10: usize) {
+        self.returned_tokens_sum.0 += at_5;
+        self.returned_tokens_sum.1 += at_10;
+        self.recompute();
+    }
+}
+
+/// Estimated tokens in the first `k` results' text: four bytes a token.
+fn returned_tokens(results: &[crate::ranker::HybridResult], k: usize) -> usize {
+    results
+        .iter()
+        .take(k)
+        .map(|result| result.drawer.text.len())
+        .sum::<usize>()
+        / 4
 }
 
 #[derive(Debug, Clone)]
@@ -380,6 +411,8 @@ struct CaseOutput {
     all_at_10: Option<bool>,
     drawer_view: Option<DrawerView>,
     drawer_view_without_source_decay: Option<DrawerView>,
+    returned_tokens_at_5: usize,
+    returned_tokens_at_10: usize,
     ingest_ms: u128,
     query_ms: u128,
     drawer_count: usize,
@@ -591,6 +624,10 @@ pub fn run_benchmark(options: &RunOptions) -> Result<BenchmarkSummary> {
                         all_at_10: case.all_at_10.unwrap_or(false),
                     };
                     summary.record(&instance.question_type, &hits);
+                    summary.record_returned_tokens(
+                        case.returned_tokens_at_5,
+                        case.returned_tokens_at_10,
+                    );
                     if let Some(view) = &case.drawer_view {
                         summary.drawer_view.add(view);
                     }
@@ -618,6 +655,8 @@ pub fn run_benchmark(options: &RunOptions) -> Result<BenchmarkSummary> {
                     all_at_10: None,
                     drawer_view: None,
                     drawer_view_without_source_decay: None,
+                    returned_tokens_at_5: 0,
+                    returned_tokens_at_10: 0,
                     ingest_ms: 0,
                     query_ms: 0,
                     drawer_count: 0,
@@ -639,13 +678,14 @@ pub fn run_benchmark(options: &RunOptions) -> Result<BenchmarkSummary> {
                 0
             };
             eprintln!(
-                "[{} {}] {}/{}  recall_any@5={:.3}  recall_all@5={:.3}  failed={}  unscored={}  {:.1}q/s  eta={}",
+                "[{} {}] {}/{}  recall_any@5={:.3}  recall_all@5={:.3}  tokens@5={:.0}  failed={}  unscored={}  {:.1}q/s  eta={}",
                 options.benchmark,
                 summary.model,
                 done,
                 total,
                 summary.recall_at_5,
                 summary.recall_all_at_5,
+                summary.returned_tokens_at_5,
                 summary.failed_questions,
                 summary.unscored_questions,
                 rate,
@@ -814,6 +854,8 @@ fn run_case(
     )?;
     let query_ms = query_start.elapsed().as_millis();
 
+    let returned_tokens_at_5 = returned_tokens(&results, 5);
+    let returned_tokens_at_10 = returned_tokens(&results, 10);
     let scored = !instance.answer_session_ids.is_empty();
     let drawer_sessions = |results: &[crate::ranker::HybridResult]| -> Vec<String> {
         results
@@ -889,6 +931,8 @@ fn run_case(
         all_at_10: hits.as_ref().map(|hit| hit.all_at_10),
         drawer_view,
         drawer_view_without_source_decay,
+        returned_tokens_at_5,
+        returned_tokens_at_10,
         ingest_ms,
         query_ms,
         drawer_count: drawers.len(),
