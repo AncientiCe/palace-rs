@@ -731,12 +731,11 @@ fn claude_desktop_config_path(_home_dir: &Path) -> Result<PathBuf> {
     {
         Ok(_home_dir.join("Library/Application Support/Claude/claude_desktop_config.json"))
     }
+    // Resolve from the home dir like the other clients, not from %APPDATA%,
+    // so an install against a custom home never touches the real config.
     #[cfg(target_os = "windows")]
     {
-        let appdata = std::env::var_os("APPDATA").ok_or_else(|| anyhow!("APPDATA not set"))?;
-        Ok(PathBuf::from(appdata)
-            .join("Claude")
-            .join("claude_desktop_config.json"))
+        Ok(_home_dir.join("AppData/Roaming/Claude/claude_desktop_config.json"))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

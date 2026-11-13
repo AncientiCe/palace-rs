@@ -550,6 +550,29 @@ fn install_claude_desktop_writes_to_library_application_support() {
     assert_eq!(server["args"], serde_json::json!(["mcp"]));
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn install_claude_desktop_writes_under_home_appdata() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let report = install_clients(&options(
+        temp.path(),
+        &binary_path,
+        vec![Client::ClaudeDesktop],
+    ))
+    .unwrap();
+
+    let expected = temp
+        .path()
+        .join("AppData/Roaming/Claude/claude_desktop_config.json");
+    assert_eq!(report.changed, vec![expected.clone()]);
+    let config = read_json(&expected);
+    assert_eq!(
+        config["mcpServers"]["palace"]["command"].as_str(),
+        Some(binary_path.to_string_lossy().as_ref())
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn install_claude_desktop_preserves_existing_keys() {
