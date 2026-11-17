@@ -61,6 +61,7 @@
 
 pub mod backend;
 pub mod backends;
+pub mod clock;
 pub mod closet;
 pub mod config;
 pub mod convo_miner;

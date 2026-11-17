@@ -8,7 +8,6 @@
 //! right session. All writes are best-effort; callers ignore errors.
 
 use anyhow::{Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::usage::SAVE_TOOLS;
@@ -41,7 +40,7 @@ pub fn palace_tool(tool_name: &str) -> Option<&str> {
 /// Record a submitted prompt, pruning long-idle sessions.
 pub fn record_prompt(conn: &Connection, session_id: &str, cwd: &str) -> Result<()> {
     upsert(conn, session_id, cwd, 1, 0, false, false)?;
-    let cutoff = (Utc::now() - ChronoDuration::days(RETENTION_DAYS)).to_rfc3339();
+    let cutoff = crate::clock::ago_rfc3339(crate::clock::days(RETENTION_DAYS));
     conn.execute(
         "DELETE FROM hook_sessions WHERE updated_at < ?1",
         params![cutoff],
@@ -103,7 +102,7 @@ fn upsert(
             tool_calls,
             palace_used,
             saved,
-            Utc::now().to_rfc3339()
+            crate::clock::now_rfc3339()
         ],
     )
     .context("recording hook session activity")?;

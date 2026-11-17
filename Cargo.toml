@@ -61,7 +61,7 @@ thiserror = "2"
 ignore = "0.4"
 
 # Date/time
-chrono = { version = "0.4", features = ["serde"] }
+jiff = "0.2"
 
 # Hashing for deterministic IDs
 blake3 = "1"

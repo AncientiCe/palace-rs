@@ -6,6 +6,16 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Changed
+
+- **`chrono` is replaced by `jiff`.** `chrono` is unmaintained
+  (RUSTSEC-2026-0543) and failed the dependency audit. Stored timestamps keep
+  the exact text form they had, so existing palaces need no migration.
+  **Breaking for library users:** `RankOptions::now`, `TimeTarget::start` and
+  `end`, `time_targets`, `time_match` and `feedback::take_due_prompt` take
+  `jiff::Timestamp` where they took `chrono::DateTime<Utc>`. The new
+  `palace::clock` module holds the timestamp helpers.
+
 ## [0.20.1] - 2026-11-17
 
 ### Fixed

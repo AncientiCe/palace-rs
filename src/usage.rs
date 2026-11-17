@@ -3,7 +3,6 @@
 //! The recorder is best-effort: failures never change MCP tool behavior.
 
 use anyhow::{Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -35,10 +34,10 @@ pub struct UsageEvent {
 
 impl UsageSession {
     pub fn new() -> Self {
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         let seed = format!(
             "{}:{}:{}",
-            now.to_rfc3339(),
+            crate::clock::rfc3339(now),
             std::process::id(),
             std::env::current_dir()
                 .ok()
@@ -102,7 +101,7 @@ pub const RECALL_TOOLS: &[&str] = &[
 /// Returns `(engaged, saved)`. Used by the `stop` hook to nudge agents that
 /// investigated with Palace but never recorded what they found.
 pub fn recent_save_status(conn: &Connection, within_minutes: i64) -> Result<(bool, bool)> {
-    let since = (Utc::now() - ChronoDuration::minutes(within_minutes.max(0))).to_rfc3339();
+    let since = crate::clock::ago_rfc3339(jiff::SignedDuration::from_mins(within_minutes.max(0)));
     let engaged = tools_used_since(conn, &since, RECALL_TOOLS)?;
     let saved = tools_used_since(conn, &since, SAVE_TOOLS)?;
     Ok((engaged, saved))
@@ -168,7 +167,7 @@ fn classify_event(
         .map(|bytes| bytes.len() as i64)
         .unwrap_or_default();
     let mut event = UsageEvent {
-        ts: Utc::now().to_rfc3339(),
+        ts: crate::clock::now_rfc3339(),
         session_id: session.session_id.clone(),
         project: session.project.clone(),
         tool: tool.to_string(),
@@ -370,7 +369,7 @@ fn mark_repeat(conn: &Connection, event: &mut UsageEvent) -> Result<()> {
     let Some(hash) = event.query_hash.as_deref() else {
         return Ok(());
     };
-    let since = (Utc::now() - ChronoDuration::hours(24)).to_rfc3339();
+    let since = crate::clock::ago_rfc3339(crate::clock::hours(24));
     let seen: Option<i64> = conn
         .query_row(
             "SELECT id FROM usage_events

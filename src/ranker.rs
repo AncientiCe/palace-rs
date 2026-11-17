@@ -1,7 +1,7 @@
 //! Hybrid retrieval: BM25 keyword scoring plus optional vector similarity.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 
@@ -39,11 +39,11 @@ const MINED_DISCOUNT: f64 = 0.12;
 
 /// Compute an exponential recency bonus based on `filed_at` (RFC 3339 string).
 /// Returns a value in [0, RECENCY_WEIGHT].
-fn recency_boost(filed_at: &str, now: DateTime<Utc>) -> f64 {
-    let Ok(ts) = DateTime::parse_from_rfc3339(filed_at) else {
+fn recency_boost(filed_at: &str, now: Timestamp) -> f64 {
+    let Some(ts) = crate::clock::parse(filed_at) else {
         return 0.0;
     };
-    let age_days = (now - ts.to_utc()).num_days().max(0) as f64;
+    let age_days = (now.duration_since(ts).as_secs() / 86_400).max(0) as f64;
     RECENCY_WEIGHT * (-RECENCY_LAMBDA * age_days).exp()
 }
 
@@ -53,10 +53,10 @@ fn date_boost(targets: &[TimeTarget], created_at: &str) -> f64 {
     if targets.is_empty() {
         return 0.0;
     }
-    let Ok(ts) = DateTime::parse_from_rfc3339(created_at) else {
+    let Some(ts) = crate::clock::parse(created_at) else {
         return 0.0;
     };
-    DATE_WEIGHT * crate::time_query::time_match(targets, ts.to_utc())
+    DATE_WEIGHT * crate::time_query::time_match(targets, ts)
 }
 
 /// How a search is ranked, beyond the query and the model.
@@ -64,7 +64,7 @@ fn date_boost(targets: &[TimeTarget], created_at: &str) -> f64 {
 pub struct RankOptions {
     /// When the query is asked. Recency and relative time phrases ("last
     /// week") count back from here.
-    pub now: DateTime<Utc>,
+    pub now: Timestamp,
     /// Share of the best other matching drawer from the same source added to
     /// each drawer's score; 0 ranks every drawer on its own.
     pub source_weight: f64,
@@ -79,7 +79,7 @@ pub struct RankOptions {
 impl Default for RankOptions {
     fn default() -> Self {
         Self {
-            now: Utc::now(),
+            now: Timestamp::now(),
             source_weight: SOURCE_WEIGHT,
             mined_discount: MINED_DISCOUNT,
             source_decay: SOURCE_DECAY,

@@ -318,7 +318,7 @@ fn merge_preference_results(
 }
 
 fn query_id(query: &str, top_drawer_ids: &[&str]) -> String {
-    let bucket = chrono::Utc::now().timestamp() / 300;
+    let bucket = jiff::Timestamp::now().as_second() / 300;
     let joined_ids = top_drawer_ids.join(",");
     let hash = blake3::hash(format!("{query}|{joined_ids}|{bucket}").as_bytes());
     format!("query_{}", &hash.to_hex()[..16])
