@@ -6,6 +6,8 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-11-17
+
 ### Changed
 
 - **`chrono` is replaced by `jiff`.** `chrono` is unmaintained
