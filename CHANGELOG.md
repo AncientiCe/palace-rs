@@ -6,6 +6,15 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-11-17
+
+### Fixed
+
+- **`palace install` resolves the Claude Desktop config from the home
+  directory on Windows**, like the other clients, instead of from `%APPDATA%`.
+  An install against a custom home no longer touches the real config.
+- **Security: `rustix` updated to 1.1.6** for RUSTSEC-2026-0486.
+
 ### Changed
 
 - **One source no longer fills the search results.** Each drawer keeps 0.9 of
