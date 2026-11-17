@@ -3,7 +3,6 @@
 //! Install: claude mcp add palace -- palace mcp
 
 use anyhow::Result;
-use chrono::Utc;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -334,7 +333,7 @@ fn tool_status(conn: &Connection, config: &PalaceConfig, args: &Value) -> Value 
     let wings = wing_counts(conn).unwrap_or_default();
 
     // Surface recent diary entries for any known agent (warm-start context).
-    let cutoff = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+    let cutoff = crate::timefmt::rfc3339_ago(24 * 3_600);
     let last_session: Vec<Value> = wings
         .keys()
         .filter(|w| w.starts_with("wing_diary__"))
@@ -989,7 +988,7 @@ fn tool_add_drawer(conn: &Connection, args: &Value) -> Value {
         _ => {}
     }
 
-    let now = Utc::now().to_rfc3339();
+    let now = crate::timefmt::now_rfc3339();
     let drawer_id = {
         let hash = blake3::hash(
             format!("{wing}/{room}/{}/{now}", &content[..100.min(content.len())]).as_bytes(),
@@ -1336,9 +1335,9 @@ fn tool_diary_write(conn: &Connection, args: &Value) -> Value {
 
     let wing = diary_wing(&agent_name);
     let room = "diary".to_string();
-    let now = Utc::now();
-    let timestamp = now.to_rfc3339();
-    let date = now.format("%Y-%m-%d").to_string();
+    let now = jiff::Timestamp::now();
+    let timestamp = crate::timefmt::rfc3339(now);
+    let date = crate::timefmt::utc_date(now);
 
     // Semantic dedup scoped to this agent's diary: skip near-identical entries
     // (e.g. the same session summary written twice) so the diary grows with new
@@ -1555,7 +1554,7 @@ pub(crate) fn recent_diary_drawers(
         wing: wing.map(String::from),
         room: Some("diary".to_string()),
     };
-    let cutoff = (Utc::now() - chrono::Duration::hours(within_hours)).to_rfc3339();
+    let cutoff = crate::timefmt::rfc3339_ago(within_hours.saturating_mul(3_600));
     let mut drawers = crate::store::list_drawers(conn, &filter, 10000).unwrap_or_default();
     drawers.sort_by(|a, b| b.filed_at.cmp(&a.filed_at));
     drawers
@@ -1582,7 +1581,7 @@ fn tool_session_context(conn: &Connection, config: &PalaceConfig, args: &Value) 
     }
     if response.get("error").is_none() {
         if let (Ok(Some(hint)), Some(object)) = (
-            crate::feedback::take_due_prompt(conn, config.profile(), chrono::Utc::now()),
+            crate::feedback::take_due_prompt(conn, config.profile(), jiff::Timestamp::now()),
             response.as_object_mut(),
         ) {
             object.insert("feedback".into(), hint);

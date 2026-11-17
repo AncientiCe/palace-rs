@@ -7,7 +7,7 @@
 //! link once. The hint then stays quiet for [`PROMPT_INTERVAL_DAYS`].
 
 use anyhow::Result;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::sync::OnceLock;
@@ -25,7 +25,7 @@ pub fn take_star_ask(config_dir: &std::path::Path) -> Option<String> {
         return None;
     }
     std::fs::create_dir_all(config_dir).ok()?;
-    std::fs::write(&marker, Utc::now().to_rfc3339()).ok()?;
+    std::fs::write(&marker, crate::timefmt::now_rfc3339()).ok()?;
     Some(format!(
         "If Palace helps, a star on GitHub helps others find it: {REPO_URL}"
     ))
@@ -136,7 +136,7 @@ pub fn session_client() -> Option<String> {
 pub fn take_due_prompt(
     conn: &Connection,
     profile: crate::config::Profile,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<Option<Value>> {
     if disabled() {
         return Ok(None);
@@ -145,13 +145,13 @@ pub fn take_due_prompt(
     if sessions < SESSIONS_BEFORE_PROMPT {
         return Ok(None);
     }
-    let last = read(conn, KEY_LAST_PROMPT)?
-        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
-        .map(|value| value.with_timezone(&Utc));
-    if last.is_some_and(|last| now - last < Duration::days(PROMPT_INTERVAL_DAYS)) {
+    let last = read(conn, KEY_LAST_PROMPT)?.and_then(|value| crate::timefmt::parse_rfc3339(&value));
+    if last.is_some_and(|last| {
+        now.duration_since(last) < SignedDuration::from_hours(24 * PROMPT_INTERVAL_DAYS)
+    }) {
         return Ok(None);
     }
-    write(conn, KEY_LAST_PROMPT, &now.to_rfc3339())?;
+    write(conn, KEY_LAST_PROMPT, &crate::timefmt::rfc3339(now))?;
 
     let info = FeedbackInfo::current(profile, session_client());
     Ok(Some(json!({
@@ -271,7 +271,7 @@ mod tests {
         // Runs in one test so the env-var check cannot race another test.
         std::env::remove_var(DISABLE_ENV);
         let conn = conn();
-        let now = Utc::now();
+        let now = Timestamp::now();
         for _ in 0..SESSIONS_BEFORE_PROMPT - 1 {
             note_mcp_session(&conn, None).unwrap();
         }
@@ -285,17 +285,17 @@ mod tests {
             .unwrap();
         assert!(hint["url"].as_str().unwrap().starts_with(DISCUSSION_URL));
 
-        let soon = now + Duration::days(PROMPT_INTERVAL_DAYS - 1);
+        let soon = now + SignedDuration::from_hours(24 * (PROMPT_INTERVAL_DAYS - 1));
         assert!(take_due_prompt(&conn, Profile::Coding, soon)
             .unwrap()
             .is_none());
-        let later = now + Duration::days(PROMPT_INTERVAL_DAYS);
+        let later = now + SignedDuration::from_hours(24 * PROMPT_INTERVAL_DAYS);
         assert!(take_due_prompt(&conn, Profile::Coding, later)
             .unwrap()
             .is_some());
 
         std::env::set_var(DISABLE_ENV, "1");
-        let much_later = later + Duration::days(PROMPT_INTERVAL_DAYS);
+        let much_later = later + SignedDuration::from_hours(24 * PROMPT_INTERVAL_DAYS);
         assert!(take_due_prompt(&conn, Profile::Coding, much_later)
             .unwrap()
             .is_none());

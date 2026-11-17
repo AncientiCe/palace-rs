@@ -222,9 +222,7 @@ fn time_phrases_lift_drawers_from_that_day() {
     }
 
     let options = RankOptions {
-        now: chrono::DateTime::parse_from_rfc3339("2023-03-25T18:00:00+00:00")
-            .unwrap()
-            .to_utc(),
+        now: palace::timefmt::parse_rfc3339("2023-03-25T18:00:00+00:00").unwrap(),
         ..RankOptions::default()
     };
     let results = hybrid_search_with(

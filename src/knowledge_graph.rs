@@ -8,7 +8,6 @@
 //! - Closet references linking back to source drawers
 
 use anyhow::{Context, Result};
-use chrono::Local;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -51,8 +50,13 @@ fn normalize_predicate(pred: &str) -> String {
 }
 
 fn triple_id(sub_id: &str, pred: &str, obj_id: &str) -> String {
-    let hash =
-        blake3::hash(format!("{sub_id}/{pred}/{obj_id}/{}", Local::now().to_rfc3339()).as_bytes());
+    let hash = blake3::hash(
+        format!(
+            "{sub_id}/{pred}/{obj_id}/{}",
+            crate::timefmt::local_now_rfc3339()
+        )
+        .as_bytes(),
+    );
     format!("t_{sub_id}_{pred}_{obj_id}_{}", &hash.to_hex()[..8])
 }
 
@@ -200,7 +204,7 @@ pub fn seed_agent_adoption_facts(conn: &Connection, project: &str) -> Result<See
                 subject,
                 predicate,
                 object,
-                Some(&Local::now().format("%Y-%m-%d").to_string()),
+                Some(&crate::timefmt::local_today()),
                 None,
                 1.0,
                 None,
@@ -239,7 +243,7 @@ pub fn seed_or_update_fact(
             subject,
             predicate,
             new_object,
-            Some(&Local::now().format("%Y-%m-%d").to_string()),
+            Some(&crate::timefmt::local_today()),
             None,
             1.0,
             None,
@@ -284,7 +288,7 @@ pub fn invalidate(
     let pred = normalize_predicate(predicate);
     let end_date = ended
         .map(String::from)
-        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+        .unwrap_or_else(crate::timefmt::local_today);
 
     conn.execute(
         "UPDATE triples SET valid_to=?1 WHERE subject=?2 AND predicate=?3 AND object=?4 AND valid_to IS NULL",

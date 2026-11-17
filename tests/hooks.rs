@@ -1,7 +1,6 @@
 //! Tests for the Cursor hook response builders that drive automatic
 //! memory-in (recall on investigation) and memory-out (save on stop).
 
-use chrono::Utc;
 use palace::hooks::{
     normalize_input, post_tool_use_response, session_start_response, stop_response,
     user_prompt_submit_response, HookClient,
@@ -15,7 +14,7 @@ fn test_db() -> rusqlite::Connection {
 
 fn usage(tool: &str) -> UsageEvent {
     UsageEvent {
-        ts: Utc::now().to_rfc3339(),
+        ts: palace::timefmt::now_rfc3339(),
         session_id: "session_test".to_string(),
         project: "proj".to_string(),
         tool: tool.to_string(),

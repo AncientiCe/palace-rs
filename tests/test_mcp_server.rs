@@ -123,7 +123,7 @@ fn taxonomy_aggregates_correctly() {
 #[test]
 fn add_drawer_tool_succeeds() {
     let conn = test_db();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = palace::timefmt::now_rfc3339();
     let prefix = "test content";
     let id = {
         let hash = blake3::hash(

@@ -104,6 +104,7 @@ pub mod split;
 pub mod store;
 pub mod sweep;
 pub mod time_query;
+pub mod timefmt;
 pub mod usage;
 pub mod watcher;
 pub mod wings;

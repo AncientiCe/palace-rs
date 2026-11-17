@@ -265,7 +265,7 @@ fn stop_silent_for_trivial_session_even_if_others_engaged() {
     // Another session searched Palace and saved nothing; that must not leak.
     record_tool(&conn, "other", "/work/x", "mcp__palace__palace_search").unwrap();
     let mut event = palace::usage::UsageEvent {
-        ts: chrono::Utc::now().to_rfc3339(),
+        ts: palace::timefmt::now_rfc3339(),
         session_id: "mcp".into(),
         project: "x".into(),
         tool: "palace_search".into(),

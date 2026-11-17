@@ -1,7 +1,6 @@
 //! Aggregation and rendering for `palace gain`.
 
 use anyhow::{bail, Context, Result};
-use chrono::{Duration, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -155,8 +154,8 @@ impl SinceWindow {
 
     fn cutoff(&self) -> Option<String> {
         match self {
-            Self::Days(days) => Some((Utc::now() - Duration::days(*days)).to_rfc3339()),
-            Self::Hours(hours) => Some((Utc::now() - Duration::hours(*hours)).to_rfc3339()),
+            Self::Days(days) => Some(crate::timefmt::rfc3339_ago(days.saturating_mul(86_400))),
+            Self::Hours(hours) => Some(crate::timefmt::rfc3339_ago(hours.saturating_mul(3_600))),
             Self::All => None,
         }
     }
@@ -190,7 +189,7 @@ pub fn record_feedback(conn: &Connection, record: &FeedbackRecord) -> Result<()>
             record.drawer_id,
             record.verdict,
             record.note,
-            Utc::now().to_rfc3339()
+            crate::timefmt::now_rfc3339()
         ],
     )
     .context("recording gain feedback")?;

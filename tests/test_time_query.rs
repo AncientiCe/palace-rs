@@ -1,13 +1,19 @@
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use jiff::{SignedDuration, Timestamp};
 use palace::time_query::{time_match, time_targets, TimeTarget};
 
 /// Saturday 2023-03-25, 18:00 UTC.
-fn now() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2023, 3, 25, 18, 0, 0).unwrap()
+fn now() -> Timestamp {
+    utc(2023, 3, 25, 18)
 }
 
-fn days_back(at: DateTime<Utc>) -> f64 {
-    (now() - at).num_seconds() as f64 / 86_400.0
+fn utc(year: i16, month: i8, day: i8, hour: i8) -> Timestamp {
+    jiff::tz::TimeZone::UTC
+        .to_timestamp(jiff::civil::date(year, month, day).at(hour, 0, 0, 0))
+        .unwrap()
+}
+
+fn days_back(at: Timestamp) -> f64 {
+    now().duration_since(at).as_secs() as f64 / 86_400.0
 }
 
 fn only(query: &str) -> TimeTarget {
@@ -62,14 +68,8 @@ fn spans_run_up_to_now() {
 #[test]
 fn this_week_starts_on_monday() {
     let target = only("what did I cook this week?");
-    assert_eq!(
-        target.start,
-        Utc.with_ymd_and_hms(2023, 3, 20, 0, 0, 0).unwrap()
-    );
-    assert_eq!(
-        only("this month").start,
-        Utc.with_ymd_and_hms(2023, 3, 1, 0, 0, 0).unwrap()
-    );
+    assert_eq!(target.start, utc(2023, 3, 20, 0));
+    assert_eq!(only("this month").start, utc(2023, 3, 1, 0));
 }
 
 #[test]
@@ -88,36 +88,21 @@ fn on_weekday_is_not_a_date() {
 #[test]
 fn months_cover_the_latest_one_begun() {
     let march = only("the trip in March");
-    assert_eq!(
-        march.start,
-        Utc.with_ymd_and_hms(2023, 3, 1, 0, 0, 0).unwrap()
-    );
+    assert_eq!(march.start, utc(2023, 3, 1, 0));
     assert_eq!(march.end, now(), "the month under way ends now");
 
     let february = only("during February");
-    assert_eq!(
-        february.end,
-        Utc.with_ymd_and_hms(2023, 3, 1, 0, 0, 0).unwrap()
-    );
+    assert_eq!(february.end, utc(2023, 3, 1, 0));
 
     let june = only("early June");
-    assert_eq!(
-        june.start,
-        Utc.with_ymd_and_hms(2022, 6, 1, 0, 0, 0).unwrap()
-    );
-    assert_eq!(
-        june.end,
-        Utc.with_ymd_and_hms(2022, 6, 11, 0, 0, 0).unwrap()
-    );
+    assert_eq!(june.start, utc(2022, 6, 1, 0));
+    assert_eq!(june.end, utc(2022, 6, 11, 0));
 }
 
 #[test]
 fn month_and_day_is_one_date() {
     let target = only("the concert on March 15th");
-    assert_eq!(
-        target.start,
-        Utc.with_ymd_and_hms(2023, 3, 15, 12, 0, 0).unwrap()
-    );
+    assert_eq!(target.start, utc(2023, 3, 15, 12));
     assert_eq!(target.start, target.end);
 }
 
@@ -139,7 +124,7 @@ fn points_fall_off_with_spread() {
     let targets = time_targets("10 days ago", now());
     let at = targets[0].start;
     assert_eq!(time_match(&targets, at), 1.0);
-    let one_spread = time_match(&targets, at - Duration::hours(60));
+    let one_spread = time_match(&targets, at - SignedDuration::from_hours(60));
     assert!((one_spread - (-0.5f64).exp()).abs() < 1e-9);
     assert!(time_match(&targets, now()) < 0.001);
     assert_eq!(time_match(&[], at), 0.0);
@@ -149,7 +134,36 @@ fn points_fall_off_with_spread() {
 fn spans_match_fully_anywhere_inside() {
     let targets = time_targets("in the past month", now());
     for days in [1, 15, 29] {
-        assert_eq!(time_match(&targets, now() - Duration::days(days)), 1.0);
+        assert_eq!(
+            time_match(&targets, now() - SignedDuration::from_hours(24 * days)),
+            1.0
+        );
     }
-    assert!(time_match(&targets, now() - Duration::days(60)) < 0.01);
+    assert!(time_match(&targets, now() - SignedDuration::from_hours(24 * 60)) < 0.01);
+}
+
+#[test]
+fn dates_that_do_not_exist_are_not_targets() {
+    assert!(time_targets("the 30th of February: February 30th", now()).is_empty());
+    // 2023 has no 29 February, and the latest one begun is still this year's.
+    assert!(time_targets("on February 29th", now()).is_empty());
+}
+
+#[test]
+fn counts_too_large_to_reach_are_skipped_not_fatal() {
+    assert!(time_targets("4294967295 years ago", now()).is_empty());
+    assert!(time_targets("in the past 4294967295 years", now()).is_empty());
+}
+
+#[test]
+fn this_year_starts_on_the_first_of_january() {
+    assert_eq!(only("this year").start, utc(2023, 1, 1, 0));
+}
+
+#[test]
+fn late_month_runs_to_the_last_day_including_leap_february() {
+    let leap_now = utc(2024, 3, 25, 18);
+    let targets = time_targets("late February", leap_now);
+    assert_eq!(targets[0].start, utc(2024, 2, 21, 0));
+    assert_eq!(targets[0].end, utc(2024, 3, 1, 0));
 }

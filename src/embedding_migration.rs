@@ -354,7 +354,7 @@ pub fn start(conn: &Connection, target: &str) -> Result<&'static ModelSpec> {
         return Ok(spec);
     }
     meta_set(conn, META_TARGET, spec.id)?;
-    meta_set(conn, META_STARTED, &chrono::Utc::now().to_rfc3339())?;
+    meta_set(conn, META_STARTED, &crate::timefmt::now_rfc3339())?;
     meta_delete(conn, META_VERIFIED)?;
     Ok(spec)
 }

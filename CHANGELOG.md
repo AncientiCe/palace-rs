@@ -6,6 +6,31 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-17
+
+### Security
+
+- **`chrono` is gone from the dependency tree**, replaced by `jiff`.
+  RUSTSEC-2026-0543 and RUSTSEC-2026-0555 flag `chrono` and `chrono-tz` as
+  unmaintained with no fix, which failed `cargo audit --deny warnings` for
+  everything built on palace-rs. Nothing is ignored to get there.
+
+### Changed
+
+- **Stored timestamps and search behaviour are unchanged.** Timestamps are
+  still written as RFC 3339 text with a `+00:00` offset and a 3, 6 or 9 digit
+  fraction (or none), so they still compare as text, and every timestamp an
+  earlier release wrote is still read. Relative time phrases in queries ("two
+  weeks ago", "last Tuesday", "in March") resolve as before. A count too large
+  to reach back to ("4294967295 years ago") is now skipped instead of
+  panicking.
+- **Public API:** `RankOptions::now`, `time_query::TimeTarget::{start, end}`,
+  `time_query::time_targets` and `time_query::time_match`, and
+  `feedback::take_due_prompt` take `jiff::Timestamp` where they took
+  `chrono::DateTime<Utc>`. The new `timefmt` module holds the stored-text
+  format: `rfc3339`, `now_rfc3339`, `rfc3339_ago`, `local_now_rfc3339`,
+  `local_today`, `utc_date` and `parse_rfc3339`.
+
 ## [0.20.1] - 2026-11-17
 
 ### Fixed

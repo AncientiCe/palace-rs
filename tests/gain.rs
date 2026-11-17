@@ -1,4 +1,3 @@
-use chrono::{Duration, Utc};
 use palace::gain::{
     history, record_feedback, render_history, render_text, summarize, FeedbackRecord, GainOptions,
     SinceWindow,
@@ -64,7 +63,12 @@ fn rendered_gain_history_uses_palace_branding() {
 
     insert_event(
         &conn,
-        &event(Utc::now().to_rfc3339(), "alpha", "palace_search", "hit"),
+        &event(
+            palace::timefmt::now_rfc3339(),
+            "alpha",
+            "palace_search",
+            "hit",
+        ),
     )
     .expect("insert event");
     let events = history(&conn, &options(None, SinceWindow::All), 20).expect("history");
@@ -76,7 +80,7 @@ fn rendered_gain_history_uses_palace_branding() {
 #[test]
 fn aggregates_value_metrics_by_project() {
     let conn = palace::db::open_in_memory().expect("open test db");
-    let now = Utc::now().to_rfc3339();
+    let now = palace::timefmt::now_rfc3339();
 
     let mut search = event(now.clone(), "alpha", "palace_search", "hit");
     search.result_count = 3;
@@ -120,7 +124,7 @@ fn aggregates_value_metrics_by_project() {
 #[test]
 fn summarizes_latency_by_tool() {
     let conn = palace::db::open_in_memory().expect("open test db");
-    let now = Utc::now().to_rfc3339();
+    let now = palace::timefmt::now_rfc3339();
 
     let mut first = event(now.clone(), "alpha", "palace_search", "hit");
     first.duration_ms = 5;
@@ -157,7 +161,7 @@ fn summarizes_latency_by_tool() {
 #[test]
 fn repeated_query_hashes_count_as_repeat_questions_avoided() {
     let conn = palace::db::open_in_memory().expect("open test db");
-    let now = Utc::now().to_rfc3339();
+    let now = palace::timefmt::now_rfc3339();
 
     let mut first = event(now.clone(), "alpha", "palace_search", "hit");
     first.query_hash = Some("same_hash".to_string());
@@ -176,8 +180,8 @@ fn repeated_query_hashes_count_as_repeat_questions_avoided() {
 #[test]
 fn since_window_filters_old_events() {
     let conn = palace::db::open_in_memory().expect("open test db");
-    let old = (Utc::now() - Duration::days(10)).to_rfc3339();
-    let recent = Utc::now().to_rfc3339();
+    let old = palace::timefmt::rfc3339_ago(10 * 86_400);
+    let recent = palace::timefmt::now_rfc3339();
 
     insert_event(&conn, &event(old, "alpha", "palace_search", "hit")).expect("insert old");
     insert_event(&conn, &event(recent, "alpha", "palace_search", "hit")).expect("insert recent");
@@ -235,7 +239,7 @@ fn recorder_classifies_search_hits_and_repeats() {
 #[test]
 fn explicit_feedback_records_precision_at_1() {
     let conn = palace::db::open_in_memory().expect("open test db");
-    let now = Utc::now().to_rfc3339();
+    let now = palace::timefmt::now_rfc3339();
 
     let mut search = event(now, "alpha", "palace_search", "hit");
     search.meta = json!({
@@ -267,7 +271,7 @@ fn explicit_feedback_records_precision_at_1() {
 #[test]
 fn diary_citation_infers_useful_feedback() {
     let conn = palace::db::open_in_memory().expect("open test db");
-    let now = Utc::now().to_rfc3339();
+    let now = palace::timefmt::now_rfc3339();
 
     let mut search = event(now.clone(), "alpha", "palace_search", "hit");
     search.meta = json!({
