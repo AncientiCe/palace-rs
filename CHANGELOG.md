@@ -6,6 +6,8 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-11-18
+
 ### Fixed
 
 - **Linux release binaries run on older glibc again.** The x86_64 Linux
