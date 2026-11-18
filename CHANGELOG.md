@@ -6,6 +6,18 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Fixed
+
+- **"database is locked" while another palace process is writing.** With a
+  `palace mine` running, `palace mcp`, the hooks and a second `palace mine`
+  or `mine-convos` failed at startup with `backfilling wings registry:
+  database is locked`. Opening an up-to-date palace now takes no write lock,
+  the wings backfill no longer stops a palace from opening, `mine-convos`
+  embeds before it opens its write transaction, and the miners wait for the
+  lock instead of failing. The wait is 10 seconds by default; set
+  `PALACE_BUSY_TIMEOUT_MS` to change it. When the wait runs out, the error
+  names the cause: another palace process holds the database.
+
 ## [0.20.3] - 2026-11-18
 
 ### Fixed

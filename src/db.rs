@@ -3,30 +3,74 @@
 //! Single palace.db file replaces both ChromaDB (drawers) and SQLite KG (triples).
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use std::path::Path;
+use std::time::Duration;
 
 /// Open (or create) the palace SQLite database with WAL mode enabled.
+///
+/// Several palace processes share one file (an MCP server per client, hooks,
+/// miners), so the connection waits for another writer instead of failing,
+/// and opening an up-to-date palace takes no write lock at all.
 pub fn open(db_path: &Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating palace directory {}", parent.display()))?;
     }
 
+    let config = crate::config::PalaceConfig::new();
+    let busy_timeout_ms = config.busy_timeout_ms();
+    open_configured(
+        db_path,
+        Duration::from_millis(busy_timeout_ms),
+        config.embedding_model().as_deref(),
+    )
+    .map_err(|err| {
+        if is_busy(&err) {
+            err.context(format!(
+                "palace database {} is locked by another palace process (waited \
+                 {busy_timeout_ms} ms); retry when it finishes, or raise PALACE_BUSY_TIMEOUT_MS",
+                db_path.display()
+            ))
+        } else {
+            err
+        }
+    })
+}
+
+fn open_configured(
+    db_path: &Path,
+    busy_timeout: Duration,
+    wanted_model: Option<&str>,
+) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )
     .with_context(|| format!("opening database {}", db_path.display()))?;
 
+    // Before any other statement, so the PRAGMAs and migrations wait too.
+    conn.busy_timeout(busy_timeout)
+        .context("setting busy timeout")?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
     )?;
 
     migrate(&conn)?;
-    let wanted = crate::config::PalaceConfig::new().embedding_model();
-    init_embedding_model(&conn, wanted.as_deref())?;
+    init_embedding_model(&conn, wanted_model)?;
     Ok(conn)
+}
+
+/// Whether SQLite gave up waiting for another connection's lock.
+fn is_busy(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            == Some(rusqlite::ErrorCode::DatabaseBusy)
+    })
 }
 
 /// Open an in-memory database for testing.
@@ -296,18 +340,40 @@ fn migrate(conn: &Connection) -> Result<()> {
     )
     .context("creating phase one drawer indexes")?;
 
-    crate::migrate::backfill_wings_registry(conn)
-        .context("backfilling wings registry from existing drawers")?;
-    // Fail open: a busy or locked palace must not stop it from opening. The
-    // version stays unrecorded, so the next open retries.
+    // Fail open: a busy or locked palace must not stop it from opening. Both
+    // steps are idempotent and leave their work undone, so the next open
+    // retries.
+    if let Err(err) = crate::migrate::backfill_wings_registry(conn) {
+        tracing::warn!(error = %err, "palace: could not backfill the wings registry");
+    }
     if let Err(err) = retag_preferences_if_stale(conn) {
         tracing::warn!(error = %err, "palace: could not re-tag preference drawers");
     }
+    if let Err(err) = record_schema_version(conn) {
+        tracing::warn!(error = %err, "palace: could not record the schema version");
+    }
+    Ok(())
+}
 
+/// Record the schema version, writing only when it is missing or different so
+/// an up-to-date palace opens without the write lock.
+fn record_schema_version(conn: &Connection) -> Result<()> {
+    const KEY: &str = "schema_version";
+    const VERSION: &str = "1";
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if current.as_deref() == Some(VERSION) {
+        return Ok(());
+    }
     conn.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params!["schema_version", "1"],
+        params![KEY, VERSION],
     )
     .context("recording schema version")?;
     Ok(())
@@ -326,7 +392,9 @@ fn retag_preferences_if_stale(conn: &Connection) -> Result<()> {
     if current.as_deref() == Some(crate::store::PREFERENCE_TAGGING_VERSION) {
         return Ok(());
     }
-    let tx = conn.unchecked_transaction()?;
+    // IMMEDIATE: take the write lock up front, where the busy timeout applies.
+    // A deferred transaction that reads first cannot wait for a writer.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     crate::store::refresh_preference_tags(&tx, false).context("re-tagging preference drawers")?;
     tx.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)
