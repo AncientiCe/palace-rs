@@ -277,7 +277,7 @@ pub fn run(
 
     println!("\n{}", "=".repeat(60));
     println!(
-        "  Mega-file splitter — {}",
+        "  Mega-file splitter: {}",
         if dry_run { "DRY RUN" } else { "SPLITTING" }
     );
     println!("{}", "=".repeat(60));
@@ -316,12 +316,12 @@ pub fn run(
     println!("{}", "-".repeat(60));
     if dry_run {
         println!(
-            "  DRY RUN — would create {total_written} files from {} mega-files",
+            "  DRY RUN: would create {total_written} files from {} mega-files",
             mega_files.len()
         );
     } else {
         println!(
-            "  Done — created {total_written} files from {} mega-files",
+            "  Done: created {total_written} files from {} mega-files",
             mega_files.len()
         );
     }

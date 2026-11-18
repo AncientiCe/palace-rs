@@ -3,7 +3,7 @@
   "name": "palace-rs",
   "display_name": "Palace",
   "version": "0.0.0",
-  "description": "Local-first memory for coding agents — MCP server, single SQLite file, local embeddings",
+  "description": "Local-first memory for coding agents: MCP server, single SQLite file, local embeddings",
   "long_description": "Palace is a local-first memory retrieval engine for coding agents. It stores verbatim project and conversation memory in a single SQLite file, embeds it locally with all-MiniLM-L6-v2, and retrieves source-grounded context over MCP so agents remember decisions, prior fixes, commands, conventions, and preferences across sessions.",
   "author": {
     "name": "AncientiCe",

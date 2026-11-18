@@ -115,7 +115,7 @@ fn forward(client: &Client, url: &str, api_key: &str, body: &str) -> Result<Opti
     if !status.is_success() {
         let detail = text.trim();
         if status.as_u16() == 401 {
-            anyhow::bail!("HTTP 401 Unauthorized — check the API key (`palace remote set`)");
+            anyhow::bail!("HTTP 401 Unauthorized. Check the API key (`palace remote set`).");
         }
         anyhow::bail!("HTTP {}: {}", status.as_u16(), detail);
     }

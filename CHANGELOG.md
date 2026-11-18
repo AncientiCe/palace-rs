@@ -6,6 +6,16 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Changed
+
+- **No em or en dashes in user-facing text.** CLI output, error messages,
+  `palace wake-up` layer headings, MCP tool descriptions and results, hook
+  context, and the memory protocol rule now use commas, colons or full stops
+  instead. For example, `palace remote test` prints `OK, authenticated, N
+  tool(s) available.` and a bad API key reports `HTTP 401 Unauthorized. Check
+  the API key (palace remote set).` The rule text changed, so run
+  `palace install` again to refresh it in your agents' rule files.
+
 ## [0.20.2] - 2026-11-17
 
 ### Changed

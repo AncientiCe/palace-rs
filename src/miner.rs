@@ -497,7 +497,7 @@ impl MineTrace {
         if !self.enabled {
             return;
         }
-        println!("\n  PALACE_MINE_TRACE — phase breakdown");
+        println!("\n  PALACE_MINE_TRACE: phase breakdown");
         println!("    walk    {:>10.2?}", self.walk);
         println!("    hash    {:>10.2?}", self.hash);
         println!("    chunk   {:>10.2?}", self.chunk);
@@ -577,7 +577,7 @@ pub fn mine(
         );
         println!("  Files:   {}", files.len());
         if dry_run {
-            println!("  DRY RUN — nothing will be filed");
+            println!("  DRY RUN: nothing will be filed");
         }
         println!("{}\n", "-".repeat(55));
     }

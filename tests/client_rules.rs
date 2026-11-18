@@ -456,7 +456,7 @@ fn doctor_marks_rule_weak_without_tool_search_load_step() {
         .join("\n");
     fs::write(
         codex_dir.join("AGENTS.md"),
-        format!("<!-- BEGIN PALACE -->\n# Palace Memory Protocol — MANDATORY\n\n{old_body}\n<!-- END PALACE -->\n"),
+        format!("<!-- BEGIN PALACE -->\n# Palace Memory Protocol: MANDATORY\n\n{old_body}\n<!-- END PALACE -->\n"),
     )
     .unwrap();
 
@@ -484,7 +484,7 @@ fn doctor_marks_rule_weak_without_only_memory_line() {
         .join("\n");
     fs::write(
         codex_dir.join("AGENTS.md"),
-        format!("<!-- BEGIN PALACE -->\n# Palace Memory Protocol — MANDATORY\n\n{old_body}\n<!-- END PALACE -->\n"),
+        format!("<!-- BEGIN PALACE -->\n# Palace Memory Protocol: MANDATORY\n\n{old_body}\n<!-- END PALACE -->\n"),
     )
     .unwrap();
 

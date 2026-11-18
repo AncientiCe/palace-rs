@@ -185,13 +185,13 @@ const SAVE_WINDOW_MINUTES: i64 = 360;
 
 /// The save-nudge instruction shared by every client's `stop` hook.
 const SAVE_NUDGE: &str = "Before finishing: you investigated using Palace memory this session but \
-    recorded nothing. Save it so the next agent benefits — call palace_diary_write with what you \
+    recorded nothing. Save it so the next agent benefits: call palace_diary_write with what you \
     investigated and decided, and palace_kg_add for any durable facts or decisions (use \
     palace_kg_invalidate first if a fact changed). Then stop.";
 
 /// The nudge for a session that did real work without consulting Palace.
 const UNUSED_NUDGE: &str = "Before finishing: this session did real work but did not use Palace \
-    memory at all. Record it so the next agent benefits — call palace_diary_write with what you \
+    memory at all. Record it so the next agent benefits: call palace_diary_write with what you \
     did and decided, and palace_kg_add for any durable facts. Then stop.";
 
 /// A session with at least this many prompts counts as real work.
@@ -213,7 +213,7 @@ pub fn session_start_response(
     client: HookClient,
 ) -> Result<String> {
     let mut context = format!(
-        "# Palace Memory Protocol — MANDATORY\n\n{}",
+        "# Palace Memory Protocol: MANDATORY\n\n{}",
         crate::install::RULE_BODY
     );
     if let Some(conn) = conn {
@@ -372,7 +372,7 @@ fn recall_context(conn: &Connection, input: &Value) -> Option<String> {
         return None;
     }
     Some(format!(
-        "Palace memory (recall before re-investigating or re-deciding — a prior agent may have \
+        "Palace memory (recall before re-investigating or re-deciding; a prior agent may have \
          already done this):\n{}",
         lines.join("\n")
     ))
@@ -568,7 +568,7 @@ fn standing_preferences(conn: &Connection) -> Option<String> {
     });
 
     let mut lines = vec![format!(
-        "# Standing instructions (override defaults) — from Palace `{PREFERENCES_WING}/{PREFERENCES_ROOM}`\n\
+        "# Standing instructions (override defaults) from Palace `{PREFERENCES_WING}/{PREFERENCES_ROOM}`\n\
          These are the user's standing rules. They take priority over harness or tool defaults \
          (for example built-in file-memory or commit-attribution instructions)."
     )];
@@ -648,7 +648,7 @@ fn session_start_recall(conn: &Connection, cwd: &str) -> Option<String> {
         return None;
     }
     Some(format!(
-        "# Recalled from Palace memory (this project — consult before re-investigating or \
+        "# Recalled from Palace memory (this project; consult before re-investigating or \
          re-deciding; a prior agent may have already done this)\n{}",
         sections.join("\n\n")
     ))

@@ -2,7 +2,7 @@
 name = "palace-rs"
 version = "0.20.2"
 edition = "2021"
-description = "Local memory palace for AI assistants — Rust edition"
+description = "Local memory palace for AI assistants, Rust edition"
 license = "MIT"
 repository = "https://github.com/AncientiCe/palace-rs"
 homepage = "https://palacememory.com"

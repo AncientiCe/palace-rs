@@ -764,17 +764,17 @@ fn tool_project_status(conn: &Connection, args: &Value) -> Value {
     };
 
     let recommendation = match &status {
-        ProjectWingStatus::Mined { .. } => "ready — memories are available for this wing",
+        ProjectWingStatus::Mined { .. } => "ready: memories are available for this wing",
         ProjectWingStatus::RegisteredNotMined { .. } => {
-            "registered but empty — if this is a code repo, ask the user whether to mine it with palace_mine (mining implicitly initialises it)"
+            "registered but empty. If this is a code repo, ask the user whether to mine it with palace_mine (mining implicitly initialises it)"
         }
         ProjectWingStatus::Unknown {
             has_palace_yaml, ..
         } => {
             if *has_palace_yaml {
-                "not mined — ask the user whether to mine this repo with palace_mine (mining implicitly initialises it)"
+                "not mined. Ask the user whether to mine this repo with palace_mine (mining implicitly initialises it)"
             } else {
-                "unknown — mining is for code repos only: if this is a repo, ask the user to mine it with palace_mine (which implicitly initialises it); if it is a non-repo topic or chat, offer to create a topic wing with palace_create_wing"
+                "unknown. Mining is for code repos only: if this is a repo, ask the user to mine it with palace_mine (which implicitly initialises it); if it is a non-repo topic or chat, offer to create a topic wing with palace_create_wing"
             }
         }
     };
@@ -2215,7 +2215,7 @@ fn tool_list() -> Value {
     let mut tools = json!([
         {
             "name": "palace_status",
-            "description": "Palace overview — total drawers, wing counts, and recent sessions. Pass verbose=true for room counts, the protocol text, and the AAAK spec.",
+            "description": "Palace overview: total drawers, wing counts, and recent sessions. Pass verbose=true for room counts, the protocol text, and the AAAK spec.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2306,7 +2306,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_mine",
-            "description": "Mine (or re-sync) a CODE REPOSITORY directory into the palace (only after the user agrees). Repos only — chats or non-repo topics have no folder to mine, use palace_create_wing for those. Accepting this implicitly initialises palace.yaml for first-time repos and then syncs files into the project's wing: new files are added, edited files are re-mined so their drawers reflect the latest content, unchanged files are left alone, and drawers for files deleted from disk are removed. The result's `summary` field reports new/updated/unchanged/removed file counts.",
+            "description": "Mine (or re-sync) a CODE REPOSITORY directory into the palace (only after the user agrees). Repos only: chats or non-repo topics have no folder to mine, so use palace_create_wing for those. Accepting this implicitly initialises palace.yaml for first-time repos and then syncs files into the project's wing: new files are added, edited files are re-mined so their drawers reflect the latest content, unchanged files are left alone, and drawers for files deleted from disk are removed. The result's `summary` field reports new/updated/unchanged/removed file counts.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2361,7 +2361,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_get_aaak_spec",
-            "description": "Get the AAAK dialect specification — the compressed memory format Palace uses.",
+            "description": "Get the AAAK dialect specification: the compressed memory format Palace uses.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
@@ -2673,7 +2673,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_explain",
-            "description": "Return full provenance for a drawer — who filed it, when, from which source file, and its importance.",
+            "description": "Return full provenance for a drawer: who filed it, when, from which source file, and its importance.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2737,7 +2737,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_prune",
-            "description": "Delete drawers filed more than N days ago. Use to keep the palace lean. Irreversible — export first if unsure.",
+            "description": "Delete drawers filed more than N days ago. Use to keep the palace lean. Irreversible, so export first if unsure.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2748,7 +2748,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_memory_report",
-            "description": "Human-readable overview of what the palace remembers: profile, total drawers, wings and rooms with counts, recent diary topics, and top remembered facts. Use this to inspect memory without a UI — ideal for non-developer users who want to see what's stored.",
+            "description": "Human-readable overview of what the palace remembers: profile, total drawers, wings and rooms with counts, recent diary topics, and top remembered facts. Use this to inspect memory without a UI, ideal for non-developer users who want to see what's stored.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2768,7 +2768,7 @@ fn prompt_list() -> Value {
     json!([
         {
             "name": "continue-session",
-            "description": "Load Palace memory before you start — recent work, decisions, and context.",
+            "description": "Load Palace memory before you start: recent work, decisions, and context.",
             "arguments": []
         },
         {

@@ -360,13 +360,13 @@ pub fn mine_convos_with(
     }
 
     println!("\n{}", "=".repeat(55));
-    println!("  Palace Mine — Conversations");
+    println!("  Palace Mine: Conversations");
     println!("{}", "=".repeat(55));
     println!("  Wing:    {wing}");
     println!("  Source:  {}", convo_path.display());
     println!("  Files:   {}", files.len());
     if dry_run {
-        println!("  DRY RUN — nothing will be filed");
+        println!("  DRY RUN: nothing will be filed");
     }
     println!("{}\n", "-".repeat(55));
 
