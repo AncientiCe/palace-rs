@@ -115,8 +115,6 @@ pub const MIN_CHUNK_SIZE: usize = 50;
 /// mining stall on larger projects in the first place. A few hundred files
 /// per window keeps commit count low while still checkpointing regularly and
 /// bounding peak memory.
-///
-/// Shared with `convo_miner::mine_convos`, which has the same write pattern.
 const MINE_BATCH_SIZE: usize = 200;
 
 pub static READABLE_EXTENSIONS: &[&str] = &[
