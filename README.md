@@ -91,6 +91,8 @@ irm https://raw.githubusercontent.com/AncientiCe/palace-rs/main/scripts/install.
 
 The scripts download the matching GitHub Release binary, verify its SHA-256
 checksum, and install it. To upgrade later, run the same command again.
+The Linux binary needs glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+);
+on an older system, build from source.
 
 **Homebrew (macOS Apple Silicon / Linux)**
 
@@ -124,7 +126,7 @@ cargo build --release   # binary at target/release/palace
 
 | Platform | Status |
 |---|---|
-| Linux x86_64 | Supported |
+| Linux x86_64 | Supported (glibc 2.35 or newer) |
 | macOS Apple Silicon | Supported |
 | Windows x86_64 | Supported |
 | macOS Intel | Not supported (no ONNX Runtime build) |

@@ -16,7 +16,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pinned, not ubuntu-latest: a gnu binary needs the build host's
+          # glibc version or newer at run time. Ubuntu 22.04 ships glibc 2.35,
+          # so the binary runs on Debian 12/13, Ubuntu 22.04+ and similar.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive_ext: tar.gz
           - os: macos-latest
