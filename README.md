@@ -428,6 +428,17 @@ palace remote status    # mode, endpoint, masked key
 palace local            # back to the local palace
 ```
 
+<p align="center">
+  <a href="docs/images/palace-handoff-demo.mp4">
+    <img src="docs/images/palace-handoff-demo.gif" alt="90-second shared-memory handoff: Dev B asks what was already ruled out on this ticket, and Palace answers with the source" width="100%">
+  </a>
+</p>
+
+Try this with one teammate and one ticket. Give both agents access to the
+same investigation on your own infrastructure. The team trial includes 10
+seats for 60 days, with no credit card:
+[Start the team trial](https://palacememory.com/trial?utm_source=github&utm_medium=readme&utm_campaign=team_trial_14d).
+
 ---
 
 ## 🧰 CLI reference
