@@ -43,6 +43,11 @@ Agent:  [palace_search → wing my_api, room decisions, filed 2026-09-03]
         The benchmark you ran is in the same drawer.
 ```
 
+**Using Palace? Tell me.** One line in
+[Show and tell](https://github.com/AncientiCe/palace-rs/discussions/categories/show-and-tell)
+about which agents you use it with and what it remembers for you helps more
+than a star. Prefer email? Write to contact@palacememory.com.
+
 ---
 
 ## 🧭 Why Palace
