@@ -17,11 +17,15 @@ jobs:
       matrix:
         include:
           # Pinned, not ubuntu-latest: a gnu binary needs the build host's
-          # glibc version or newer at run time. Ubuntu 22.04 ships glibc 2.35,
-          # so the binary runs on Debian 12/13, Ubuntu 22.04+ and similar.
-          - os: ubuntu-22.04
+          # glibc version or newer at run time. Ubuntu 24.04 ships glibc 2.39,
+          # so the binary runs on Debian 13, Ubuntu 24.04+ and similar.
+          # Ubuntu 22.04 is too old: the prebuilt ONNX Runtime (ort) needs
+          # glibc 2.38+ (__isoc23_strtol), so the link fails there. Link with
+          # gcc-14 so GCC 14 libstdc++ symbols resolve too.
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             archive_ext: tar.gz
+            linker: gcc-14
           - os: macos-latest
             target: aarch64-apple-darwin
             archive_ext: tar.gz
@@ -49,6 +53,16 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Install linker
+        if: matrix.linker
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-14 g++-14
+          mkdir -p .cargo
+          echo "[target.${{ matrix.target }}]" >> .cargo/config.toml
+          echo "linker = \"${{ matrix.linker }}\"" >> .cargo/config.toml
 
       - name: Build release binary
         run: cargo build --release --features cli --target ${{ matrix.target }}

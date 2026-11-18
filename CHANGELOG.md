@@ -11,9 +11,9 @@ This Rust implementation uses its own `0.x` version track.
 ### Fixed
 
 - **Linux release binaries run on older glibc again.** The x86_64 Linux
-  build moved from `ubuntu-latest` to `ubuntu-22.04`, so the binary needs
-  glibc 2.35 or newer instead of 2.43. It failed to start on Debian 13
-  (glibc 2.41) with "version `GLIBC_2.43' not found".
+  build moved from `ubuntu-latest` to `ubuntu-24.04` and links with GCC 14,
+  so the binary needs glibc 2.39 or newer instead of 2.43. It failed to
+  start on Debian 13 (glibc 2.41) with "version `GLIBC_2.43' not found".
 
 ### Changed
 
