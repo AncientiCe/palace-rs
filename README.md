@@ -676,6 +676,7 @@ Settings load in this order: environment variables, then
 | `PALACE_PROJECT` | auto | Project name used for gain attribution |
 | `PALACE_SOURCE_DIR` | `~/Desktop/transcripts` | Default source for `palace split` |
 | `PALACE_MINE_TRACE` | off | `1` prints per-stage mining timings |
+| `PALACE_BUSY_TIMEOUT_MS` | `10000` | How long to wait, in milliseconds, for another palace process that is writing to the database. `0` turns waiting off (fail at once); it does not mean "no limit" |
 | `PALACE_MCP_MODE` | `local` | `local` or `remote` |
 | `PALACE_EMBEDDING_MODEL` | `minilm-l6-v2-q8` | Embedding model for new palaces (see [embedding models](#embedding-models)) |
 | `PALACE_EMBEDDING_LATENCY_BUDGET_MS` | 2x current p95 | Query-latency budget for `palace embeddings verify` |

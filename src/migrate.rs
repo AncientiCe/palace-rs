@@ -13,6 +13,18 @@ use std::path::Path;
 ///
 /// Returns the number of registry rows newly inserted.
 pub fn backfill_wings_registry(conn: &Connection) -> Result<usize> {
+    // Read first: with nothing to register, the INSERT below would still take
+    // the write lock and block behind another palace process.
+    let missing: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM drawers WHERE wing NOT IN (SELECT name FROM wings))",
+            [],
+            |row| row.get(0),
+        )
+        .context("checking for unregistered wings")?;
+    if !missing {
+        return Ok(0);
+    }
     let inserted = conn
         .execute(
             "INSERT OR IGNORE INTO wings (name, kind)
