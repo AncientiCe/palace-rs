@@ -85,6 +85,7 @@ pub mod knowledge_graph;
 pub mod layers;
 pub mod manifest_entities;
 pub mod mcp_server;
+pub mod mempalace_import;
 pub mod migrate;
 pub mod miner;
 pub mod normalize;

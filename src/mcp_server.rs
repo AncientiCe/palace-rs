@@ -1290,7 +1290,7 @@ fn tool_update_drawer(conn: &Connection, args: &Value) -> Value {
 
 /// Canonical diary wing name for an agent (uses `wing_diary__` prefix to avoid
 /// collisions with project wings that happen to start with `wing_`).
-fn diary_wing(agent_name: &str) -> String {
+pub(crate) fn diary_wing(agent_name: &str) -> String {
     format!(
         "wing_diary__{}",
         agent_name.to_lowercase().replace(' ', "_")

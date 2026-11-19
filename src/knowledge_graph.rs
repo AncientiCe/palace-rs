@@ -84,6 +84,96 @@ fn ensure_entity(conn: &Connection, name: &str) -> Result<String> {
     Ok(eid)
 }
 
+/// Copy an entity's type and properties from another palace without
+/// overwriting what this palace already knows about it. Returns the entity ID.
+pub(crate) fn import_entity(
+    conn: &Connection,
+    name: &str,
+    entity_type: &str,
+    properties: &str,
+) -> Result<String> {
+    let eid = ensure_entity(conn, name)?;
+    conn.execute(
+        "UPDATE entities
+         SET type = CASE WHEN type = 'unknown' THEN ?2 ELSE type END,
+             properties = CASE WHEN properties = '{}' THEN ?3 ELSE properties END
+         WHERE id = ?1",
+        params![eid, entity_type, properties],
+    )
+    .context("updating imported entity")?;
+    Ok(eid)
+}
+
+/// A triple copied verbatim from another palace, history included.
+pub(crate) struct ImportedTriple<'a> {
+    pub subject: &'a str,
+    pub predicate: &'a str,
+    pub object: &'a str,
+    pub valid_from: Option<&'a str>,
+    pub valid_to: Option<&'a str>,
+    pub confidence: f64,
+    pub source_closet: Option<&'a str>,
+    pub source_file: Option<&'a str>,
+    pub extracted_at: Option<&'a str>,
+}
+
+/// Insert a triple exactly as it was recorded elsewhere, expired ones too.
+///
+/// Unlike [`add_triple`], a triple matching on subject, predicate, object and
+/// both validity bounds is treated as already present, so re-running an
+/// import adds nothing. Returns `true` when a row was inserted.
+pub(crate) fn import_triple(conn: &Connection, triple: &ImportedTriple<'_>) -> Result<bool> {
+    let sub_id = ensure_entity(conn, triple.subject)?;
+    let obj_id = ensure_entity(conn, triple.object)?;
+    let pred = normalize_predicate(triple.predicate);
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM triples
+             WHERE subject = ?1 AND predicate = ?2 AND object = ?3
+               AND valid_from IS ?4 AND valid_to IS ?5)",
+            params![sub_id, pred, obj_id, triple.valid_from, triple.valid_to],
+            |row| row.get(0),
+        )
+        .context("checking for imported triple")?;
+    if exists {
+        return Ok(false);
+    }
+    let extracted_at = triple
+        .extracted_at
+        .map(str::to_string)
+        .unwrap_or_else(crate::clock::now_rfc3339);
+    // Keyed on the validity bounds too: expired and current copies of one fact
+    // are imported in the same instant, so the clock alone would collide.
+    let hash = blake3::hash(
+        format!(
+            "{sub_id}/{pred}/{obj_id}/{}/{}/{extracted_at}",
+            triple.valid_from.unwrap_or(""),
+            triple.valid_to.unwrap_or("")
+        )
+        .as_bytes(),
+    );
+    let tid = format!("t_{sub_id}_{pred}_{obj_id}_{}", &hash.to_hex()[..8]);
+    conn.execute(
+        "INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to, confidence,
+                              source_closet, source_file, extracted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            tid,
+            sub_id,
+            pred,
+            obj_id,
+            triple.valid_from,
+            triple.valid_to,
+            triple.confidence,
+            triple.source_closet,
+            triple.source_file,
+            extracted_at
+        ],
+    )
+    .context("inserting imported triple")?;
+    Ok(true)
+}
+
 /// Add a relationship triple. Auto-creates entities if they don't exist.
 /// Returns the triple ID.
 #[allow(clippy::too_many_arguments)]
