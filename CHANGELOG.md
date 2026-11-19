@@ -19,6 +19,13 @@ This Rust implementation uses its own `0.x` version track.
   project's vocabulary and win keyword matches without explaining anything.
   The hooks now keep 0.85 of their score when ranking what to inject, so the
   code that does the work comes first. Search itself is unchanged.
+- **The prompt hook nudges history questions that recall only code.** The
+  "search before answering" nudge used to fire only when recall found
+  nothing, so a "why does X fail" question that recalled three code chunks
+  got no hint that a past session might exist. When recall finds only
+  project files for a history question, the hook now adds a line telling
+  the agent to call `palace_search` and `palace_diary_search` first. "why
+  does", "why is", "went wrong" and "again" now count as history phrasing.
 
 ### Fixed
 

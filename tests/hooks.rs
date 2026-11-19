@@ -278,6 +278,36 @@ fn seed_offline_code(conn: &rusqlite::Connection) {
 }
 
 #[test]
+fn user_prompt_submit_nudges_when_a_history_question_recalls_only_code() {
+    let conn = test_db();
+    seed_offline_code(&conn);
+
+    let out = user_prompt_submit_response(&conn, &prompt(OFFLINE_PROMPT), HookClient::Claude);
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        ctx.contains("- [proj/src]"),
+        "code is still injected: {ctx}"
+    );
+    assert!(
+        ctx.contains("No past session or decision matched"),
+        "a why-question answered only by code must be told to search: {ctx}"
+    );
+
+    // With the past session recalled, the nudge would only be noise.
+    diary(&conn, OFFLINE_DIARY);
+    let out = user_prompt_submit_response(&conn, &prompt(OFFLINE_PROMPT), HookClient::Claude);
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        !ctx.contains("No past session or decision matched"),
+        "{ctx}"
+    );
+}
+
+#[test]
 fn user_prompt_submit_keeps_a_past_session_among_code_hits() {
     let conn = test_db();
     seed_offline_code(&conn);

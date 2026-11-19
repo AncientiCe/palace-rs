@@ -275,12 +275,21 @@ const MEMORY_INTENT_TERMS: &[&str] = &[
     "prefer",
     "history",
     "what happened",
+    "why does",
+    "why is",
+    "went wrong",
+    "again",
 ];
 
 /// The nudge injected when a history question found nothing in auto-recall.
 const PROMPT_SEARCH_NUDGE: &str = "Palace memory: this question looks like it depends on prior \
     decisions or history, and auto-recall found nothing close. Call palace_search (and \
     palace_kg_query for stable facts) before answering from the code or from training data.";
+
+/// Added under recalled code when a history question matched no recorded memory.
+const CODE_ONLY_NUDGE: &str = "No past session or decision matched, only project files. This \
+    question looks like it depends on history, so call palace_search (and palace_diary_search \
+    with all_agents=true) before investigating from scratch.";
 
 /// Reminder injected into prompts until the session calls any Palace tool.
 const PALACE_REMINDER: &str = "Palace not consulted yet this session. Load the palace tools if \
@@ -347,19 +356,22 @@ fn palace_reminder(conn: &Connection, input: &Value, client: HookClient) -> Opti
 /// Recall block (or search nudge) for a substantive prompt, or `None` when
 /// the prompt is unrelated to anything remembered.
 fn prompt_context(conn: &Connection, input: &Value, prompt: &str) -> Option<String> {
-    let lines = recall_lines(conn, prompt, cwd(input));
-    if !lines.is_empty() {
-        return Some(format!(
-            "Palace memory relevant to this request (check it before answering; cite the drawer \
-             id if you rely on it):\n{}",
-            lines.join("\n")
-        ));
-    }
+    let recall = recall_lines(conn, prompt, cwd(input));
     let lower = prompt.to_lowercase();
-    MEMORY_INTENT_TERMS
-        .iter()
-        .any(|term| lower.contains(term))
-        .then(|| PROMPT_SEARCH_NUDGE.to_string())
+    let history_question = MEMORY_INTENT_TERMS.iter().any(|term| lower.contains(term));
+    if recall.lines.is_empty() {
+        return history_question.then(|| PROMPT_SEARCH_NUDGE.to_string());
+    }
+    let mut context = format!(
+        "Palace memory relevant to this request (check it before answering; cite the drawer \
+         id if you rely on it):\n{}",
+        recall.lines.join("\n")
+    );
+    if history_question && !recall.has_recorded {
+        context.push('\n');
+        context.push_str(CODE_ONLY_NUDGE);
+    }
+    Some(context)
 }
 
 /// Compute the recall context string for an investigation tool, or `None` when
@@ -367,7 +379,7 @@ fn prompt_context(conn: &Connection, input: &Value, prompt: &str) -> Option<Stri
 fn recall_context(conn: &Connection, input: &Value) -> Option<String> {
     let query = investigation_query(input)?;
     let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
-    let lines = recall_lines(conn, &query, cwd);
+    let lines = recall_lines(conn, &query, cwd).lines;
     if lines.is_empty() {
         return None;
     }
@@ -382,7 +394,7 @@ fn recall_context(conn: &Connection, input: &Value) -> Option<String> {
 /// lines, scoped to the session's project: drawers from other mined projects
 /// (and diary entries recorded for them) are dropped as noise, while this
 /// project's wing, topic wings, and unscoped diaries are kept.
-fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
+fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Recall {
     // Recall prints one line per hit, so neighbouring chunks are not fetched.
     let options = crate::searcher::SearchOptions {
         rerank: false,
@@ -391,7 +403,7 @@ fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
     let results =
         crate::searcher::search_memories_with(conn, query, None, None, RECALL_CANDIDATES, options);
     let Some(hits) = results.get("results").and_then(Value::as_array) else {
-        return Vec::new();
+        return Recall::default();
     };
     let scope = ProjectScope::new(conn, cwd);
 
@@ -438,7 +450,19 @@ fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
             *last = recorded;
         }
     }
-    picked.into_iter().map(|hit| hit.line).collect()
+    Recall {
+        has_recorded: has_recorded(&picked),
+        lines: picked.into_iter().map(|hit| hit.line).collect(),
+    }
+}
+
+/// The memories picked for an auto-recall injection.
+#[derive(Default)]
+struct Recall {
+    /// One provenance-tagged line per memory, best first.
+    lines: Vec<String>,
+    /// Whether any line is a recorded memory rather than a mined file.
+    has_recorded: bool,
 }
 
 /// Share of its score a low-signal file keeps in auto-recall.
