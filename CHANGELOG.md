@@ -6,6 +6,8 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.20.4] - 2026-11-19
+
 ### Added
 
 - **`palace gain` reports what the prompt hook injected.** A new `Prompt
