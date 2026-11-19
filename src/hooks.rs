@@ -395,17 +395,15 @@ fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
     };
     let scope = ProjectScope::new(conn, cwd);
 
+    let mut ranked: Vec<(f64, &Value)> = hits.iter().map(|hit| (recall_score(hit), hit)).collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+
     let mut picked: Vec<RecallHit> = Vec::new();
     let mut first_recorded: Option<RecallHit> = None;
-    for hit in hits {
+    for (similarity, hit) in ranked {
         if picked.len() >= RECALL_LIMIT && (first_recorded.is_some() || has_recorded(&picked)) {
             break;
         }
-        let similarity = hit
-            .get("similarity")
-            .and_then(Value::as_f64)
-            .or_else(|| hit.get("combined").and_then(Value::as_f64))
-            .unwrap_or(0.0);
         if similarity < RECALL_RELEVANCE_THRESHOLD {
             continue;
         }
@@ -441,6 +439,64 @@ fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
         }
     }
     picked.into_iter().map(|hit| hit.line).collect()
+}
+
+/// Share of its score a low-signal file keeps in auto-recall.
+const LOW_SIGNAL_FILE_WEIGHT: f64 = 0.85;
+
+/// A hit's auto-recall score: its search score, lowered for files that match
+/// many words but explain little (translations, lockfiles, snapshots).
+fn recall_score(hit: &Value) -> f64 {
+    let score = hit
+        .get("similarity")
+        .and_then(Value::as_f64)
+        .or_else(|| hit.get("combined").and_then(Value::as_f64))
+        .unwrap_or(0.0);
+    let source = hit
+        .get("source_file")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if is_low_signal_file(source) {
+        score * LOW_SIGNAL_FILE_WEIGHT
+    } else {
+        score
+    }
+}
+
+/// Directories whose files are mostly strings or generated data.
+const LOW_SIGNAL_DIRS: &[&str] = &[
+    "/translations/",
+    "/locales/",
+    "/locale/",
+    "/i18n/",
+    "/l10n/",
+    "/__snapshots__/",
+    "/fixtures/",
+    "/generated/",
+];
+/// File endings for lockfiles, snapshots, minified bundles and string tables.
+const LOW_SIGNAL_SUFFIXES: &[&str] = &[
+    ".lock",
+    "-lock.json",
+    "-lock.yaml",
+    ".snap",
+    ".min.js",
+    ".map",
+    ".po",
+    ".pot",
+    ".xliff",
+    ".strings",
+    ".arb",
+];
+
+/// True for a mined file that repeats a project's vocabulary without
+/// explaining behaviour, so it wins keyword matches it should not.
+fn is_low_signal_file(source_file: &str) -> bool {
+    let path = source_file.replace('\\', "/").to_lowercase();
+    LOW_SIGNAL_DIRS.iter().any(|dir| path.contains(dir))
+        || LOW_SIGNAL_SUFFIXES
+            .iter()
+            .any(|suffix| path.ends_with(suffix))
 }
 
 /// One memory picked for an auto-recall injection.

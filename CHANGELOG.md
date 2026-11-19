@@ -14,6 +14,11 @@ This Rust implementation uses its own `0.x` version track.
   entry or decision that records the earlier investigation. When none of
   the three is a recorded memory (diary, `palace_remember`, or a drawer
   without a source file), the best relevant one now takes the last slot.
+- **Auto-recall ranks translation and lock files lower.** String tables,
+  locale files, lockfiles, snapshots, fixtures and minified bundles repeat a
+  project's vocabulary and win keyword matches without explaining anything.
+  The hooks now keep 0.85 of their score when ranking what to inject, so the
+  code that does the work comes first. Search itself is unchanged.
 
 ### Fixed
 

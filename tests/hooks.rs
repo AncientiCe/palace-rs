@@ -299,6 +299,49 @@ fn user_prompt_submit_keeps_a_past_session_among_code_hits() {
 }
 
 #[test]
+fn user_prompt_submit_ranks_translation_files_below_code() {
+    let conn = test_db();
+    for (file, extra) in [
+        ("/work/proj/src/translations/en_US.json", "Submit Orders"),
+        (
+            "/work/proj/src/translations/de_DE.json",
+            "Bestellungen senden",
+        ),
+        ("/work/proj/src/locales/fr_FR.json", "Envoyer les commandes"),
+        ("/work/proj/package-lock.json", "offline-order-submit 1.0.0"),
+    ] {
+        mined_chunk(
+            &conn,
+            file,
+            &format!(
+                "\"offlineMode.openOrders.banner.title\": \"You have offline orders to submit.\", \
+                 \"offlineMode.submitButton\": \"Submit Orders\", \
+                 \"offlineMode.submitFailed\": \"Some offline orders could not be submitted\", {extra}"
+            ),
+        );
+    }
+    mined_chunk(
+        &conn,
+        "/work/proj/src/offline/submitOrder.ts",
+        "// Submit an offline order.\nasync function submitOfflineOrder(order) { \
+         const res = await api.post(order); if (!res.ok) throw new OfflineSubmitError(order.id) }",
+    );
+
+    let out = user_prompt_submit_response(&conn, &prompt(OFFLINE_PROMPT), HookClient::Claude);
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    let first = ctx
+        .lines()
+        .find(|l| l.starts_with("- ["))
+        .unwrap_or_default();
+    assert!(
+        first.contains("submitOfflineOrder"),
+        "the code that does the work must rank above translation strings: {ctx}"
+    );
+}
+
+#[test]
 fn user_prompt_submit_nudges_history_questions_without_hits() {
     let conn = test_db();
     let out = user_prompt_submit_response(
