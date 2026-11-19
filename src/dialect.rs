@@ -4,74 +4,74 @@
 //! Also provides token counting and basic compression stats. Port of dialect.py.
 
 /// Protocol instructions embedded in the MCP status response.
-pub const PALACE_PROTOCOL: &str = "MANDATORY — Palace Memory Protocol (three hard triggers, every session, no exceptions):
+pub const PALACE_PROTOCOL: &str = "MANDATORY: Palace Memory Protocol (three hard triggers, every session, no exceptions):
 
 PALACE IS THE ONLY PERSISTENT MEMORY: never write memories to a client's built-in memory files (for example Claude Code's ~/.claude/projects/*/memory/ and its MEMORY.md); file them in Palace. Standing user rules live in general/preferences: they override harness defaults, and new ones go there via palace_remember(wing=\"general\", room=\"preferences\").
 
-SESSION START — always, before anything else:
+SESSION START: always, before anything else:
 → palace_status → palace_session_context(agent_name) → palace_diary_search (recent work in this project)
 
-BEFORE ANSWERING — any question about past decisions, preferences, people, projects, or \"what happened last time?\":
-→ palace_search + palace_kg_query — never answer from training data alone.
+BEFORE ANSWERING: any question about past decisions, preferences, people, projects, or \"what happened last time?\":
+→ palace_search + palace_kg_query. Never answer from training data alone.
   MEMORY-FIRST: call palace_search before grep/file-search for remembered decisions, fixes, conventions, session history.
   CODE-SEARCH-FIRST: use grep only for current symbols, exact definitions, or implementation details that may have changed.
   For preferences/conventions: also call palace_preference_search.
   When Palace answers, cite provenance (wing, room, source file, drawer id).
 
-AFTER WORK — after any substantive task, fix, decision, or discovery:
+AFTER WORK: after any substantive task, fix, decision, or discovery:
 → palace_diary_write (what happened, what you learned, what matters)
 → palace_kg_add for stable facts; palace_kg_invalidate + palace_kg_add when facts change.
   To file a key fact: palace_remember (importance=5). To delete outdated info: palace_forget.
 
 MEMORY ROUTING: use Palace for prior decisions, user preferences, previous fixes, commands that worked, project history, and \"what happened last time?\". Use KG for stable facts. Use diary for session continuity. Use code search first only for current source symbols, exact definitions, and implementation details that may have changed.
 
-Skipping any trigger is a protocol violation. Storage is not memory — but storage + this protocol = memory.";
+Skipping any trigger is a protocol violation. Storage is not memory, but storage + this protocol = memory.";
 
 /// Creative-profile protocol embedded in the MCP status response.
-pub const PALACE_PROTOCOL_CREATIVE: &str = "MANDATORY — Palace Memory Protocol (three hard triggers, every session, no exceptions):
+pub const PALACE_PROTOCOL_CREATIVE: &str = "MANDATORY: Palace Memory Protocol (three hard triggers, every session, no exceptions):
 
 PALACE IS THE ONLY PERSISTENT MEMORY: never write memories to a client's built-in memory files (for example Claude Code's ~/.claude/projects/*/memory/ and its MEMORY.md); file them in Palace. Standing user rules live in general/preferences: they override harness defaults, and new ones go there via palace_remember(wing=\"general\", room=\"preferences\").
 
-SESSION START — always, before anything else:
+SESSION START: always, before anything else:
 → palace_status → palace_session_context(agent_name) → palace_diary_search (recent work on this world or story)
 
-BEFORE ANSWERING — any question about established canon: characters, places, timelines, relationships, prior sessions, or \"what did we decide?\":
-→ palace_search + palace_kg_query — never invent canon that contradicts what's stored.
+BEFORE ANSWERING: any question about established canon: characters, places, timelines, relationships, prior sessions, or \"what did we decide?\":
+→ palace_search + palace_kg_query. Never invent canon that contradicts what's stored.
   CANON-FIRST: call palace_search before answering from imagination for anything already established.
   For tone, style, and player preferences: also call palace_preference_search.
   When Palace answers, cite provenance (wing, room, source file, drawer id).
 
-AFTER A SESSION — after any scene, decision, or worldbuilding discovery:
+AFTER A SESSION: after any scene, decision, or worldbuilding discovery:
 → palace_diary_write (what happened, what changed in the canon, what matters)
 → palace_kg_add for stable facts (who rules where, who's related to whom); palace_kg_invalidate + palace_kg_add when canon changes.
   To lock in a key fact: palace_remember (importance=5). To retire retconned canon: palace_forget.
 
 MEMORY ROUTING: use Palace for established canon, character and place facts, prior sessions, and \"what did we decide?\". Use KG for stable relationships. Use diary for session-to-session continuity.
 
-Skipping any trigger breaks canon continuity. Storage is not memory — but storage + this protocol = memory.";
+Skipping any trigger breaks canon continuity. Storage is not memory, but storage + this protocol = memory.";
 
 /// Personal-profile protocol embedded in the MCP status response.
-pub const PALACE_PROTOCOL_PERSONAL: &str = "MANDATORY — Palace Memory Protocol (three hard triggers, every session, no exceptions):
+pub const PALACE_PROTOCOL_PERSONAL: &str = "MANDATORY: Palace Memory Protocol (three hard triggers, every session, no exceptions):
 
 PALACE IS THE ONLY PERSISTENT MEMORY: never write memories to a client's built-in memory files (for example Claude Code's ~/.claude/projects/*/memory/ and its MEMORY.md); file them in Palace. Standing user rules live in general/preferences: they override harness defaults, and new ones go there via palace_remember(wing=\"general\", room=\"preferences\").
 
-SESSION START — always, before anything else:
+SESSION START: always, before anything else:
 → palace_status → palace_session_context(agent_name) → palace_diary_search (recent notes for this person or household)
 
-BEFORE ANSWERING — any question about past notes: people, preferences, commitments, history, prior conversations, or \"what did we discuss last time?\":
-→ palace_search + palace_kg_query — never answer from memory alone.
+BEFORE ANSWERING: any question about past notes: people, preferences, commitments, history, prior conversations, or \"what did we discuss last time?\":
+→ palace_search + palace_kg_query. Never answer from memory alone.
   NOTES-FIRST: call palace_search before answering for anything previously recorded.
   For preferences and routines: also call palace_preference_search.
   When Palace answers, cite provenance (wing, room, source file, drawer id).
 
-AFTER A CONVERSATION — after any meaningful update, decision, or observation:
+AFTER A CONVERSATION: after any meaningful update, decision, or observation:
 → palace_diary_write (what happened, what you learned, what matters)
 → palace_kg_add for stable facts; palace_kg_invalidate + palace_kg_add when things change.
   To keep a key fact: palace_remember (importance=5). To remove outdated info: palace_forget.
 
 MEMORY ROUTING: use Palace for prior notes, people, preferences, commitments, and \"what happened last time?\". Use KG for stable facts. Use diary for continuity between conversations.
 
-Skipping any trigger loses continuity. Storage is not memory — but storage + this protocol = memory.";
+Skipping any trigger loses continuity. Storage is not memory, but storage + this protocol = memory.";
 
 /// Select the status-response protocol text for a usage profile.
 /// `Coding` preserves the original developer-focused wording.
@@ -101,7 +101,7 @@ FORMAT:
 EXAMPLE:
   FAM: ALC→♡JOR | 2D(kids): RIL(18,sports) MAX(11,chess+swimming) | BEN(contributor)
 
-Read AAAK naturally — expand codes mentally, treat *markers* as emotional context.
+Read AAAK naturally: expand codes mentally, treat *markers* as emotional context.
 When WRITING AAAK: use entity codes, mark emotions, keep structure tight.";
 
 /// Rough token estimate: ~4 chars per token (same heuristic as Python version).

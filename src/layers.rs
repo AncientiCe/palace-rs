@@ -52,7 +52,7 @@ impl Layer0 {
 }
 
 fn default_identity() -> String {
-    "## L0 — IDENTITY\nNo identity configured. Create ~/.palace/identity.txt".to_string()
+    "## L0: IDENTITY\nNo identity configured. Create ~/.palace/identity.txt".to_string()
 }
 
 // ── Layer 1 ───────────────────────────────────────────────────────────────
@@ -74,11 +74,11 @@ impl Layer1 {
     pub fn generate(&self, conn: &Connection) -> String {
         let drawers = match list_by_importance(conn, 200) {
             Ok(d) => d,
-            Err(_) => return "## L1 — No palace found. Run: palace mine <dir>".to_string(),
+            Err(_) => return "## L1: No palace found. Run: palace mine <dir>".to_string(),
         };
 
         if drawers.is_empty() {
-            return "## L1 — No memories yet.".to_string();
+            return "## L1: No memories yet.".to_string();
         }
 
         // Filter by wing if specified, take top N
@@ -100,7 +100,7 @@ impl Layer1 {
             by_room.entry(d.room.clone()).or_default().push(d);
         }
 
-        let mut lines = vec!["## L1 — ESSENTIAL STORY".to_string()];
+        let mut lines = vec!["## L1: ESSENTIAL STORY".to_string()];
         let mut total_len = lines[0].len();
 
         let mut rooms_sorted: Vec<&String> = by_room.keys().collect();
@@ -177,7 +177,7 @@ impl Layer2 {
             return format!("No drawers found for {label}.");
         }
 
-        let mut lines = vec![format!("## L2 — ON-DEMAND ({} drawers)", drawers.len())];
+        let mut lines = vec![format!("## L2: ON-DEMAND ({} drawers)", drawers.len())];
         for drawer in &drawers {
             let source = Path::new(&drawer.source_file)
                 .file_name()
@@ -235,7 +235,7 @@ impl Layer3 {
             return "No results found.".to_string();
         }
 
-        let mut lines = vec![format!("## L3 — SEARCH RESULTS for \"{query}\"")];
+        let mut lines = vec![format!("## L3: SEARCH RESULTS for \"{query}\"")];
         for (i, r) in results.iter().enumerate() {
             let snippet = r.drawer.text.trim().replace('\n', " ");
             let snippet = if snippet.chars().count() > 300 {

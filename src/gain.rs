@@ -1,7 +1,6 @@
 //! Aggregation and rendering for `palace gain`.
 
 use anyhow::{bail, Context, Result};
-use chrono::{Duration, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -45,6 +44,22 @@ pub struct GainReport {
     pub top_rooms: Vec<NamedCount>,
     pub top_reused_queries: Vec<NamedCount>,
     pub per_project: Vec<ProjectGain>,
+    /// What the prompt hook injected; kept apart from MCP tool calls.
+    #[serde(default)]
+    pub prompt_recall: PromptRecallGain,
+}
+
+/// Counts of prompts the prompt hook searched for, by what it injected.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptRecallGain {
+    /// Substantive prompts the hook searched for.
+    pub prompts: i64,
+    /// Recall included a past session, decision or remembered fact.
+    pub with_memory: i64,
+    /// Recall found only project files.
+    pub code_only: i64,
+    /// Recall found nothing relevant.
+    pub empty: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,8 +170,8 @@ impl SinceWindow {
 
     fn cutoff(&self) -> Option<String> {
         match self {
-            Self::Days(days) => Some((Utc::now() - Duration::days(*days)).to_rfc3339()),
-            Self::Hours(hours) => Some((Utc::now() - Duration::hours(*hours)).to_rfc3339()),
+            Self::Days(days) => Some(crate::clock::ago_rfc3339(crate::clock::days(*days))),
+            Self::Hours(hours) => Some(crate::clock::ago_rfc3339(crate::clock::hours(*hours))),
             Self::All => None,
         }
     }
@@ -190,7 +205,7 @@ pub fn record_feedback(conn: &Connection, record: &FeedbackRecord) -> Result<()>
             record.drawer_id,
             record.verdict,
             record.note,
-            Utc::now().to_rfc3339()
+            crate::clock::now_rfc3339()
         ],
     )
     .context("recording gain feedback")?;
@@ -262,7 +277,7 @@ pub fn render_text(report: &GainReport) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "Palace gain - {} ({})\n  Tool calls         : {}   (sessions: {})\n  Hit rate           : {:.0}%   (search hits {}/{})\n  Precision@1        : {}\n  Precision@5        : {}\n  Tokens saved (est) : ~{}\n  Re-index skipped   : {}    (duplicate drawers avoided)\n  KG facts recalled  : {}\n  Diary recalls      : {}\n  Repeat Qs avoided  : {}\n  p95 latency        : {} ms\n  Tool latency       : {}\n  Top wings          : {}\n  Top projects       : {}\n",
+        "Palace gain - {} ({})\n  Tool calls         : {}   (sessions: {})\n  Hit rate           : {:.0}%   (search hits {}/{})\n  Precision@1        : {}\n  Precision@5        : {}\n  Tokens saved (est) : ~{}\n  Re-index skipped   : {}    (duplicate drawers avoided)\n  KG facts recalled  : {}\n  Diary recalls      : {}\n  Repeat Qs avoided  : {}\n  p95 latency        : {} ms\n  Tool latency       : {}\n  Top wings          : {}\n  Top projects       : {}\n  Prompt recall      : {}\n",
         report.window,
         project,
         format_number(report.tool_calls),
@@ -288,7 +303,22 @@ pub fn render_text(report: &GainReport) -> String {
             "none".to_string()
         } else {
             top_projects
-        }
+        },
+        render_prompt_recall(&report.prompt_recall)
+    )
+}
+
+/// One line on what the prompt hook injected, or `none` before any prompt.
+fn render_prompt_recall(recall: &PromptRecallGain) -> String {
+    if recall.prompts == 0 {
+        return "none".to_string();
+    }
+    format!(
+        "{} prompts ({} with past sessions or decisions, {} code only, {} nothing found)",
+        format_number(recall.prompts),
+        format_number(recall.with_memory),
+        format_number(recall.code_only),
+        format_number(recall.empty)
     )
 }
 
@@ -399,7 +429,18 @@ fn build_report(
     let mut diary_recalls = 0;
     let mut repeat_questions_avoided = 0;
 
+    let mut prompt_recall = PromptRecallGain::default();
+
     for event in &events {
+        if event.tool == crate::usage::PROMPT_RECALL_TOOL {
+            prompt_recall.prompts += 1;
+            match event.outcome.as_str() {
+                "memory" => prompt_recall.with_memory += 1,
+                "code_only" => prompt_recall.code_only += 1,
+                _ => prompt_recall.empty += 1,
+            }
+            continue;
+        }
         sessions.insert(event.session_id.clone());
         latencies.push(event.duration_ms);
         tool_latencies
@@ -487,7 +528,7 @@ fn build_report(
     GainReport {
         window: options.since.label(),
         project: options.project.clone(),
-        tool_calls: events.len() as i64,
+        tool_calls: events.len() as i64 - prompt_recall.prompts,
         sessions: sessions.len() as i64,
         search_calls,
         search_hits,
@@ -519,6 +560,7 @@ fn build_report(
             .map(|(project, acc)| acc.finish(project))
             .collect::<Vec<_>>()
             .tap_sort_projects(),
+        prompt_recall,
     }
 }
 

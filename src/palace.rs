@@ -136,6 +136,10 @@ pub struct PalaceSearchResult {
     /// Amount taken off a mined project file for a plain-question query.
     #[serde(default)]
     pub mined_discount: f64,
+    /// Amount taken off because higher-ranked drawers come from the same
+    /// source.
+    #[serde(default)]
+    pub repeat_discount: f64,
     pub combined: f64,
     pub intent: Option<QueryIntent>,
     pub rerank_score: Option<f64>,
@@ -273,6 +277,7 @@ impl Palace {
                 date_boost: result.date_boost,
                 source_boost: result.source_boost,
                 mined_discount: result.mined_discount,
+                repeat_discount: result.repeat_discount,
                 combined: result.combined,
                 intent: Some(intent),
                 rerank_score: result.rerank_score,
@@ -464,6 +469,7 @@ fn merge_preference_results(
             date_boost: 0.0,
             source_boost: 0.0,
             mined_discount: 0.0,
+            repeat_discount: 0.0,
             rerank_score: None,
             combined,
             drawer: SearchResult {

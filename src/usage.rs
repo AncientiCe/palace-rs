@@ -3,7 +3,6 @@
 //! The recorder is best-effort: failures never change MCP tool behavior.
 
 use anyhow::{Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -35,10 +34,10 @@ pub struct UsageEvent {
 
 impl UsageSession {
     pub fn new() -> Self {
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         let seed = format!(
             "{}:{}:{}",
-            now.to_rfc3339(),
+            crate::clock::rfc3339(now),
             std::process::id(),
             std::env::current_dir()
                 .ok()
@@ -102,7 +101,7 @@ pub const RECALL_TOOLS: &[&str] = &[
 /// Returns `(engaged, saved)`. Used by the `stop` hook to nudge agents that
 /// investigated with Palace but never recorded what they found.
 pub fn recent_save_status(conn: &Connection, within_minutes: i64) -> Result<(bool, bool)> {
-    let since = (Utc::now() - ChronoDuration::minutes(within_minutes.max(0))).to_rfc3339();
+    let since = crate::clock::ago_rfc3339(jiff::SignedDuration::from_mins(within_minutes.max(0)));
     let engaged = tools_used_since(conn, &since, RECALL_TOOLS)?;
     let saved = tools_used_since(conn, &since, SAVE_TOOLS)?;
     Ok((engaged, saved))
@@ -126,6 +125,65 @@ fn tools_used_since(conn: &Connection, since: &str, tools: &[&str]) -> Result<bo
         .optional()
         .context("checking recent tool usage")?;
     Ok(found.is_some())
+}
+
+/// Usage-event tool name for what the prompt hook injected. It is not an MCP
+/// call, so `palace gain` keeps it out of tool calls and latency.
+pub const PROMPT_RECALL_TOOL: &str = "hook:prompt_recall";
+
+/// What the prompt hook injected for one substantive prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptRecall {
+    /// Recall included a recorded memory (diary, decision, remembered fact).
+    Memory,
+    /// Recall found only mined project files.
+    CodeOnly,
+    /// Recall found nothing.
+    Empty,
+}
+
+impl PromptRecall {
+    pub fn outcome(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::CodeOnly => "code_only",
+            Self::Empty => "empty",
+        }
+    }
+}
+
+/// Record what the prompt hook injected, keyed by the agent's session and
+/// the project folder. Best-effort, like every usage event.
+pub fn record_prompt_recall(
+    conn: &Connection,
+    session_id: &str,
+    cwd: &str,
+    recall: PromptRecall,
+    lines: usize,
+) -> Result<()> {
+    if telemetry_disabled() {
+        return Ok(());
+    }
+    let project = project_from_path(cwd).unwrap_or_else(resolve_project);
+    insert_event(
+        conn,
+        &UsageEvent {
+            ts: crate::clock::now_rfc3339(),
+            session_id: session_id.to_string(),
+            project,
+            tool: PROMPT_RECALL_TOOL.to_string(),
+            wing: None,
+            room: None,
+            query_hash: None,
+            result_count: lines as i64,
+            top_similarity: None,
+            bytes_returned: 0,
+            est_tokens_saved: 0,
+            duration_ms: 0,
+            outcome: recall.outcome().to_string(),
+            meta: json!({}),
+        },
+    )
 }
 
 pub fn insert_event(conn: &Connection, event: &UsageEvent) -> Result<()> {
@@ -168,9 +226,9 @@ fn classify_event(
         .map(|bytes| bytes.len() as i64)
         .unwrap_or_default();
     let mut event = UsageEvent {
-        ts: Utc::now().to_rfc3339(),
+        ts: crate::clock::now_rfc3339(),
         session_id: session.session_id.clone(),
-        project: session.project.clone(),
+        project: call_project(conn, args).unwrap_or_else(|| session.project.clone()),
         tool: tool.to_string(),
         wing: str_arg(args, "wing"),
         room: str_arg(args, "room"),
@@ -370,7 +428,7 @@ fn mark_repeat(conn: &Connection, event: &mut UsageEvent) -> Result<()> {
     let Some(hash) = event.query_hash.as_deref() else {
         return Ok(());
     };
-    let since = (Utc::now() - ChronoDuration::hours(24)).to_rfc3339();
+    let since = crate::clock::ago_rfc3339(crate::clock::hours(24));
     let seen: Option<i64> = conn
         .query_row(
             "SELECT id FROM usage_events
@@ -426,13 +484,53 @@ fn resolve_project() -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .or_else(|| {
-            std::env::current_dir().ok().and_then(|path| {
-                path.file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
+            std::env::var("CLAUDE_PROJECT_DIR")
+                .ok()
+                .and_then(|dir| project_from_path(&dir))
         })
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "global".to_string())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|dir| project_from_path(&dir.to_string_lossy()))
+        })
+        .unwrap_or_else(|| GLOBAL_PROJECT.to_string())
+}
+
+/// Project label for calls that belong to no project folder.
+const GLOBAL_PROJECT: &str = "global";
+
+/// The project a single tool call is about, from its own arguments: an
+/// explicit `project_path`, else the folder of the mined wing it filters on.
+/// A server started outside any project (the Claude desktop app starts it in
+/// `/`) still gets per-call attribution this way. `None` when the call names
+/// neither, so the caller falls back to the server's project.
+fn call_project(conn: &Connection, args: &Value) -> Option<String> {
+    if let Some(project) = str_arg(args, "project_path").and_then(|p| project_from_path(&p)) {
+        return Some(project);
+    }
+    let wing = str_arg(args, "wing")?;
+    let record = crate::store::get_wing(conn, &wing).ok()??;
+    if record.kind != "project" {
+        return None;
+    }
+    project_from_path(record.project_path.as_deref()?)
+}
+
+/// The folder name of a project path, or `None` for paths that are not a
+/// project: empty, the filesystem root, or the home directory.
+fn project_from_path(path: &str) -> Option<String> {
+    let path = path.trim().trim_end_matches(['/', '\\']);
+    if path.is_empty() {
+        return None;
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() && path == home.trim_end_matches('/') {
+        return None;
+    }
+    std::path::Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
 }
 
 fn telemetry_disabled() -> bool {

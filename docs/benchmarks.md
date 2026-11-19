@@ -27,6 +27,30 @@ and the retriever has to find the session that holds the answer.
 | temporal-reasoning | 127 | 0.858 | 0.976 | 1.000 |
 | abstention | 30 | 0.867 | 0.967 | 0.967 |
 
+#### Every gold session, and what comes back
+
+Some questions need several sessions. The tables above count a question as
+found when any one of its gold sessions is in the top K (`recall_any`).
+`recall_all` counts it only when every one of them is. On the 470:
+
+| Metric | @5 | @10 |
+|---|---:|---:|
+| `recall_any` | 0.987 | 0.996 |
+| `recall_all` | 0.900 | 0.938 |
+
+| Question type | Questions | `recall_all@5` | `recall_all@10` |
+|---|---:|---:|---:|
+| knowledge-update | 72 | 0.986 | 1.000 |
+| multi-session | 121 | 0.818 | 0.876 |
+| single-session-assistant | 56 | 1.000 | 1.000 |
+| single-session-preference | 30 | 0.933 | 0.933 |
+| single-session-user | 64 | 1.000 | 1.000 |
+| temporal-reasoning | 127 | 0.827 | 0.906 |
+
+The five drawers behind the @5 figures, the best one from each session, hold
+about 1,700 tokens between them: 1.3% of the haystack. The ten behind @10
+hold about 3,300. Tokens are counted as four bytes of text.
+
 ### `m_cleaned`: about 500 sessions (1.5M tokens) per question
 
 Ten times the haystack of `s_cleaned`: around 4,000 drawers to search per
@@ -57,7 +81,7 @@ question.
   its best drawer. Each question is asked on its own `question_date`, so
   relative dates ("two weeks ago") resolve as they would in a live palace.
 - **Metric:** `recall_any@K` at session level: a hit if any gold session is in
-  the top K.
+  the top K. `recall_all@K` needs every gold session in the top K.
 - **No parameters were fitted on `s_cleaned`.**
 - **Hardware:** Windows, 16 threads, CPU only. Average query time per
   question, including embedding the question: 6 ms on `s_cleaned`, 78 ms on

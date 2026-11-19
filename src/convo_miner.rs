@@ -5,7 +5,7 @@
 //! embeds and stores drawers. Port of convo_miner.py.
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -305,6 +305,23 @@ fn scan_convos(convo_dir: &Path) -> Vec<std::path::PathBuf> {
     files
 }
 
+/// Files per write transaction. Smaller than the project miner's window
+/// because a batch's chunks and vectors stay in memory until it is written,
+/// and conversation files run large.
+const CONVO_BATCH_SIZE: usize = 25;
+
+/// One conversation file, chunked and embedded, waiting to be written.
+struct PreparedConvo<'a> {
+    /// 1-based position in the scan, for progress output.
+    position: usize,
+    filepath: &'a std::path::PathBuf,
+    source_file: String,
+    already_mined: bool,
+    /// `(text, room, chunk_index)` per chunk.
+    chunks: Vec<(String, String, usize)>,
+    embeddings: Vec<Vec<f32>>,
+}
+
 /// Mine a directory of conversation files into the palace.
 pub fn mine_convos(
     conn: &mut Connection,
@@ -360,13 +377,13 @@ pub fn mine_convos_with(
     }
 
     println!("\n{}", "=".repeat(55));
-    println!("  Palace Mine — Conversations");
+    println!("  Palace Mine: Conversations");
     println!("{}", "=".repeat(55));
     println!("  Wing:    {wing}");
     println!("  Source:  {}", convo_path.display());
     println!("  Files:   {}", files.len());
     if dry_run {
-        println!("  DRY RUN — nothing will be filed");
+        println!("  DRY RUN: nothing will be filed");
     }
     println!("{}\n", "-".repeat(55));
 
@@ -375,29 +392,17 @@ pub fn mine_convos_with(
     let mut files_remined = 0usize;
     let mut room_counts: HashMap<String, usize> = HashMap::new();
 
-    // Batched into `MINE_BATCH_SIZE`-file transactions for the same reason as
-    // `miner::mine`: autocommitting per drawer (and per BM25 term) turns a
-    // modestly sized conversation export into hundreds of thousands of
-    // individual SQLite transactions, which is what made mining stall on
-    // larger-but-not-huge inputs.
-    for (batch_index, batch) in files.chunks(crate::miner::MINE_BATCH_SIZE).enumerate() {
-        let tx = if dry_run {
-            None
-        } else {
-            Some(
-                conn.transaction()
-                    .context("starting mine_convos transaction")?,
-            )
-        };
+    // Each batch is prepared first (read, chunk, embed) and then written in one
+    // short transaction. Batching keeps a conversation export from becoming
+    // hundreds of thousands of autocommits; preparing outside the transaction
+    // keeps the write lock away from other palace processes while embedding.
+    for (batch_index, batch) in files.chunks(CONVO_BATCH_SIZE).enumerate() {
+        let mut prepared: Vec<PreparedConvo> = Vec::new();
 
         for (offset, filepath) in batch.iter().enumerate() {
-            let i = batch_index * crate::miner::MINE_BATCH_SIZE + offset;
             let source_file = filepath.to_string_lossy().to_string();
 
-            let already_mined = match &tx {
-                Some(tx) => file_already_mined(tx, &source_file)?,
-                None => false,
-            };
+            let already_mined = !dry_run && file_already_mined(conn, &source_file)?;
             if already_mined && !force {
                 files_skipped += 1;
                 continue;
@@ -412,7 +417,7 @@ pub fn mine_convos_with(
                 continue;
             }
 
-            let chunks_with_rooms: Vec<(String, String, usize)> = match extract_mode {
+            let chunks: Vec<(String, String, usize)> = match extract_mode {
                 ExtractMode::General => {
                     let memories = extract_memories(&content, 0.3);
                     memories
@@ -429,7 +434,7 @@ pub fn mine_convos_with(
                 }
             };
 
-            if chunks_with_rooms.is_empty() {
+            if chunks.is_empty() {
                 continue;
             }
 
@@ -437,43 +442,54 @@ pub fn mine_convos_with(
                 println!(
                     "    [DRY RUN] {} → {} chunks",
                     filepath.file_name().unwrap_or_default().to_string_lossy(),
-                    chunks_with_rooms.len()
+                    chunks.len()
                 );
-                total_drawers += chunks_with_rooms.len();
-                for (_, room, _) in &chunks_with_rooms {
+                total_drawers += chunks.len();
+                for (_, room, _) in &chunks {
                     *room_counts.entry(room.clone()).or_default() += 1;
                 }
                 continue;
             }
 
-            // `dry_run` is false in every path that reaches here, so `tx` is
-            // always `Some` — but fall through as a no-op skip rather than
-            // panicking if that invariant ever changes.
-            let Some(tx) = &tx else { continue };
+            let chunk_texts: Vec<&str> = chunks.iter().map(|(t, _, _)| t.as_str()).collect();
+            let embeddings = crate::embedder::embed_documents(&chunk_texts).unwrap_or_default();
+            prepared.push(PreparedConvo {
+                position: batch_index * CONVO_BATCH_SIZE + offset + 1,
+                filepath,
+                source_file,
+                already_mined,
+                chunks,
+                embeddings,
+            });
+        }
 
+        if prepared.is_empty() {
+            continue;
+        }
+
+        // IMMEDIATE: take the write lock up front, where the busy timeout
+        // applies, instead of failing on a later read-to-write upgrade.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("starting mine_convos transaction")?;
+        for file in &prepared {
             // Old drawers go only once the file has chunks to replace them, so
             // a file that no longer reads or chunks keeps what it had.
-            if already_mined {
-                crate::store::delete_drawers_for_file(tx, &source_file)?;
+            if file.already_mined {
+                crate::store::delete_drawers_for_file(&tx, &file.source_file)?;
                 files_remined += 1;
             }
 
             let mut drawers_added = 0usize;
-            let chunk_texts: Vec<&str> = chunks_with_rooms
-                .iter()
-                .map(|(t, _, _)| t.as_str())
-                .collect();
-            let embeddings = crate::embedder::embed_documents(&chunk_texts).unwrap_or_default();
-            for (idx, (chunk_text, chunk_room, chunk_index)) in chunks_with_rooms.iter().enumerate()
-            {
-                let embedding = embeddings.get(idx).map(|e| e.as_slice());
+            for (idx, (chunk_text, chunk_room, chunk_index)) in file.chunks.iter().enumerate() {
+                let embedding = file.embeddings.get(idx).map(|e| e.as_slice());
                 let (added, _) = add_drawer(
-                    tx,
+                    &tx,
                     &wing,
                     chunk_room,
                     chunk_text,
                     embedding,
-                    &source_file,
+                    &file.source_file,
                     *chunk_index,
                     agent,
                     3.0,
@@ -487,15 +503,15 @@ pub fn mine_convos_with(
             total_drawers += drawers_added;
             println!(
                 "  ✓ [{:4}/{}] {:50} +{drawers_added}",
-                i + 1,
+                file.position,
                 files.len(),
-                filepath.file_name().unwrap_or_default().to_string_lossy()
+                file.filepath
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
             );
         }
-
-        if let Some(tx) = tx {
-            tx.commit().context("committing mine_convos batch")?;
-        }
+        tx.commit().context("committing mine_convos batch")?;
     }
 
     println!("\n{}", "=".repeat(55));

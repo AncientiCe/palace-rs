@@ -1,8 +1,8 @@
 [package]
 name = "palace-rs"
-version = "0.20.0"
+version = "0.20.4"
 edition = "2021"
-description = "Local memory palace for AI assistants — Rust edition"
+description = "Local memory palace for AI assistants, Rust edition"
 license = "MIT"
 repository = "https://github.com/AncientiCe/palace-rs"
 homepage = "https://palacememory.com"
@@ -61,7 +61,7 @@ thiserror = "2"
 ignore = "0.4"
 
 # Date/time
-chrono = { version = "0.4", features = ["serde"] }
+jiff = "0.2"
 
 # Hashing for deterministic IDs
 blake3 = "1"

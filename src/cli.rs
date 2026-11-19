@@ -536,9 +536,9 @@ pub fn run() -> Result<()> {
             let db_path = config.palace_db_path();
             if !db_path.exists() {
                 println!(
-                    "{}\n\n## L1 — No palace found. Run: palace mine <dir>",
+                    "{}\n\n## L1: No palace found. Run: palace mine <dir>",
                     std::fs::read_to_string(config.identity_path()).unwrap_or_else(|_| {
-                        "## L0 — No identity configured. Create ~/.palace/identity.txt".to_string()
+                        "## L0: No identity configured. Create ~/.palace/identity.txt".to_string()
                     })
                 );
                 return Ok(());
@@ -1155,7 +1155,7 @@ fn handle_embeddings(config: &PalaceConfig, action: EmbeddingsAction) -> Result<
             }
             if let (Some(target), Some(coverage)) = (&status.target, &status.coverage) {
                 println!(
-                    "  Migrating to:  {target} — {}/{} vectors ({:.0}%), started {}",
+                    "  Migrating to:  {target}, {}/{} vectors ({:.0}%), started {}",
                     coverage.done(),
                     coverage.total(),
                     coverage.percent(),
@@ -1323,7 +1323,7 @@ fn handle_remote(action: RemoteAction) -> Result<()> {
             })?;
             println!("  Testing {url} ...");
             match crate::remote::probe(&url, &key) {
-                Ok(n) => println!("  OK — authenticated, {n} tool(s) available."),
+                Ok(n) => println!("  OK, authenticated, {n} tool(s) available."),
                 Err(e) => {
                     warn!("FAILED: {e}");
                     std::process::exit(1);

@@ -43,6 +43,11 @@ Agent:  [palace_search → wing my_api, room decisions, filed 2026-09-03]
         The benchmark you ran is in the same drawer.
 ```
 
+**Using Palace? Tell me.** One line in
+[Show and tell](https://github.com/AncientiCe/palace-rs/discussions/categories/show-and-tell)
+about which agents you use it with and what it remembers for you helps more
+than a star. Prefer email? Write to contact@palacememory.com.
+
 ---
 
 ## 🧭 Why Palace
@@ -91,6 +96,8 @@ irm https://raw.githubusercontent.com/AncientiCe/palace-rs/main/scripts/install.
 
 The scripts download the matching GitHub Release binary, verify its SHA-256
 checksum, and install it. To upgrade later, run the same command again.
+The Linux binary needs glibc 2.39 or newer (Ubuntu 24.04+, Debian 13+);
+on an older system, build from source.
 
 **Homebrew (macOS Apple Silicon / Linux)**
 
@@ -124,7 +131,7 @@ cargo build --release   # binary at target/release/palace
 
 | Platform | Status |
 |---|---|
-| Linux x86_64 | Supported |
+| Linux x86_64 | Supported (glibc 2.39 or newer) |
 | macOS Apple Silicon | Supported |
 | Windows x86_64 | Supported |
 | macOS Intel | Not supported (no ONNX Runtime build) |
@@ -252,7 +259,8 @@ the server). In remote mode the server owns the model, so these commands run on 
 
 Agent-generated query dumps are cleaned up before retrieval. Results come back
 with score provenance (`combined`, `cosine`, `bm25`, `coding_boost`,
-`preference_match`, `mined_discount`, `rerank_score`, `intent`) and the
+`preference_match`, `mined_discount`, `repeat_discount`, `rerank_score`,
+`intent`) and the
 chunks right before and after each hit in its source file. Pass
 `context: false` to `palace_search` to leave those out.
 
@@ -425,6 +433,17 @@ palace remote status    # mode, endpoint, masked key
 palace local            # back to the local palace
 ```
 
+<p align="center">
+  <a href="docs/images/palace-handoff-demo.mp4">
+    <img src="docs/images/palace-handoff-demo.gif" alt="90-second shared-memory handoff: Dev B asks what was already ruled out on this ticket, and Palace answers with the source" width="100%">
+  </a>
+</p>
+
+Try this with one teammate and one ticket. Give both agents access to the
+same investigation on your own infrastructure. The team trial includes 10
+seats for 60 days, with no credit card:
+[Start the team trial](https://palacememory.com/trial?utm_source=github&utm_medium=readme&utm_campaign=team_trial_14d).
+
 ---
 
 ## 🧰 CLI reference
@@ -538,7 +557,12 @@ palace gain - last 30d (my_project)
   Diary recalls      : 8
   Repeat Qs avoided  : 19
   p95 latency        : 41 ms
+  Prompt recall      : 230 prompts (96 with past sessions or decisions, 71 code only, 63 nothing found)
 ```
+
+`Prompt recall` counts what the prompt hook injected, apart from MCP tool
+calls. Many "code only" or "nothing found" prompts mean agents work without
+the earlier sessions in front of them.
 
 Usage metadata stays in your local `palace.db`. Set `PALACE_GAIN_DISABLED=1`
 to turn recording off.
@@ -654,9 +678,10 @@ Settings load in this order: environment variables, then
 | `PALACE_ENTITY_LANGUAGES` | `en` | Comma-separated languages for entity detection |
 | `PALACE_GAIN_DISABLED` | off | `1` turns off usage recording |
 | `PALACE_FEEDBACK_DISABLED` | off | `1` stops the feedback-link hint in `palace_session_context` |
-| `PALACE_PROJECT` | auto | Project name used for gain attribution |
+| `PALACE_PROJECT` | auto | Project name used for gain attribution when a call names no `project_path` or project wing |
 | `PALACE_SOURCE_DIR` | `~/Desktop/transcripts` | Default source for `palace split` |
 | `PALACE_MINE_TRACE` | off | `1` prints per-stage mining timings |
+| `PALACE_BUSY_TIMEOUT_MS` | `10000` | How long to wait, in milliseconds, for another palace process that is writing to the database. `0` turns waiting off (fail at once); it does not mean "no limit" |
 | `PALACE_MCP_MODE` | `local` | `local` or `remote` |
 | `PALACE_EMBEDDING_MODEL` | `minilm-l6-v2-q8` | Embedding model for new palaces (see [embedding models](#embedding-models)) |
 | `PALACE_EMBEDDING_LATENCY_BUDGET_MS` | 2x current p95 | Query-latency budget for `palace embeddings verify` |
@@ -789,7 +814,10 @@ for comparison with other systems.
   ranking weight chosen on LongMemEval data (how much a session's other
   matching chunks count) was picked on the `m_cleaned` split together with
   probes from a real palace, then frozen before this run.
-- **Metric:** `recall_any@K` at session granularity.
+- **Metric:** `recall_any@K` at session granularity. The five drawers behind
+  R@5 hold about 1,700 tokens between them, 1.3% of the haystack.
+  [docs/benchmarks.md](docs/benchmarks.md) also reports `recall_all@K`, where
+  every gold session has to be in the top K.
 - **Hardware:** Windows, 16 threads.
 
 | Question type | Per session, `minilm-l6-v2` R@1 / R@5 | Exchange pairs, `q8` R@1 / R@5 |

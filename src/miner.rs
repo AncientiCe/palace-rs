@@ -17,7 +17,7 @@
 use anyhow::{Context, Result};
 use ignore::{DirEntry, WalkBuilder};
 use rayon::prelude::*;
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -115,9 +115,7 @@ pub const MIN_CHUNK_SIZE: usize = 50;
 /// mining stall on larger projects in the first place. A few hundred files
 /// per window keeps commit count low while still checkpointing regularly and
 /// bounding peak memory.
-///
-/// Shared with `convo_miner::mine_convos`, which has the same write pattern.
-pub(crate) const MINE_BATCH_SIZE: usize = 200;
+const MINE_BATCH_SIZE: usize = 200;
 
 pub static READABLE_EXTENSIONS: &[&str] = &[
     "txt", "md", "py", "js", "ts", "jsx", "tsx", "json", "yaml", "yml", "html", "css", "java",
@@ -497,7 +495,7 @@ impl MineTrace {
         if !self.enabled {
             return;
         }
-        println!("\n  PALACE_MINE_TRACE — phase breakdown");
+        println!("\n  PALACE_MINE_TRACE: phase breakdown");
         println!("    walk    {:>10.2?}", self.walk);
         println!("    hash    {:>10.2?}", self.hash);
         println!("    chunk   {:>10.2?}", self.chunk);
@@ -577,7 +575,7 @@ pub fn mine(
         );
         println!("  Files:   {}", files.len());
         if dry_run {
-            println!("  DRY RUN — nothing will be filed");
+            println!("  DRY RUN: nothing will be filed");
         }
         println!("{}\n", "-".repeat(55));
     }
@@ -765,7 +763,9 @@ pub fn mine(
                 changed_processed += 1;
             }
         } else {
-            let tx = conn.transaction().context("starting mine transaction")?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .context("starting mine transaction")?;
             for file in &prepared {
                 let source_file = file.filepath.to_string_lossy().to_string();
 
@@ -838,7 +838,9 @@ pub fn mine(
             }
         }
     } else if !stale_sources.is_empty() {
-        let tx = conn.transaction().context("starting prune transaction")?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("starting prune transaction")?;
         for source in &stale_sources {
             let removed = delete_drawers_for_file(&tx, source)?;
             summary.removed_files += 1;

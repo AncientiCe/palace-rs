@@ -22,6 +22,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 
 use crate::config::PalaceConfig;
+use crate::usage::PromptRecall;
 
 /// The agent client a hook is running for. Determines the output dialect:
 /// Cursor and OpenCode use flat keys (`additional_context`, `followup_message`),
@@ -185,13 +186,13 @@ const SAVE_WINDOW_MINUTES: i64 = 360;
 
 /// The save-nudge instruction shared by every client's `stop` hook.
 const SAVE_NUDGE: &str = "Before finishing: you investigated using Palace memory this session but \
-    recorded nothing. Save it so the next agent benefits — call palace_diary_write with what you \
+    recorded nothing. Save it so the next agent benefits: call palace_diary_write with what you \
     investigated and decided, and palace_kg_add for any durable facts or decisions (use \
     palace_kg_invalidate first if a fact changed). Then stop.";
 
 /// The nudge for a session that did real work without consulting Palace.
 const UNUSED_NUDGE: &str = "Before finishing: this session did real work but did not use Palace \
-    memory at all. Record it so the next agent benefits — call palace_diary_write with what you \
+    memory at all. Record it so the next agent benefits: call palace_diary_write with what you \
     did and decided, and palace_kg_add for any durable facts. Then stop.";
 
 /// A session with at least this many prompts counts as real work.
@@ -213,7 +214,7 @@ pub fn session_start_response(
     client: HookClient,
 ) -> Result<String> {
     let mut context = format!(
-        "# Palace Memory Protocol — MANDATORY\n\n{}",
+        "# Palace Memory Protocol: MANDATORY\n\n{}",
         crate::install::RULE_BODY
     );
     if let Some(conn) = conn {
@@ -275,12 +276,21 @@ const MEMORY_INTENT_TERMS: &[&str] = &[
     "prefer",
     "history",
     "what happened",
+    "why does",
+    "why is",
+    "went wrong",
+    "again",
 ];
 
 /// The nudge injected when a history question found nothing in auto-recall.
 const PROMPT_SEARCH_NUDGE: &str = "Palace memory: this question looks like it depends on prior \
     decisions or history, and auto-recall found nothing close. Call palace_search (and \
     palace_kg_query for stable facts) before answering from the code or from training data.";
+
+/// Added under recalled code when a history question matched no recorded memory.
+const CODE_ONLY_NUDGE: &str = "No past session or decision matched, only project files. This \
+    question looks like it depends on history, so call palace_search (and palace_diary_search \
+    with all_agents=true) before investigating from scratch.";
 
 /// Reminder injected into prompts until the session calls any Palace tool.
 const PALACE_REMINDER: &str = "Palace not consulted yet this session. Load the palace tools if \
@@ -347,19 +357,38 @@ fn palace_reminder(conn: &Connection, input: &Value, client: HookClient) -> Opti
 /// Recall block (or search nudge) for a substantive prompt, or `None` when
 /// the prompt is unrelated to anything remembered.
 fn prompt_context(conn: &Connection, input: &Value, prompt: &str) -> Option<String> {
-    let lines = recall_lines(conn, prompt, cwd(input));
-    if !lines.is_empty() {
-        return Some(format!(
-            "Palace memory relevant to this request (check it before answering; cite the drawer \
-             id if you rely on it):\n{}",
-            lines.join("\n")
-        ));
+    let recall = recall_lines(conn, prompt, cwd(input));
+    if let Some(session_id) = session_id(input) {
+        let kind = if recall.lines.is_empty() {
+            PromptRecall::Empty
+        } else if recall.has_recorded {
+            PromptRecall::Memory
+        } else {
+            PromptRecall::CodeOnly
+        };
+        let _ = crate::usage::record_prompt_recall(
+            conn,
+            session_id,
+            cwd(input),
+            kind,
+            recall.lines.len(),
+        );
     }
     let lower = prompt.to_lowercase();
-    MEMORY_INTENT_TERMS
-        .iter()
-        .any(|term| lower.contains(term))
-        .then(|| PROMPT_SEARCH_NUDGE.to_string())
+    let history_question = MEMORY_INTENT_TERMS.iter().any(|term| lower.contains(term));
+    if recall.lines.is_empty() {
+        return history_question.then(|| PROMPT_SEARCH_NUDGE.to_string());
+    }
+    let mut context = format!(
+        "Palace memory relevant to this request (check it before answering; cite the drawer \
+         id if you rely on it):\n{}",
+        recall.lines.join("\n")
+    );
+    if history_question && !recall.has_recorded {
+        context.push('\n');
+        context.push_str(CODE_ONLY_NUDGE);
+    }
+    Some(context)
 }
 
 /// Compute the recall context string for an investigation tool, or `None` when
@@ -367,12 +396,12 @@ fn prompt_context(conn: &Connection, input: &Value, prompt: &str) -> Option<Stri
 fn recall_context(conn: &Connection, input: &Value) -> Option<String> {
     let query = investigation_query(input)?;
     let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
-    let lines = recall_lines(conn, &query, cwd);
+    let lines = recall_lines(conn, &query, cwd).lines;
     if lines.is_empty() {
         return None;
     }
     Some(format!(
-        "Palace memory (recall before re-investigating or re-deciding — a prior agent may have \
+        "Palace memory (recall before re-investigating or re-deciding; a prior agent may have \
          already done this):\n{}",
         lines.join("\n")
     ))
@@ -382,7 +411,7 @@ fn recall_context(conn: &Connection, input: &Value) -> Option<String> {
 /// lines, scoped to the session's project: drawers from other mined projects
 /// (and diary entries recorded for them) are dropped as noise, while this
 /// project's wing, topic wings, and unscoped diaries are kept.
-fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
+fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Recall {
     // Recall prints one line per hit, so neighbouring chunks are not fetched.
     let options = crate::searcher::SearchOptions {
         rerank: false,
@@ -391,20 +420,19 @@ fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
     let results =
         crate::searcher::search_memories_with(conn, query, None, None, RECALL_CANDIDATES, options);
     let Some(hits) = results.get("results").and_then(Value::as_array) else {
-        return Vec::new();
+        return Recall::default();
     };
     let scope = ProjectScope::new(conn, cwd);
 
-    let mut lines: Vec<String> = Vec::new();
-    for hit in hits {
-        if lines.len() >= RECALL_LIMIT {
+    let mut ranked: Vec<(f64, &Value)> = hits.iter().map(|hit| (recall_score(hit), hit)).collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+    let mut picked: Vec<RecallHit> = Vec::new();
+    let mut first_recorded: Option<RecallHit> = None;
+    for (similarity, hit) in ranked {
+        if picked.len() >= RECALL_LIMIT && (first_recorded.is_some() || has_recorded(&picked)) {
             break;
         }
-        let similarity = hit
-            .get("similarity")
-            .and_then(Value::as_f64)
-            .or_else(|| hit.get("combined").and_then(Value::as_f64))
-            .unwrap_or(0.0);
         if similarity < RECALL_RELEVANCE_THRESHOLD {
             continue;
         }
@@ -422,9 +450,112 @@ fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
         if names_protocol_tools(text) && is_mined_file(conn, source) {
             continue;
         }
-        lines.push(format!("- [{wing}/{room}] {} ({id})", compact(text, 240)));
+        let candidate = RecallHit {
+            line: format!("- [{wing}/{room}] {} ({id})", compact(text, 240)),
+            recorded: is_recorded_memory(room, source),
+        };
+        if picked.len() < RECALL_LIMIT {
+            picked.push(candidate);
+        } else if candidate.recorded {
+            first_recorded = Some(candidate);
+        }
     }
-    lines
+    // Mined code outscores diaries and decisions on shared keywords, yet a past
+    // session is what saves re-investigating. Keep the best one in the last slot.
+    if let Some(recorded) = first_recorded {
+        if let Some(last) = picked.last_mut() {
+            *last = recorded;
+        }
+    }
+    Recall {
+        has_recorded: has_recorded(&picked),
+        lines: picked.into_iter().map(|hit| hit.line).collect(),
+    }
+}
+
+/// The memories picked for an auto-recall injection.
+#[derive(Default)]
+struct Recall {
+    /// One provenance-tagged line per memory, best first.
+    lines: Vec<String>,
+    /// Whether any line is a recorded memory rather than a mined file.
+    has_recorded: bool,
+}
+
+/// Share of its score a low-signal file keeps in auto-recall.
+const LOW_SIGNAL_FILE_WEIGHT: f64 = 0.85;
+
+/// A hit's auto-recall score: its search score, lowered for files that match
+/// many words but explain little (translations, lockfiles, snapshots).
+fn recall_score(hit: &Value) -> f64 {
+    let score = hit
+        .get("similarity")
+        .and_then(Value::as_f64)
+        .or_else(|| hit.get("combined").and_then(Value::as_f64))
+        .unwrap_or(0.0);
+    let source = hit
+        .get("source_file")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if is_low_signal_file(source) {
+        score * LOW_SIGNAL_FILE_WEIGHT
+    } else {
+        score
+    }
+}
+
+/// Directories whose files are mostly strings or generated data.
+const LOW_SIGNAL_DIRS: &[&str] = &[
+    "/translations/",
+    "/locales/",
+    "/locale/",
+    "/i18n/",
+    "/l10n/",
+    "/__snapshots__/",
+    "/fixtures/",
+    "/generated/",
+];
+/// File endings for lockfiles, snapshots, minified bundles and string tables.
+const LOW_SIGNAL_SUFFIXES: &[&str] = &[
+    ".lock",
+    "-lock.json",
+    "-lock.yaml",
+    ".snap",
+    ".min.js",
+    ".map",
+    ".po",
+    ".pot",
+    ".xliff",
+    ".strings",
+    ".arb",
+];
+
+/// True for a mined file that repeats a project's vocabulary without
+/// explaining behaviour, so it wins keyword matches it should not.
+fn is_low_signal_file(source_file: &str) -> bool {
+    let path = source_file.replace('\\', "/").to_lowercase();
+    LOW_SIGNAL_DIRS.iter().any(|dir| path.contains(dir))
+        || LOW_SIGNAL_SUFFIXES
+            .iter()
+            .any(|suffix| path.ends_with(suffix))
+}
+
+/// One memory picked for an auto-recall injection.
+struct RecallHit {
+    line: String,
+    /// Recorded by an agent or the user (diary, `palace_remember`, a decision)
+    /// rather than mined from a project file.
+    recorded: bool,
+}
+
+fn has_recorded(hits: &[RecallHit]) -> bool {
+    hits.iter().any(|hit| hit.recorded)
+}
+
+/// Whether a drawer was recorded by an agent or the user rather than mined from
+/// a file: diary entries, `palace_remember` facts and drawers with no source.
+fn is_recorded_memory(room: &str, source_file: &str) -> bool {
+    room == "diary" || source_file.is_empty() || source_file.starts_with("palace_remember/")
 }
 
 /// Tools the Palace protocol tells agents to call.
@@ -568,7 +699,7 @@ fn standing_preferences(conn: &Connection) -> Option<String> {
     });
 
     let mut lines = vec![format!(
-        "# Standing instructions (override defaults) — from Palace `{PREFERENCES_WING}/{PREFERENCES_ROOM}`\n\
+        "# Standing instructions (override defaults) from Palace `{PREFERENCES_WING}/{PREFERENCES_ROOM}`\n\
          These are the user's standing rules. They take priority over harness or tool defaults \
          (for example built-in file-memory or commit-attribution instructions)."
     )];
@@ -648,7 +779,7 @@ fn session_start_recall(conn: &Connection, cwd: &str) -> Option<String> {
         return None;
     }
     Some(format!(
-        "# Recalled from Palace memory (this project — consult before re-investigating or \
+        "# Recalled from Palace memory (this project; consult before re-investigating or \
          re-deciding; a prior agent may have already done this)\n{}",
         sections.join("\n\n")
     ))

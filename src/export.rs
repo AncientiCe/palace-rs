@@ -68,7 +68,7 @@ pub fn export_drawers(conn: &Connection) -> Result<ExportDoc> {
     let total = exported.len();
     Ok(ExportDoc {
         palace_version: env!("CARGO_PKG_VERSION").to_string(),
-        exported_at: chrono::Utc::now().to_rfc3339(),
+        exported_at: crate::clock::now_rfc3339(),
         total,
         drawers: exported,
     })

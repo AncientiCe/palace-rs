@@ -4,6 +4,115 @@ All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here
 
 This Rust implementation uses its own `0.x` version track.
 
+## [Unreleased]
+
+### Fixed
+
+- **`palace gain` no longer files most desktop-app calls under `global`.**
+  The Claude desktop app starts `palace mcp` in `/`, and a server started
+  from the home directory took the user name as its project, so their calls
+  showed up as `global` or as your user name. Each call is now attributed
+  from its own arguments first: an explicit `project_path`, else the folder
+  of the mined wing it filters on. The server's own project also checks
+  `CLAUDE_PROJECT_DIR`, and the home directory counts as no project. Calls
+  that name no project stay under `global`. Usage recorded before this
+  change keeps its old label.
+
+## [0.20.4] - 2026-11-19
+
+### Added
+
+- **`palace gain` reports what the prompt hook injected.** A new `Prompt
+  recall` line counts the prompts the hook searched for and splits them by
+  whether recall included a past session or decision, only project files, or
+  nothing. The JSON report has the same counts under `prompt_recall`. These
+  hook events are kept out of tool calls, sessions and latency.
+
+### Changed
+
+- **Auto-recall keeps a past session among code hits.** The prompt and
+  investigation hooks inject the top 3 memories, and in a mined project
+  keyword-heavy code chunks often filled all three, pushing out the diary
+  entry or decision that records the earlier investigation. When none of
+  the three is a recorded memory (diary, `palace_remember`, or a drawer
+  without a source file), the best relevant one now takes the last slot.
+- **Auto-recall ranks translation and lock files lower.** String tables,
+  locale files, lockfiles, snapshots, fixtures and minified bundles repeat a
+  project's vocabulary and win keyword matches without explaining anything.
+  The hooks now keep 0.85 of their score when ranking what to inject, so the
+  code that does the work comes first. Search itself is unchanged.
+- **The prompt hook nudges history questions that recall only code.** The
+  "search before answering" nudge used to fire only when recall found
+  nothing, so a "why does X fail" question that recalled three code chunks
+  got no hint that a past session might exist. When recall finds only
+  project files for a history question, the hook now adds a line telling
+  the agent to call `palace_search` and `palace_diary_search` first. "why
+  does", "why is", "went wrong" and "again" now count as history phrasing.
+
+### Fixed
+
+- **"database is locked" while another palace process is writing.** With a
+  `palace mine` running, `palace mcp`, the hooks and a second `palace mine`
+  or `mine-convos` failed at startup with `backfilling wings registry:
+  database is locked`. Opening an up-to-date palace now takes no write lock,
+  the wings backfill no longer stops a palace from opening, `mine-convos`
+  embeds before it opens its write transaction, and the miners wait for the
+  lock instead of failing. The wait is 10 seconds by default; set
+  `PALACE_BUSY_TIMEOUT_MS` to change it. When the wait runs out, the error
+  names the cause: another palace process holds the database.
+
+## [0.20.3] - 2026-11-18
+
+### Fixed
+
+- **Linux release binaries run on older glibc again.** The x86_64 Linux
+  build moved from `ubuntu-latest` to `ubuntu-24.04` and links with GCC 14,
+  so the binary needs glibc 2.39 or newer instead of 2.43. It failed to
+  start on Debian 13 (glibc 2.41) with "version `GLIBC_2.43' not found".
+
+### Changed
+
+- **No em or en dashes in user-facing text.** CLI output, error messages,
+  `palace wake-up` layer headings, MCP tool descriptions and results, hook
+  context, and the memory protocol rule now use commas, colons or full stops
+  instead. For example, `palace remote test` prints `OK, authenticated, N
+  tool(s) available.` and a bad API key reports `HTTP 401 Unauthorized. Check
+  the API key (palace remote set).` The rule text changed, so run
+  `palace install` again to refresh it in your agents' rule files.
+
+## [0.20.2] - 2026-11-17
+
+### Changed
+
+- **`chrono` is replaced by `jiff`.** `chrono` is unmaintained
+  (RUSTSEC-2026-0543) and failed the dependency audit. Stored timestamps keep
+  the exact text form they had, so existing palaces need no migration.
+  **Breaking for library users:** `RankOptions::now`, `TimeTarget::start` and
+  `end`, `time_targets`, `time_match` and `feedback::take_due_prompt` take
+  `jiff::Timestamp` where they took `chrono::DateTime<Utc>`. The new
+  `palace::clock` module holds the timestamp helpers.
+
+## [0.20.1] - 2026-11-17
+
+### Fixed
+
+- **`palace install` resolves the Claude Desktop config from the home
+  directory on Windows**, like the other clients, instead of from `%APPDATA%`.
+  An install against a custom home no longer touches the real config.
+- **Security: `rustix` updated to 1.1.6** for RUSTSEC-2026-0486.
+
+### Changed
+
+- **One source no longer fills the search results.** Each drawer keeps 0.9 of
+  its score for every higher-ranked drawer from the same conversation or
+  file, so a second source with a slightly weaker match gets a place before
+  the first source's third or fourth chunk. A question whose answer is spread
+  over several conversations now finds more of them in the top results. A
+  source's best drawer keeps its score, so the first result is the same as
+  before, as is the order within a source; drawers without a source file are
+  left alone. Search results report the amount as `repeat_discount`, and
+  `RankOptions::source_decay` sets the share kept (1 turns it off).
+
 ## [0.20.0] - 2026-11-10
 
 ### Added

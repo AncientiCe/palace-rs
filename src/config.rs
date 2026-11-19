@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_COLLECTION_NAME: &str = "palace_drawers";
+const DEFAULT_BUSY_TIMEOUT_MS: u64 = 10_000;
 
 /// Install/usage profile that shapes persona defaults: protocol wording,
 /// topic-first taxonomy, and room maps. `Coding` preserves the original
@@ -355,6 +356,16 @@ impl PalaceConfig {
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(str::to_lowercase)
+    }
+
+    /// How long a connection waits for another palace process to release the
+    /// database write lock, in milliseconds.
+    /// Priority: env `PALACE_BUSY_TIMEOUT_MS` > 10 000.
+    pub fn busy_timeout_ms(&self) -> u64 {
+        std::env::var("PALACE_BUSY_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_BUSY_TIMEOUT_MS)
     }
 
     /// Query-latency budget for embedding verification, in milliseconds.

@@ -456,7 +456,7 @@ fn doctor_marks_rule_weak_without_tool_search_load_step() {
         .join("\n");
     fs::write(
         codex_dir.join("AGENTS.md"),
-        format!("<!-- BEGIN PALACE -->\n# Palace Memory Protocol — MANDATORY\n\n{old_body}\n<!-- END PALACE -->\n"),
+        format!("<!-- BEGIN PALACE -->\n# Palace Memory Protocol: MANDATORY\n\n{old_body}\n<!-- END PALACE -->\n"),
     )
     .unwrap();
 
@@ -484,7 +484,7 @@ fn doctor_marks_rule_weak_without_only_memory_line() {
         .join("\n");
     fs::write(
         codex_dir.join("AGENTS.md"),
-        format!("<!-- BEGIN PALACE -->\n# Palace Memory Protocol — MANDATORY\n\n{old_body}\n<!-- END PALACE -->\n"),
+        format!("<!-- BEGIN PALACE -->\n# Palace Memory Protocol: MANDATORY\n\n{old_body}\n<!-- END PALACE -->\n"),
     )
     .unwrap();
 
@@ -548,6 +548,29 @@ fn install_claude_desktop_writes_to_library_application_support() {
         Some(binary_path.to_string_lossy().as_ref())
     );
     assert_eq!(server["args"], serde_json::json!(["mcp"]));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn install_claude_desktop_writes_under_home_appdata() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let report = install_clients(&options(
+        temp.path(),
+        &binary_path,
+        vec![Client::ClaudeDesktop],
+    ))
+    .unwrap();
+
+    let expected = temp
+        .path()
+        .join("AppData/Roaming/Claude/claude_desktop_config.json");
+    assert_eq!(report.changed, vec![expected.clone()]);
+    let config = read_json(&expected);
+    assert_eq!(
+        config["mcpServers"]["palace"]["command"].as_str(),
+        Some(binary_path.to_string_lossy().as_ref())
+    );
 }
 
 #[cfg(target_os = "macos")]

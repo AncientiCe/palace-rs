@@ -1,7 +1,6 @@
 //! Tests for the Cursor hook response builders that drive automatic
 //! memory-in (recall on investigation) and memory-out (save on stop).
 
-use chrono::Utc;
 use palace::hooks::{
     normalize_input, post_tool_use_response, session_start_response, stop_response,
     user_prompt_submit_response, HookClient,
@@ -15,7 +14,7 @@ fn test_db() -> rusqlite::Connection {
 
 fn usage(tool: &str) -> UsageEvent {
     UsageEvent {
-        ts: Utc::now().to_rfc3339(),
+        ts: palace::clock::now_rfc3339(),
         session_id: "session_test".to_string(),
         project: "proj".to_string(),
         tool: tool.to_string(),
@@ -219,6 +218,157 @@ fn user_prompt_submit_injects_recall_for_the_question() {
         "the prior decision must surface: {out}"
     );
     assert!(ctx.contains("(drawer_"), "{out}");
+}
+
+/// File a mined code chunk in the `proj` wing, as `palace mine` would.
+fn mined_chunk(conn: &rusqlite::Connection, source_file: &str, content: &str) {
+    let config = palace::config::PalaceConfig::new();
+    palace::mcp_server::dispatch_tool(
+        conn,
+        &config,
+        "palace_add_drawer",
+        &json!({
+            "wing": "proj",
+            "room": "src",
+            "content": content,
+            "source_file": source_file,
+        }),
+    );
+}
+
+fn diary(conn: &rusqlite::Connection, entry: &str) {
+    let config = palace::config::PalaceConfig::new();
+    palace::mcp_server::dispatch_tool(
+        conn,
+        &config,
+        "palace_diary_write",
+        &json!({ "agent_name": "claude", "entry": entry, "project_path": "/work/proj" }),
+    );
+}
+
+const OFFLINE_PROMPT: &str = "why does the offline order fail to submit?";
+const OFFLINE_DIARY: &str = "2026-11-18 Investigated the stuck offline order at store 128: \
+    the order was never submitted because the payment injection was rejected; retry did not help.";
+
+/// Keyword-heavy code chunks that outrank the diary on their own.
+fn seed_offline_code(conn: &rusqlite::Connection) {
+    mined_chunk(
+        conn,
+        "/work/proj/src/offline/submit.ts",
+        "export function submitOfflineOrder(order) { // submit the offline order; on fail, \
+         mark the offline order as failed to submit and retry the offline order submit }",
+    );
+    mined_chunk(
+        conn,
+        "/work/proj/src/offline/queue.ts",
+        "offline order queue: submit each offline order, fail the offline order submit when \
+         the offline order submit request fails",
+    );
+    mined_chunk(
+        conn,
+        "/work/proj/src/offline/banner.tsx",
+        "OfflineOrderBanner: You have offline orders to submit. Submit offline order. \
+         Offline order failed to submit.",
+    );
+    mined_chunk(
+        conn,
+        "/work/proj/src/offline/status.ts",
+        "offline order status: submitted, failed to submit, offline order submit pending",
+    );
+}
+
+#[test]
+fn user_prompt_submit_nudges_when_a_history_question_recalls_only_code() {
+    let conn = test_db();
+    seed_offline_code(&conn);
+
+    let out = user_prompt_submit_response(&conn, &prompt(OFFLINE_PROMPT), HookClient::Claude);
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        ctx.contains("- [proj/src]"),
+        "code is still injected: {ctx}"
+    );
+    assert!(
+        ctx.contains("No past session or decision matched"),
+        "a why-question answered only by code must be told to search: {ctx}"
+    );
+
+    // With the past session recalled, the nudge would only be noise.
+    diary(&conn, OFFLINE_DIARY);
+    let out = user_prompt_submit_response(&conn, &prompt(OFFLINE_PROMPT), HookClient::Claude);
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        !ctx.contains("No past session or decision matched"),
+        "{ctx}"
+    );
+}
+
+#[test]
+fn user_prompt_submit_keeps_a_past_session_among_code_hits() {
+    let conn = test_db();
+    seed_offline_code(&conn);
+    diary(&conn, OFFLINE_DIARY);
+
+    let out = user_prompt_submit_response(&conn, &prompt(OFFLINE_PROMPT), HookClient::Claude);
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        ctx.contains("store 128"),
+        "a relevant past session must not be crowded out by code chunks: {ctx}"
+    );
+    assert_eq!(
+        ctx.lines().filter(|l| l.starts_with("- [")).count(),
+        3,
+        "{ctx}"
+    );
+}
+
+#[test]
+fn user_prompt_submit_ranks_translation_files_below_code() {
+    let conn = test_db();
+    for (file, extra) in [
+        ("/work/proj/src/translations/en_US.json", "Submit Orders"),
+        (
+            "/work/proj/src/translations/de_DE.json",
+            "Bestellungen senden",
+        ),
+        ("/work/proj/src/locales/fr_FR.json", "Envoyer les commandes"),
+        ("/work/proj/package-lock.json", "offline-order-submit 1.0.0"),
+    ] {
+        mined_chunk(
+            &conn,
+            file,
+            &format!(
+                "\"offlineMode.openOrders.banner.title\": \"You have offline orders to submit.\", \
+                 \"offlineMode.submitButton\": \"Submit Orders\", \
+                 \"offlineMode.submitFailed\": \"Some offline orders could not be submitted\", {extra}"
+            ),
+        );
+    }
+    mined_chunk(
+        &conn,
+        "/work/proj/src/offline/submitOrder.ts",
+        "// Submit an offline order.\nasync function submitOfflineOrder(order) { \
+         const res = await api.post(order); if (!res.ok) throw new OfflineSubmitError(order.id) }",
+    );
+
+    let out = user_prompt_submit_response(&conn, &prompt(OFFLINE_PROMPT), HookClient::Claude);
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    let first = ctx
+        .lines()
+        .find(|l| l.starts_with("- ["))
+        .unwrap_or_default();
+    assert!(
+        first.contains("submitOfflineOrder"),
+        "the code that does the work must rank above translation strings: {ctx}"
+    );
 }
 
 #[test]

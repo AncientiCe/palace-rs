@@ -4,7 +4,6 @@
 //! Vector search: brute-force cosine similarity, fast for < 500K rows.
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -105,7 +104,7 @@ fn insert_drawer(
     let blob = embedding.map(vec_to_blob);
     let preference_span = crate::preference::drawer_preference_span(content, room, source);
     let pref_blob = preference_embedding_blob(preference_span.as_deref(), embedding);
-    let filed_at = Utc::now().to_rfc3339();
+    let filed_at = crate::clock::now_rfc3339();
     let entity_metadata = crate::entity_detector::entity_metadata(content);
     let entity_metadata_text =
         serde_json::to_string(&entity_metadata).unwrap_or_else(|_| "{}".to_string());
@@ -166,7 +165,7 @@ pub fn add_drawer_with_id(
         PreferenceSource::infer(source_file),
     );
     let pref_blob = preference_embedding_blob(preference_span.as_deref(), embedding);
-    let filed_at = Utc::now().to_rfc3339();
+    let filed_at = crate::clock::now_rfc3339();
     let metadata = metadata_for_content(extra_meta, preference_span.as_deref());
     let metadata_text = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
     let hall = metadata
@@ -349,7 +348,7 @@ pub fn upsert_mined_file(
     content_hash: &str,
     chunk_count: usize,
 ) -> Result<()> {
-    let now = Utc::now().to_rfc3339();
+    let now = crate::clock::now_rfc3339();
     conn.prepare_cached(
         "INSERT INTO mined_files (source_file, wing, content_hash, mined_at, chunk_count)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -950,7 +949,7 @@ pub fn list_wings_registry(conn: &Connection) -> Result<Vec<WingRecord>> {
 
 /// Mark a wing as a mined project: set kind=project, path, and last_mined_at.
 pub fn set_wing_mined(conn: &Connection, name: &str, project_path: &str) -> Result<()> {
-    let now = Utc::now().to_rfc3339();
+    let now = crate::clock::now_rfc3339();
     conn.execute(
         "INSERT INTO wings (name, kind, project_path, last_mined_at)
          VALUES (?1, 'project', ?2, ?3)

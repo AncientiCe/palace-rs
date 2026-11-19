@@ -103,6 +103,7 @@ mod tests {
             date_boost: 0.0,
             source_boost: 0.0,
             mined_discount: 0.0,
+            repeat_discount: 0.0,
             rerank_score: None,
             combined: 0.3,
         }

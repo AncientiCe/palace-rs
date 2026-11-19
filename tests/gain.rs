@@ -1,4 +1,3 @@
-use chrono::{Duration, Utc};
 use palace::gain::{
     history, record_feedback, render_history, render_text, summarize, FeedbackRecord, GainOptions,
     SinceWindow,
@@ -64,7 +63,12 @@ fn rendered_gain_history_uses_palace_branding() {
 
     insert_event(
         &conn,
-        &event(Utc::now().to_rfc3339(), "alpha", "palace_search", "hit"),
+        &event(
+            palace::clock::now_rfc3339(),
+            "alpha",
+            "palace_search",
+            "hit",
+        ),
     )
     .expect("insert event");
     let events = history(&conn, &options(None, SinceWindow::All), 20).expect("history");
@@ -76,7 +80,7 @@ fn rendered_gain_history_uses_palace_branding() {
 #[test]
 fn aggregates_value_metrics_by_project() {
     let conn = palace::db::open_in_memory().expect("open test db");
-    let now = Utc::now().to_rfc3339();
+    let now = palace::clock::now_rfc3339();
 
     let mut search = event(now.clone(), "alpha", "palace_search", "hit");
     search.result_count = 3;
@@ -120,7 +124,7 @@ fn aggregates_value_metrics_by_project() {
 #[test]
 fn summarizes_latency_by_tool() {
     let conn = palace::db::open_in_memory().expect("open test db");
-    let now = Utc::now().to_rfc3339();
+    let now = palace::clock::now_rfc3339();
 
     let mut first = event(now.clone(), "alpha", "palace_search", "hit");
     first.duration_ms = 5;
@@ -157,7 +161,7 @@ fn summarizes_latency_by_tool() {
 #[test]
 fn repeated_query_hashes_count_as_repeat_questions_avoided() {
     let conn = palace::db::open_in_memory().expect("open test db");
-    let now = Utc::now().to_rfc3339();
+    let now = palace::clock::now_rfc3339();
 
     let mut first = event(now.clone(), "alpha", "palace_search", "hit");
     first.query_hash = Some("same_hash".to_string());
@@ -176,8 +180,8 @@ fn repeated_query_hashes_count_as_repeat_questions_avoided() {
 #[test]
 fn since_window_filters_old_events() {
     let conn = palace::db::open_in_memory().expect("open test db");
-    let old = (Utc::now() - Duration::days(10)).to_rfc3339();
-    let recent = Utc::now().to_rfc3339();
+    let old = palace::clock::ago_rfc3339(palace::clock::days(10));
+    let recent = palace::clock::now_rfc3339();
 
     insert_event(&conn, &event(old, "alpha", "palace_search", "hit")).expect("insert old");
     insert_event(&conn, &event(recent, "alpha", "palace_search", "hit")).expect("insert recent");
@@ -235,7 +239,7 @@ fn recorder_classifies_search_hits_and_repeats() {
 #[test]
 fn explicit_feedback_records_precision_at_1() {
     let conn = palace::db::open_in_memory().expect("open test db");
-    let now = Utc::now().to_rfc3339();
+    let now = palace::clock::now_rfc3339();
 
     let mut search = event(now, "alpha", "palace_search", "hit");
     search.meta = json!({
@@ -267,7 +271,7 @@ fn explicit_feedback_records_precision_at_1() {
 #[test]
 fn diary_citation_infers_useful_feedback() {
     let conn = palace::db::open_in_memory().expect("open test db");
-    let now = Utc::now().to_rfc3339();
+    let now = palace::clock::now_rfc3339();
 
     let mut search = event(now.clone(), "alpha", "palace_search", "hit");
     search.meta = json!({
@@ -414,4 +418,107 @@ fn mcp_dispatch_records_usage_event() {
 
     assert_eq!(count, 1);
     assert_eq!(outcome, "noop");
+}
+
+#[test]
+fn prompt_hook_recalls_are_counted_apart_from_tool_calls() {
+    use palace::hooks::{user_prompt_submit_response, HookClient};
+    let conn = palace::db::open_in_memory().expect("open test db");
+    let config = palace::config::PalaceConfig::new();
+    palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_add_drawer",
+        &json!({
+            "wing": "proj",
+            "room": "src",
+            "content": "offline order queue: submit each offline order, fail the offline \
+                        order submit when the offline order submit request fails",
+            "source_file": "/work/proj/src/offline/queue.ts",
+        }),
+    );
+    let prompt = |text: &str| json!({ "prompt": text, "cwd": "/work/proj", "session_id": "s1" });
+
+    // A history question answered only by code.
+    user_prompt_submit_response(
+        &conn,
+        &prompt("why does the offline order fail to submit?"),
+        HookClient::Claude,
+    );
+    // The same question once a past session is on record.
+    palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_write",
+        &json!({
+            "agent_name": "claude",
+            "entry": "Investigated why the offline order failed to submit: the payment \
+                      injection was rejected.",
+            "project_path": "/work/proj",
+        }),
+    );
+    let usage_before = summarize(&conn, &options(None, SinceWindow::All))
+        .expect("summarize")
+        .tool_calls;
+    user_prompt_submit_response(
+        &conn,
+        &prompt("why does the offline order fail to submit?"),
+        HookClient::Claude,
+    );
+    // A prompt that matches nothing.
+    user_prompt_submit_response(
+        &conn,
+        &prompt("rename the quarterly zebra spreadsheet columns"),
+        HookClient::Claude,
+    );
+
+    let report = summarize(&conn, &options(None, SinceWindow::All)).expect("summarize");
+    let recall = &report.prompt_recall;
+    assert_eq!(recall.prompts, 3, "{recall:?}");
+    assert_eq!(recall.with_memory, 1, "{recall:?}");
+    assert_eq!(recall.code_only, 1, "{recall:?}");
+    assert_eq!(recall.empty, 1, "{recall:?}");
+    assert_eq!(
+        report.tool_calls, usage_before,
+        "hook recalls are not MCP tool calls"
+    );
+    assert!(
+        render_text(&report).contains("Prompt recall      : 3 prompts"),
+        "{}",
+        render_text(&report)
+    );
+}
+
+#[test]
+fn calls_from_a_server_without_a_project_are_attributed_by_their_arguments() {
+    let conn = palace::db::open_in_memory().expect("open test db");
+    let config = palace::config::PalaceConfig::new();
+    palace::store::set_wing_mined(&conn, "associate_app", "/work/associate-app").unwrap();
+    // The Claude desktop app starts the server in `/`, so it has no project.
+    let session = UsageSession {
+        session_id: "session_desktop".to_string(),
+        project: "global".to_string(),
+    };
+    let call = |tool: &str, args: serde_json::Value| {
+        palace::mcp_server::dispatch_tool_with_usage(&conn, &config, &session, tool, &args);
+    };
+
+    call(
+        "palace_diary_write",
+        json!({ "agent_name": "claude", "entry": "checked the cart", "project_path": "/work/checkout" }),
+    );
+    call(
+        "palace_search",
+        json!({ "query": "offline order", "wing": "associate_app" }),
+    );
+    call("palace_search", json!({ "query": "offline order" }));
+
+    let projects: Vec<String> = conn
+        .prepare("SELECT project FROM usage_events ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(projects, ["checkout", "associate-app", "global"]);
 }
