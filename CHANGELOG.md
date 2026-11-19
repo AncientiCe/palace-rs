@@ -6,6 +6,15 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Changed
+
+- **Auto-recall keeps a past session among code hits.** The prompt and
+  investigation hooks inject the top 3 memories, and in a mined project
+  keyword-heavy code chunks often filled all three, pushing out the diary
+  entry or decision that records the earlier investigation. When none of
+  the three is a recorded memory (diary, `palace_remember`, or a drawer
+  without a source file), the best relevant one now takes the last slot.
+
 ### Fixed
 
 - **"database is locked" while another palace process is writing.** With a

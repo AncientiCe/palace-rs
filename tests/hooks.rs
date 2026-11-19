@@ -220,6 +220,84 @@ fn user_prompt_submit_injects_recall_for_the_question() {
     assert!(ctx.contains("(drawer_"), "{out}");
 }
 
+/// File a mined code chunk in the `proj` wing, as `palace mine` would.
+fn mined_chunk(conn: &rusqlite::Connection, source_file: &str, content: &str) {
+    let config = palace::config::PalaceConfig::new();
+    palace::mcp_server::dispatch_tool(
+        conn,
+        &config,
+        "palace_add_drawer",
+        &json!({
+            "wing": "proj",
+            "room": "src",
+            "content": content,
+            "source_file": source_file,
+        }),
+    );
+}
+
+fn diary(conn: &rusqlite::Connection, entry: &str) {
+    let config = palace::config::PalaceConfig::new();
+    palace::mcp_server::dispatch_tool(
+        conn,
+        &config,
+        "palace_diary_write",
+        &json!({ "agent_name": "claude", "entry": entry, "project_path": "/work/proj" }),
+    );
+}
+
+const OFFLINE_PROMPT: &str = "why does the offline order fail to submit?";
+const OFFLINE_DIARY: &str = "2026-11-18 Investigated the stuck offline order at store 128: \
+    the order was never submitted because the payment injection was rejected; retry did not help.";
+
+/// Keyword-heavy code chunks that outrank the diary on their own.
+fn seed_offline_code(conn: &rusqlite::Connection) {
+    mined_chunk(
+        conn,
+        "/work/proj/src/offline/submit.ts",
+        "export function submitOfflineOrder(order) { // submit the offline order; on fail, \
+         mark the offline order as failed to submit and retry the offline order submit }",
+    );
+    mined_chunk(
+        conn,
+        "/work/proj/src/offline/queue.ts",
+        "offline order queue: submit each offline order, fail the offline order submit when \
+         the offline order submit request fails",
+    );
+    mined_chunk(
+        conn,
+        "/work/proj/src/offline/banner.tsx",
+        "OfflineOrderBanner: You have offline orders to submit. Submit offline order. \
+         Offline order failed to submit.",
+    );
+    mined_chunk(
+        conn,
+        "/work/proj/src/offline/status.ts",
+        "offline order status: submitted, failed to submit, offline order submit pending",
+    );
+}
+
+#[test]
+fn user_prompt_submit_keeps_a_past_session_among_code_hits() {
+    let conn = test_db();
+    seed_offline_code(&conn);
+    diary(&conn, OFFLINE_DIARY);
+
+    let out = user_prompt_submit_response(&conn, &prompt(OFFLINE_PROMPT), HookClient::Claude);
+    let ctx = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        ctx.contains("store 128"),
+        "a relevant past session must not be crowded out by code chunks: {ctx}"
+    );
+    assert_eq!(
+        ctx.lines().filter(|l| l.starts_with("- [")).count(),
+        3,
+        "{ctx}"
+    );
+}
+
 #[test]
 fn user_prompt_submit_nudges_history_questions_without_hits() {
     let conn = test_db();

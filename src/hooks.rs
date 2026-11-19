@@ -395,9 +395,10 @@ fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
     };
     let scope = ProjectScope::new(conn, cwd);
 
-    let mut lines: Vec<String> = Vec::new();
+    let mut picked: Vec<RecallHit> = Vec::new();
+    let mut first_recorded: Option<RecallHit> = None;
     for hit in hits {
-        if lines.len() >= RECALL_LIMIT {
+        if picked.len() >= RECALL_LIMIT && (first_recorded.is_some() || has_recorded(&picked)) {
             break;
         }
         let similarity = hit
@@ -422,9 +423,42 @@ fn recall_lines(conn: &Connection, query: &str, cwd: &str) -> Vec<String> {
         if names_protocol_tools(text) && is_mined_file(conn, source) {
             continue;
         }
-        lines.push(format!("- [{wing}/{room}] {} ({id})", compact(text, 240)));
+        let candidate = RecallHit {
+            line: format!("- [{wing}/{room}] {} ({id})", compact(text, 240)),
+            recorded: is_recorded_memory(room, source),
+        };
+        if picked.len() < RECALL_LIMIT {
+            picked.push(candidate);
+        } else if candidate.recorded {
+            first_recorded = Some(candidate);
+        }
     }
-    lines
+    // Mined code outscores diaries and decisions on shared keywords, yet a past
+    // session is what saves re-investigating. Keep the best one in the last slot.
+    if let Some(recorded) = first_recorded {
+        if let Some(last) = picked.last_mut() {
+            *last = recorded;
+        }
+    }
+    picked.into_iter().map(|hit| hit.line).collect()
+}
+
+/// One memory picked for an auto-recall injection.
+struct RecallHit {
+    line: String,
+    /// Recorded by an agent or the user (diary, `palace_remember`, a decision)
+    /// rather than mined from a project file.
+    recorded: bool,
+}
+
+fn has_recorded(hits: &[RecallHit]) -> bool {
+    hits.iter().any(|hit| hit.recorded)
+}
+
+/// Whether a drawer was recorded by an agent or the user rather than mined from
+/// a file: diary entries, `palace_remember` facts and drawers with no source.
+fn is_recorded_memory(room: &str, source_file: &str) -> bool {
+    room == "diary" || source_file.is_empty() || source_file.starts_with("palace_remember/")
 }
 
 /// Tools the Palace protocol tells agents to call.
