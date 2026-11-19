@@ -22,6 +22,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 
 use crate::config::PalaceConfig;
+use crate::usage::PromptRecall;
 
 /// The agent client a hook is running for. Determines the output dialect:
 /// Cursor and OpenCode use flat keys (`additional_context`, `followup_message`),
@@ -357,6 +358,22 @@ fn palace_reminder(conn: &Connection, input: &Value, client: HookClient) -> Opti
 /// the prompt is unrelated to anything remembered.
 fn prompt_context(conn: &Connection, input: &Value, prompt: &str) -> Option<String> {
     let recall = recall_lines(conn, prompt, cwd(input));
+    if let Some(session_id) = session_id(input) {
+        let kind = if recall.lines.is_empty() {
+            PromptRecall::Empty
+        } else if recall.has_recorded {
+            PromptRecall::Memory
+        } else {
+            PromptRecall::CodeOnly
+        };
+        let _ = crate::usage::record_prompt_recall(
+            conn,
+            session_id,
+            cwd(input),
+            kind,
+            recall.lines.len(),
+        );
+    }
     let lower = prompt.to_lowercase();
     let history_question = MEMORY_INTENT_TERMS.iter().any(|term| lower.contains(term));
     if recall.lines.is_empty() {

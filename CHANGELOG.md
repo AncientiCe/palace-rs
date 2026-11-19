@@ -6,6 +6,14 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Added
+
+- **`palace gain` reports what the prompt hook injected.** A new `Prompt
+  recall` line counts the prompts the hook searched for and splits them by
+  whether recall included a past session or decision, only project files, or
+  nothing. The JSON report has the same counts under `prompt_recall`. These
+  hook events are kept out of tool calls, sessions and latency.
+
 ### Changed
 
 - **Auto-recall keeps a past session among code hits.** The prompt and

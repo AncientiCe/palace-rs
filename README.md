@@ -557,7 +557,12 @@ palace gain - last 30d (my_project)
   Diary recalls      : 8
   Repeat Qs avoided  : 19
   p95 latency        : 41 ms
+  Prompt recall      : 230 prompts (96 with past sessions or decisions, 71 code only, 63 nothing found)
 ```
+
+`Prompt recall` counts what the prompt hook injected, apart from MCP tool
+calls. Many "code only" or "nothing found" prompts mean agents work without
+the earlier sessions in front of them.
 
 Usage metadata stays in your local `palace.db`. Set `PALACE_GAIN_DISABLED=1`
 to turn recording off.

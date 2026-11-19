@@ -127,6 +127,69 @@ fn tools_used_since(conn: &Connection, since: &str, tools: &[&str]) -> Result<bo
     Ok(found.is_some())
 }
 
+/// Usage-event tool name for what the prompt hook injected. It is not an MCP
+/// call, so `palace gain` keeps it out of tool calls and latency.
+pub const PROMPT_RECALL_TOOL: &str = "hook:prompt_recall";
+
+/// What the prompt hook injected for one substantive prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptRecall {
+    /// Recall included a recorded memory (diary, decision, remembered fact).
+    Memory,
+    /// Recall found only mined project files.
+    CodeOnly,
+    /// Recall found nothing.
+    Empty,
+}
+
+impl PromptRecall {
+    pub fn outcome(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::CodeOnly => "code_only",
+            Self::Empty => "empty",
+        }
+    }
+}
+
+/// Record what the prompt hook injected, keyed by the agent's session and
+/// the project folder. Best-effort, like every usage event.
+pub fn record_prompt_recall(
+    conn: &Connection,
+    session_id: &str,
+    cwd: &str,
+    recall: PromptRecall,
+    lines: usize,
+) -> Result<()> {
+    if telemetry_disabled() {
+        return Ok(());
+    }
+    let project = std::path::Path::new(cwd)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(resolve_project);
+    insert_event(
+        conn,
+        &UsageEvent {
+            ts: crate::clock::now_rfc3339(),
+            session_id: session_id.to_string(),
+            project,
+            tool: PROMPT_RECALL_TOOL.to_string(),
+            wing: None,
+            room: None,
+            query_hash: None,
+            result_count: lines as i64,
+            top_similarity: None,
+            bytes_returned: 0,
+            est_tokens_saved: 0,
+            duration_ms: 0,
+            outcome: recall.outcome().to_string(),
+            meta: json!({}),
+        },
+    )
+}
+
 pub fn insert_event(conn: &Connection, event: &UsageEvent) -> Result<()> {
     let meta = serde_json::to_string(&event.meta).unwrap_or_else(|_| "{}".to_string());
     conn.execute(
