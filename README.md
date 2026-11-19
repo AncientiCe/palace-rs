@@ -492,7 +492,7 @@ Run `palace <command> --help` for every flag.
 | `palace repair` | Re-embed drawers that are missing vectors |
 | `palace upgrade-embeddings` | Re-embed everything with the active model (`--refresh-preferences` for preference spans) |
 | `palace embeddings …` | List, estimate, migrate to, verify, cut over to, or roll back [embedding models](#embedding-models) |
-| `palace migrate <db>` | Copy drawers from another palace database |
+| `palace migrate [path]` | Import Python MemPalace (default `~/.mempalace`) or another palace database ([migrating](docs/migrating.md)) |
 | `palace compress` | Compress drawers to the AAAK dialect |
 
 **Servers**
@@ -1001,21 +1001,9 @@ it. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
 
 ## 🚚 Coming from another memory tool
 
-Palace does not import another tool's store. Many keep summaries,
-extracted "facts", or compressed text rather than what was actually said,
-and Palace keeps text verbatim. Mine the originals instead, and every drawer
-cites the file it came from:
-
-```bash
-palace init ~/my-project --yes --auto-mine   # your code and docs
-palace split --source ~/Desktop/transcripts  # only for concatenated Claude Code transcripts
-palace mine-convos ~/Desktop/transcripts     # Claude Code, Codex, Claude.ai, ChatGPT, Slack exports
-palace status
-```
-
-Once your history is in Palace, remove the old tool's MCP server and hooks
-from your agent so the two don't compete. `palace install` sets up Palace's
-own.
+Python MemPalace imports in one command, `palace migrate`: drawers, diaries,
+the knowledge graph and tunnels. For other tools, mine the originals. See
+[docs/migrating.md](docs/migrating.md).
 
 ---
 
