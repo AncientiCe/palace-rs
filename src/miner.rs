@@ -119,7 +119,7 @@ const MINE_BATCH_SIZE: usize = 200;
 
 pub static READABLE_EXTENSIONS: &[&str] = &[
     "txt", "md", "py", "js", "ts", "jsx", "tsx", "json", "yaml", "yml", "html", "css", "java",
-    "go", "rs", "rb", "sh", "csv", "sql", "toml",
+    "go", "rs", "rb", "sh", "csv", "sql", "toml", "php", "phtml", "phps", "phpt",
 ];
 
 pub static SKIP_FILENAMES: &[&str] = &[
