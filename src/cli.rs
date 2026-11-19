@@ -190,10 +190,13 @@ enum Commands {
         #[arg(long)]
         wing: Option<String>,
     },
-    /// Migrate drawers from another SQLite palace database
+    /// Migrate data from Python MemPalace or another palace database
+    ///
+    /// Reads a Python MemPalace install (drawers, diaries, knowledge graph,
+    /// tunnels) or a palace.db file. Safe to re-run: nothing is copied twice.
     Migrate {
-        /// Source palace.db path
-        source: PathBuf,
+        /// Python MemPalace directory or palace.db path [default: ~/.mempalace]
+        source: Option<PathBuf>,
     },
     /// Register the MCP server with local AI clients
     Install {
@@ -763,10 +766,17 @@ pub fn run() -> Result<()> {
         }
 
         Commands::Migrate { source } => {
+            let source = match source {
+                Some(path) => path,
+                None => directories::UserDirs::new()
+                    .map(|u| u.home_dir().join(".mempalace"))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("could not find the home directory; pass a source path")
+                    })?,
+            };
             let db_path = config.palace_db_path();
             let mut conn = crate::db::open(&db_path)?;
-            let migrated = crate::migrate::migrate_sqlite(&source, &mut conn)?;
-            println!("  Migrated {migrated} drawers.");
+            run_migrate(&source, &mut conn)?;
         }
 
         Commands::Install {
@@ -1406,4 +1416,60 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
         command
     };
     command.spawn().map(|_| ())
+}
+
+/// Import from a Python MemPalace install, or copy drawers from a palace.db.
+fn run_migrate(source: &std::path::Path, conn: &mut rusqlite::Connection) -> Result<()> {
+    use crate::mempalace_import::{DrawerStore, MempalaceLayout};
+
+    if let Some(layout) = MempalaceLayout::detect(source) {
+        println!("  Importing Python MemPalace data:");
+        match &layout.drawers {
+            Some(DrawerStore::Chroma(path)) => println!("    drawers    {}", path.display()),
+            Some(DrawerStore::SqliteExact(path)) => println!("    drawers    {}", path.display()),
+            None => println!("    drawers    (none found)"),
+        }
+        if let Some(path) = &layout.knowledge_graph {
+            println!("    graph      {}", path.display());
+        }
+        if let Some(path) = &layout.tunnels {
+            println!("    tunnels    {}", path.display());
+        }
+        if layout.drawers.is_some() {
+            println!("  Embedding drawers with the active model; large palaces take a while.");
+        }
+        let report = crate::mempalace_import::import(&layout, conn)?;
+        println!(
+            "  Imported {} drawers, {} diary entries, {} entities, {} facts, {} tunnels.",
+            report.drawers, report.diary_entries, report.entities, report.triples, report.tunnels
+        );
+        if report.drawers_skipped > 0 {
+            println!(
+                "  Skipped {} drawers that were empty or already present.",
+                report.drawers_skipped
+            );
+        }
+        return Ok(());
+    }
+
+    let candidates = if source.is_dir() {
+        vec![
+            source.join("palace.db"),
+            source.join("palace").join("palace.db"),
+        ]
+    } else {
+        vec![source.to_path_buf()]
+    };
+    let Some(palace_db) = candidates.into_iter().find(|path| path.is_file()) else {
+        anyhow::bail!(
+            "no Python MemPalace data or palace.db found at {}",
+            source.display()
+        );
+    };
+    let migrated = crate::migrate::migrate_sqlite(&palace_db, conn)?;
+    println!(
+        "  Migrated {migrated} drawers from {}.",
+        palace_db.display()
+    );
+    Ok(())
 }

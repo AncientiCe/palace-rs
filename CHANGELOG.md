@@ -6,6 +6,17 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Added
+
+- **`palace migrate` imports Python MemPalace.** With no argument it reads
+  `~/.mempalace`; it also takes the palace directory or a database file. It
+  copies drawers from ChromaDB (`chroma.sqlite3`) or the `sqlite_exact`
+  backend, keeping `filed_at`, importance and metadata, moves diary entries
+  into `wing_diary__<agent>`, and copies the knowledge graph (expired facts
+  included) and `tunnels.json`. Drawers are embedded again with the active
+  model, and re-running copies nothing twice. Python is not needed. The
+  README's migration section moved to `docs/migrating.md`.
+
 ### Fixed
 
 - **`palace gain` no longer files most desktop-app calls under `global`.**
