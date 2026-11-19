@@ -678,7 +678,7 @@ Settings load in this order: environment variables, then
 | `PALACE_ENTITY_LANGUAGES` | `en` | Comma-separated languages for entity detection |
 | `PALACE_GAIN_DISABLED` | off | `1` turns off usage recording |
 | `PALACE_FEEDBACK_DISABLED` | off | `1` stops the feedback-link hint in `palace_session_context` |
-| `PALACE_PROJECT` | auto | Project name used for gain attribution |
+| `PALACE_PROJECT` | auto | Project name used for gain attribution when a call names no `project_path` or project wing |
 | `PALACE_SOURCE_DIR` | `~/Desktop/transcripts` | Default source for `palace split` |
 | `PALACE_MINE_TRACE` | off | `1` prints per-stage mining timings |
 | `PALACE_BUSY_TIMEOUT_MS` | `10000` | How long to wait, in milliseconds, for another palace process that is writing to the database. `0` turns waiting off (fail at once); it does not mean "no limit" |

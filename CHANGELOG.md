@@ -6,6 +6,18 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`palace gain` no longer files most desktop-app calls under `global`.**
+  The Claude desktop app starts `palace mcp` in `/`, and a server started
+  from the home directory took the user name as its project, so their calls
+  showed up as `global` or as your user name. Each call is now attributed
+  from its own arguments first: an explicit `project_path`, else the folder
+  of the mined wing it filters on. The server's own project also checks
+  `CLAUDE_PROJECT_DIR`, and the home directory counts as no project. Calls
+  that name no project stay under `global`. Usage recorded before this
+  change keeps its old label.
+
 ## [0.20.4] - 2026-11-19
 
 ### Added

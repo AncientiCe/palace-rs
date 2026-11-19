@@ -164,11 +164,7 @@ pub fn record_prompt_recall(
     if telemetry_disabled() {
         return Ok(());
     }
-    let project = std::path::Path::new(cwd)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(resolve_project);
+    let project = project_from_path(cwd).unwrap_or_else(resolve_project);
     insert_event(
         conn,
         &UsageEvent {
@@ -232,7 +228,7 @@ fn classify_event(
     let mut event = UsageEvent {
         ts: crate::clock::now_rfc3339(),
         session_id: session.session_id.clone(),
-        project: session.project.clone(),
+        project: call_project(conn, args).unwrap_or_else(|| session.project.clone()),
         tool: tool.to_string(),
         wing: str_arg(args, "wing"),
         room: str_arg(args, "room"),
@@ -488,13 +484,53 @@ fn resolve_project() -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .or_else(|| {
-            std::env::current_dir().ok().and_then(|path| {
-                path.file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
+            std::env::var("CLAUDE_PROJECT_DIR")
+                .ok()
+                .and_then(|dir| project_from_path(&dir))
         })
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "global".to_string())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|dir| project_from_path(&dir.to_string_lossy()))
+        })
+        .unwrap_or_else(|| GLOBAL_PROJECT.to_string())
+}
+
+/// Project label for calls that belong to no project folder.
+const GLOBAL_PROJECT: &str = "global";
+
+/// The project a single tool call is about, from its own arguments: an
+/// explicit `project_path`, else the folder of the mined wing it filters on.
+/// A server started outside any project (the Claude desktop app starts it in
+/// `/`) still gets per-call attribution this way. `None` when the call names
+/// neither, so the caller falls back to the server's project.
+fn call_project(conn: &Connection, args: &Value) -> Option<String> {
+    if let Some(project) = str_arg(args, "project_path").and_then(|p| project_from_path(&p)) {
+        return Some(project);
+    }
+    let wing = str_arg(args, "wing")?;
+    let record = crate::store::get_wing(conn, &wing).ok()??;
+    if record.kind != "project" {
+        return None;
+    }
+    project_from_path(record.project_path.as_deref()?)
+}
+
+/// The folder name of a project path, or `None` for paths that are not a
+/// project: empty, the filesystem root, or the home directory.
+fn project_from_path(path: &str) -> Option<String> {
+    let path = path.trim().trim_end_matches(['/', '\\']);
+    if path.is_empty() {
+        return None;
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() && path == home.trim_end_matches('/') {
+        return None;
+    }
+    std::path::Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
 }
 
 fn telemetry_disabled() -> bool {

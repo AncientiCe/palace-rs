@@ -488,3 +488,37 @@ fn prompt_hook_recalls_are_counted_apart_from_tool_calls() {
         render_text(&report)
     );
 }
+
+#[test]
+fn calls_from_a_server_without_a_project_are_attributed_by_their_arguments() {
+    let conn = palace::db::open_in_memory().expect("open test db");
+    let config = palace::config::PalaceConfig::new();
+    palace::store::set_wing_mined(&conn, "associate_app", "/work/associate-app").unwrap();
+    // The Claude desktop app starts the server in `/`, so it has no project.
+    let session = UsageSession {
+        session_id: "session_desktop".to_string(),
+        project: "global".to_string(),
+    };
+    let call = |tool: &str, args: serde_json::Value| {
+        palace::mcp_server::dispatch_tool_with_usage(&conn, &config, &session, tool, &args);
+    };
+
+    call(
+        "palace_diary_write",
+        json!({ "agent_name": "claude", "entry": "checked the cart", "project_path": "/work/checkout" }),
+    );
+    call(
+        "palace_search",
+        json!({ "query": "offline order", "wing": "associate_app" }),
+    );
+    call("palace_search", json!({ "query": "offline order" }));
+
+    let projects: Vec<String> = conn
+        .prepare("SELECT project FROM usage_events ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(projects, ["checkout", "associate-app", "global"]);
+}
