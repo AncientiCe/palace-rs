@@ -6,6 +6,8 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.20.5] - 2026-11-20
+
 ### Added
 
 - **`palace migrate` imports Python MemPalace.** With no argument it reads
