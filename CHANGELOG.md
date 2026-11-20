@@ -19,6 +19,20 @@ This Rust implementation uses its own `0.x` version track.
 
 ### Fixed
 
+- **Keyword matches rank with their real cosine.** Search computes every
+  drawer's cosine, but kept only the closest `max(4 × results, 20)`. A
+  keyword match outside those drawers ranked as if its cosine were 0 and
+  lost most of its score. It now keeps its real cosine. The scan reads
+  drawer ids and vectors only and fetches text just for the closest
+  drawers, so a search holds less text than before. On a 12,497-drawer
+  palace, 200 known-item probes at 5 results moved from R@1/R@5 0.345/0.545
+  to 0.430/0.675, and median search time from 208 to 180 ms. The coding-agent
+  eval with vectors loses one near-tie (R@1 0.922 to 0.902); LongMemEval is
+  unchanged, since its runner already ranks every drawer.
+- **`RankOptions` has two new fields**, `vector_depth` (how many drawers join
+  the candidates by cosine; `None` keeps the default) and
+  `keyword_match_cosine` (on by default). Code that builds `RankOptions`
+  field by field needs `..RankOptions::default()`.
 - **`palace gain` no longer files most desktop-app calls under `global`.**
   The Claude desktop app starts `palace mcp` in `/`, and a server started
   from the home directory took the user name as its project, so their calls
