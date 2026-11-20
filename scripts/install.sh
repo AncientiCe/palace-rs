@@ -77,8 +77,12 @@ if [ -z "$binary" ]; then
   echo "Archive did not contain a palace binary" >&2
   exit 1
 fi
-cp "$binary" "$install_dir/palace"
-chmod +x "$install_dir/palace"
+# Copy next to the target, then rename over it. A running palace (an agent's
+# MCP server) keeps its old file: cp onto a running binary fails on Linux
+# ("Text file busy") and can crash it on macOS.
+cp "$binary" "$install_dir/palace.new.$$"
+chmod +x "$install_dir/palace.new.$$"
+mv -f "$install_dir/palace.new.$$" "$install_dir/palace"
 
 
 case ":$PATH:" in

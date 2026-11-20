@@ -14,6 +14,9 @@ This Rust implementation uses its own `0.x` version track.
   aside as `palace.old-<time>.exe` and copies the new one in; running agents
   keep the old version until they restart, and the next install deletes the
   moved-aside binaries nothing runs any more.
+- **`install.sh` replaces a running palace too.** It copied over the binary,
+  which fails on Linux ("Text file busy") and can crash a running palace on
+  macOS. It now copies next to it and renames over it.
 
 ## [0.20.5] - 2026-11-20
 
