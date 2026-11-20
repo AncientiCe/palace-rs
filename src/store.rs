@@ -714,6 +714,43 @@ pub fn vector_search_in(
     Ok(scored)
 }
 
+/// Cosine of `query_vec` with every drawer vector of `source` matching
+/// `filter`, best first. Reads drawer ids and vectors only, not their text.
+/// Vectors whose length differs from `query_vec` are skipped.
+pub fn vector_scores_in(
+    conn: &Connection,
+    query_vec: &[f32],
+    source: VectorSource,
+    filter: &DrawerFilter,
+) -> Result<Vec<(String, f64)>> {
+    let mut scored: Vec<(String, f64)> = if let VectorSource::Loaded(loaded) = source {
+        loaded
+            .rows
+            .iter()
+            .filter(|(_, vector)| vector.len() == query_vec.len())
+            .map(|(id, vector)| (id.clone(), cosine_similarity(query_vec, vector) as f64))
+            .collect()
+    } else {
+        let (sql, where_params) = vector_query(source, filter, "d.id");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(where_params.iter().map(|p| p.as_ref())),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
+        )?;
+        let mut scored = Vec::new();
+        for row in rows {
+            let (id, blob) = row?;
+            let vector = blob_to_vec(&blob);
+            if vector.len() == query_vec.len() {
+                scored.push((id, cosine_similarity(query_vec, &vector) as f64));
+            }
+        }
+        scored
+    };
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(scored)
+}
+
 /// Rank in-memory vectors, then read only the top drawers from SQLite.
 fn search_loaded(
     conn: &Connection,

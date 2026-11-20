@@ -1007,3 +1007,34 @@ fn reembed_drawers_fills_vectors_in_batched_transactions() {
         "71 drawers should commit in two batches"
     );
 }
+
+#[test]
+fn vector_scores_cover_every_drawer_best_first_without_reading_text() {
+    use palace::store::{vector_scores_in, VectorSource};
+    let conn = db::open_in_memory().expect("db should open");
+    let query = vec![1.0f32, 0.0, 0.0];
+    for (source, vector) in [
+        ("far.txt", vec![0.0f32, 1.0, 0.0]),
+        ("near.txt", vec![1.0f32, 0.1, 0.0]),
+        ("other_model.txt", vec![1.0f32, 0.0]),
+    ] {
+        add_drawer(
+            &conn,
+            "w",
+            "r",
+            source,
+            Some(&vector),
+            source,
+            0,
+            "test",
+            3.0,
+        )
+        .unwrap();
+    }
+
+    let scores = vector_scores_in(&conn, &query, VectorSource::Hot, &DrawerFilter::default())
+        .expect("vector scores");
+
+    assert_eq!(scores.len(), 2, "vectors of another length are skipped");
+    assert!(scores[0].1 > 0.99 && scores[1].1.abs() < 1e-6);
+}
