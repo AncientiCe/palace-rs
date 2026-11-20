@@ -74,6 +74,12 @@ pub struct RankOptions {
     /// What a drawer keeps of its score for each higher-ranked drawer from
     /// the same source; 1 lets one source fill the results.
     pub source_decay: f64,
+    /// How many of the closest drawers by cosine join the candidates; `None`
+    /// takes four times the results asked for, at least 20.
+    pub vector_depth: Option<usize>,
+    /// Give keyword matches outside those drawers their real cosine instead
+    /// of 0. Every drawer's cosine is computed anyway; this keeps it.
+    pub keyword_match_cosine: bool,
 }
 
 impl Default for RankOptions {
@@ -83,6 +89,8 @@ impl Default for RankOptions {
             source_weight: SOURCE_WEIGHT,
             mined_discount: MINED_DISCOUNT,
             source_decay: SOURCE_DECAY,
+            vector_depth: None,
+            keyword_match_cosine: false,
         }
     }
 }
@@ -170,15 +178,36 @@ pub fn hybrid_search_with(
         &sanitized_query
     };
     let mut by_id: HashMap<String, HybridResult> = HashMap::new();
+    // Every drawer's cosine, kept only for `keyword_match_cosine`.
+    let mut cosines: HashMap<String, f64> = HashMap::new();
 
     if let Some(vec) = query_vec {
-        for result in vector_search_in(
-            conn,
-            vec,
-            source,
-            filter,
-            n_results.saturating_mul(4).max(20),
-        )? {
+        let depth = options
+            .vector_depth
+            .unwrap_or_else(|| n_results.saturating_mul(4).max(20));
+        let closest = if options.keyword_match_cosine {
+            let scores = crate::store::vector_scores_in(conn, vec, source, filter)?;
+            let mut closest = Vec::new();
+            for (id, sim) in scores.iter().take(depth) {
+                if let Some(drawer) = get_drawer(conn, id)? {
+                    closest.push(SearchResult {
+                        id: drawer.id,
+                        text: drawer.content,
+                        wing: drawer.wing,
+                        room: drawer.room,
+                        source_file: drawer.source_file,
+                        created_at: drawer.created_at,
+                        filed_at: drawer.filed_at,
+                        similarity: round_similarity(*sim),
+                    });
+                }
+            }
+            cosines = scores.into_iter().collect();
+            closest
+        } else {
+            vector_search_in(conn, vec, source, filter, depth)?
+        };
+        for result in closest {
             by_id.insert(
                 result.id.clone(),
                 HybridResult {
@@ -202,6 +231,11 @@ pub fn hybrid_search_with(
         if let Some(existing) = by_id.get_mut(&drawer_id) {
             existing.bm25 = score;
         } else if let Some(drawer) = get_drawer(conn, &drawer_id)? {
+            let similarity = cosines
+                .get(&drawer_id)
+                .copied()
+                .map(round_similarity)
+                .unwrap_or(0.0);
             by_id.insert(
                 drawer_id,
                 HybridResult {
@@ -213,7 +247,7 @@ pub fn hybrid_search_with(
                         source_file: drawer.source_file,
                         created_at: drawer.created_at,
                         filed_at: drawer.filed_at,
-                        similarity: 0.0,
+                        similarity,
                     },
                     cosine: 0.0,
                     bm25: score,
@@ -280,6 +314,11 @@ pub fn hybrid_search_with(
     }
     results.truncate(n_results);
     Ok(results)
+}
+
+/// Cosine rounded the way vector search reports it.
+fn round_similarity(sim: f64) -> f64 {
+    (sim * 1000.0).round() / 1000.0
 }
 
 /// True when `source_file` is a project file the miner read: one it recorded,

@@ -593,3 +593,97 @@ fn code_lookups_rank_filed_and_mined_drawers_alike() {
         );
     }
 }
+
+/// A palace where 25 keyword-free drawers sit next to the query vector and
+/// fill the vector pool, and one keyword drawer has a real but lower cosine.
+fn crowded_vector_pool() -> (rusqlite::Connection, Vec<f32>) {
+    let conn = db::open_in_memory().expect("db should open");
+    let query_vec: Vec<f32> = (0..384).map(|i| (i as f32).sin()).collect();
+    for j in 0..25 {
+        let near: Vec<f32> = (0..384)
+            .map(|i| (i as f32).sin() + 0.1 * ((i * (j + 2)) as f32).cos())
+            .collect();
+        let text = format!("filler note number {j}");
+        let source = format!("near{j}.txt");
+        add_drawer(&conn, "w", "r", &text, Some(&near), &source, 0, "test", 3.0).unwrap();
+    }
+    let mixed: Vec<f32> = (0..384)
+        .map(|i| (i as f32).sin() + (i as f32).cos())
+        .collect();
+    add_drawer(
+        &conn,
+        "w",
+        "r",
+        "zebrafish tank cleaning schedule",
+        Some(&mixed),
+        "keyword.txt",
+        0,
+        "test",
+        3.0,
+    )
+    .unwrap();
+    (conn, query_vec)
+}
+
+#[test]
+fn keyword_match_outside_the_vector_pool_keeps_its_real_cosine() {
+    let (conn, query_vec) = crowded_vector_pool();
+    let results = hybrid_search_with(
+        &conn,
+        "zebrafish",
+        Some(&query_vec),
+        VectorSource::Hot,
+        palace::embedder::active_model(),
+        &DrawerFilter::default(),
+        5,
+        &RankOptions {
+            keyword_match_cosine: true,
+            ..RankOptions::default()
+        },
+    )
+    .expect("hybrid search should work");
+
+    assert_eq!(results[0].drawer.source_file, "keyword.txt");
+    assert!(
+        results[0].cosine > 0.5,
+        "keyword drawer cosine {} should be its real one",
+        results[0].cosine
+    );
+}
+
+#[test]
+fn vector_depth_sets_how_many_drawers_the_vector_side_brings() {
+    let (conn, query_vec) = crowded_vector_pool();
+    let search = |vector_depth: Option<usize>| {
+        hybrid_search_with(
+            &conn,
+            "zebrafish",
+            Some(&query_vec),
+            VectorSource::Hot,
+            palace::embedder::active_model(),
+            &DrawerFilter::default(),
+            100,
+            &RankOptions {
+                vector_depth,
+                ..RankOptions::default()
+            },
+        )
+        .expect("hybrid search should work")
+    };
+    let keyword_cosine = |results: &[palace::ranker::HybridResult]| {
+        results
+            .iter()
+            .find(|r| r.drawer.source_file == "keyword.txt")
+            .map(|r| r.cosine)
+            .expect("keyword drawer is in the results")
+    };
+
+    assert_eq!(
+        search(Some(3)).len(),
+        4,
+        "3 vector drawers + 1 keyword drawer"
+    );
+    assert_eq!(keyword_cosine(&search(Some(3))), 0.0);
+    assert_eq!(search(Some(usize::MAX)).len(), 26);
+    assert!(keyword_cosine(&search(Some(usize::MAX))) > 0.5);
+}
