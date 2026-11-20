@@ -17,6 +17,9 @@ This Rust implementation uses its own `0.x` version track.
 - **`install.sh` replaces a running palace too.** It copied over the binary,
   which fails on Linux ("Text file busy") and can crash a running palace on
   macOS. It now copies next to it and renames over it.
+- **`PALACE_VERSION` takes `0.20.5` as well as `v0.20.5`.** Both installers
+  built the download URL from the value as given, so a version without the
+  `v` of the release tag got a 404.
 
 ## [0.20.5] - 2026-11-20
 

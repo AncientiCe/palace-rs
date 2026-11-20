@@ -57,7 +57,11 @@ if [ "$version_override" = "local" ]; then
   archive="$local_archive"
 else
   if [ -n "$version_override" ]; then
-    tag="$version_override"
+    # Release tags start with "v"; accept "0.20.5" as well as "v0.20.5".
+    case "$version_override" in
+      v*) tag="$version_override" ;;
+      *) tag="v$version_override" ;;
+    esac
   else
     tag="$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)"
   fi

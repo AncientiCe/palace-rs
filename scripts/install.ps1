@@ -61,7 +61,8 @@ try {
         $Archive = $LocalArchive
     } else {
         if ($VersionOverride) {
-            $Tag = $VersionOverride
+            # Release tags start with "v"; accept "0.20.5" as well as "v0.20.5".
+            $Tag = if ($VersionOverride.StartsWith("v")) { $VersionOverride } else { "v$VersionOverride" }
         } else {
             $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
             $Tag = $Release.tag_name
