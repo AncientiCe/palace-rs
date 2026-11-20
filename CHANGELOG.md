@@ -6,6 +6,15 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Windows installer replaces a palace that is running.** Agents keep
+  `palace mcp` running, and Windows locks a running `palace.exe`, so
+  `install.ps1` failed to copy the new one. It now moves the running binary
+  aside as `palace.old-<time>.exe` and copies the new one in; running agents
+  keep the old version until they restart, and the next install deletes the
+  moved-aside binaries nothing runs any more.
+
 ## [0.20.5] - 2026-11-20
 
 ### Added

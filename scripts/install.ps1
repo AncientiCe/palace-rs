@@ -22,6 +22,32 @@ function Get-Target {
     }
 }
 
+function Install-Binary {
+    param([string]$Source, [string]$Dest)
+    $Dir = Split-Path $Dest
+    # Binaries moved aside by earlier installs: remove the ones nothing runs any more.
+    Get-ChildItem -Path $Dir -Filter "palace.old-*.exe" -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+    try {
+        Copy-Item $Source $Dest -Force
+        return
+    } catch {
+        if (-not (Test-Path $Dest)) { throw }
+    }
+    # A running palace (an agent's MCP server or hook) locks palace.exe against
+    # writes, but Windows still allows renaming it: move it aside, copy the new one.
+    $Aside = Join-Path $Dir ("palace.old-" + (Get-Date -Format "yyyyMMddHHmmss") + ".exe")
+    Move-Item $Dest $Aside -Force
+    try {
+        Copy-Item $Source $Dest -Force
+    } catch {
+        Move-Item $Aside $Dest -Force
+        throw
+    }
+    Write-Host "palace.exe was in use; the old one is now $(Split-Path $Aside -Leaf) and is deleted by the next install."
+    Write-Host "Restart running agents to load the new version."
+}
+
 try {
     $Target = Get-Target
 
@@ -60,7 +86,7 @@ try {
     if (-not $Binary) {
         throw "Archive did not contain palace.exe"
     }
-    Copy-Item $Binary.FullName (Join-Path $InstallDir "palace.exe") -Force
+    Install-Binary $Binary.FullName (Join-Path $InstallDir "palace.exe")
 
 
     # Add the install dir to the *user* PATH in the registry (never use `setx PATH "...;%PATH%"`:
