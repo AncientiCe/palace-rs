@@ -665,6 +665,7 @@ fn vector_depth_sets_how_many_drawers_the_vector_side_brings() {
             100,
             &RankOptions {
                 vector_depth,
+                keyword_match_cosine: false,
                 ..RankOptions::default()
             },
         )
@@ -683,7 +684,11 @@ fn vector_depth_sets_how_many_drawers_the_vector_side_brings() {
         4,
         "3 vector drawers + 1 keyword drawer"
     );
-    assert_eq!(keyword_cosine(&search(Some(3))), 0.0);
+    assert_eq!(
+        keyword_cosine(&search(Some(3))),
+        0.0,
+        "without keyword_match_cosine, only the vector drawers carry a cosine"
+    );
     assert_eq!(search(Some(usize::MAX)).len(), 26);
     assert!(keyword_cosine(&search(Some(usize::MAX))) > 0.5);
 }

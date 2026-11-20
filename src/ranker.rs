@@ -90,7 +90,7 @@ impl Default for RankOptions {
             mined_discount: MINED_DISCOUNT,
             source_decay: SOURCE_DECAY,
             vector_depth: None,
-            keyword_match_cosine: false,
+            keyword_match_cosine: true,
         }
     }
 }
