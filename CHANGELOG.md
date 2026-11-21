@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `palace-rs` (formerly `mempalace-rs`) are documented here.
+All notable changes to `palace-rs` are documented here.
 
 This Rust implementation uses its own `0.x` version track.
 
