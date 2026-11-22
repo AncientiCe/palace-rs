@@ -6,6 +6,15 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.20.6] - 2026-11-22
+
+### Security
+
+- **`url` 2.5.9 ([RUSTSEC-2026-0592]).** `url` 2.5.8 overflows the stack in
+  `Url::origin()` on nested `blob:` URLs.
+
+[RUSTSEC-2026-0592]: https://rustsec.org/advisories/RUSTSEC-2026-0592
+
 ### Fixed
 
 - **The Windows installer replaces a palace that is running.** Agents keep
