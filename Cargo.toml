@@ -40,12 +40,12 @@ clap = { version = "4", features = ["derive"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_norway = "0.9"
-toml_edit = "0.22"
+toml_edit = "0.25"
 
 # Database — bundled SQLite, no system dep
 # `hooks` unlocks Connection::commit_hook, used in tests to assert that mining
 # batches writes into a small number of transactions instead of one per row.
-rusqlite = { version = "0.41", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.43", features = ["bundled", "hooks"] }
 
 # Embeddings — ONNX Runtime, all-MiniLM-L6-v2, lazy init
 ort = { version = "=2.0.0-rc.11", default-features = false, features = ["ndarray", "std", "download-binaries", "tls-native"] }
@@ -61,13 +61,13 @@ thiserror = "2"
 ignore = "0.4"
 
 # Date/time
-jiff = "0.2"
+jiff = "1.0"
 
 # Hashing for deterministic IDs
 blake3 = "1"
 
 # Cross-platform config/data dirs (~/.palace)
-directories = "5"
+directories = "6"
 
 # Regex for general_extractor
 regex = "1"
@@ -81,7 +81,7 @@ rayon = "1"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 
 # HTTP client for remote MCP proxy mode (native-tls to match ort/hf-hub TLS stack)
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "native-tls"] }
 
 [dev-dependencies]
 tempfile = "3"
