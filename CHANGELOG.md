@@ -6,6 +6,8 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.20.7] - 2026-11-22
+
 ### Changed
 
 - **Clearer MCP tool descriptions.** 21 tools (the knowledge-graph, tunnel and
@@ -14,6 +16,9 @@ This Rust implementation uses its own `0.x` version track.
   `palace_list_agents`, `palace_hook_settings` and
   `palace_memories_filed_away`) now say when to use them instead of their
   neighbours, what they return or change, and what each parameter means.
+- **Dependencies updated.** `jiff` 1.0, `rusqlite` 0.43, `reqwest` 0.13,
+  `toml_edit` 0.25 and `directories` 6, plus routine patch updates. No
+  behaviour change.
 
 ## [0.20.6] - 2026-11-22
 
