@@ -6,6 +6,31 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.20.8] - 2026-11-22
+
+### Fixed
+
+- **Standing rules now reach Claude Code at session start.** Claude Code saves
+  hook output over 10,000 characters to a file and injects only a short
+  preview, so with a larger `general/preferences` room the standing rules
+  never reached the agent. Session-start context now stays under 9,000 bytes:
+  each rule is shortened to 300 characters (read the full text with
+  `palace_get_drawer`), at most 20 rules are injected (rules filed with
+  `palace_remember` no longer bypass the cap), the protocol drops to a short
+  form when space is tight, and a closing line counts any rules left out and
+  points at `palace_preference_search`.
+- **Rules for other projects stay out.** A standing rule whose opening names
+  another registered project wing (for example `PREFERENCE (angel-arena, …)`)
+  is no longer injected in other repositories. Rules marked for all projects
+  are always kept.
+- **Session-start recall works for renamed wings and differently written
+  paths.** Recall looked up the wing from the folder name instead of the
+  registered wing, and matched diary project paths as exact strings, so a
+  diary recorded as `D:\Dev\x` never matched the canonical `\\?\D:\Dev\x`.
+  Paths are now compared ignoring the verbatim prefix, slash direction,
+  trailing slashes and (on Windows) case. This also fixes the project filter
+  in `palace_diary_search` and `palace_session_context`.
+
 ## [0.20.7] - 2026-11-22
 
 ### Changed
