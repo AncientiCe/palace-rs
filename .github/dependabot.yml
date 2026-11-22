@@ -5,10 +5,12 @@ updates:
     schedule:
       interval: weekly
     # One PR a week for routine bumps; security fixes still come as their own
-    # PRs as soon as an advisory lands.
+    # PRs as soon as an advisory lands. Major bumps stay out of the group so a
+    # breaking crate gets its own PR and can't hold the routine ones back.
     groups:
       cargo:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
     ignore:
       # Pinned to an exact release candidate on purpose; bump it by hand.
       - dependency-name: ort
