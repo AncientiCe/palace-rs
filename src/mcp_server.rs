@@ -2225,23 +2225,23 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_gain",
-            "description": "Show local MCP usage gains: hits, estimated tokens saved, skipped duplicates, recall, latency, and per-project value.",
+            "description": "Report how much value Palace's MCP tools have delivered, from a local usage log: hits, estimated tokens saved, skipped duplicates, recall rate, latency, and per-project totals. Use it when the user asks whether Palace is paying off; for database or model health use palace_verify instead. Read-only by default. Three options change it: history=true returns raw recent events instead of the summary; record={...} stores feedback on one search hit (a write); reset=true permanently deletes usage events (for one project, or all projects when project is omitted), so only reset when the user asks.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": {"type": "string", "description": "Project to filter by (optional)"},
-                    "since": {"type": "string", "description": "Window like 7d, 24h, 30d, or all (default: 30d)"},
-                    "history": {"type": "boolean", "description": "Return recent usage events instead of summary"},
-                    "limit": {"type": "integer", "description": "History limit (default: 20)"},
-                    "reset": {"type": "boolean", "description": "Delete usage events for the project, or all projects if omitted"},
+                    "project": {"type": "string", "description": "Project to filter by (optional; default is every project)"},
+                    "since": {"type": "string", "description": "Time window like 7d, 24h, 30d, or all (default: 30d)"},
+                    "history": {"type": "boolean", "description": "Return the most recent usage events instead of the summary"},
+                    "limit": {"type": "integer", "description": "Number of events when history=true (default: 20)"},
+                    "reset": {"type": "boolean", "description": "Irreversibly delete usage events for `project`, or for all projects if `project` is omitted"},
                     "record": {
                         "type": "object",
-                        "description": "Optional explicit feedback record. When omitted, palace_gain returns the normal read-only summary.",
+                        "description": "Feedback on one search result. When omitted, palace_gain returns the normal read-only summary.",
                         "properties": {
-                            "query_id": {"type": "string"},
-                            "drawer_id": {"type": "string"},
-                            "verdict": {"type": "string", "enum": ["useful", "not_useful", "wrong_answer"]},
-                            "note": {"type": "string"}
+                            "query_id": {"type": "string", "description": "The query_id returned by the palace_search call being rated"},
+                            "drawer_id": {"type": "string", "description": "The id of the result drawer being rated"},
+                            "verdict": {"type": "string", "enum": ["useful", "not_useful", "wrong_answer"], "description": "Whether the result helped"},
+                            "note": {"type": "string", "description": "Optional free-text reason"}
                         },
                         "required": ["query_id", "drawer_id", "verdict"]
                     }
@@ -2255,19 +2255,20 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_recall_check",
-            "description": "Run project-memory probes and report whether expected memories are retrievable.",
+            "description": "Test whether known memories can actually be found. For each probe it runs the same hybrid search as palace_search and checks whether a drawer whose source_file equals expected_source appears in the top `limit` results. Returns ok (all passed), passed/failed counts, and per-probe rank, top source and top similarity. Read-only. Use it after mining or switching embedding models to confirm recall; to simply look something up use palace_search.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "checks": {
                         "type": "array",
+                        "description": "Probes to run; at least one is required",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "query": {"type": "string"},
-                                "expected_source": {"type": "string"},
-                                "wing": {"type": "string"},
-                                "room": {"type": "string"}
+                                "query": {"type": "string", "description": "Search text for this probe"},
+                                "expected_source": {"type": "string", "description": "Exact source_file the matching drawer must have to pass"},
+                                "wing": {"type": "string", "description": "Restrict the probe to this wing (optional)"},
+                                "room": {"type": "string", "description": "Restrict the probe to this room (optional)"}
                             },
                             "required": ["query", "expected_source"]
                         }
@@ -2279,11 +2280,11 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_conflicts",
-            "description": "Surface likely stale or contradictory knowledge graph facts.",
+            "description": "Find knowledge-graph facts that may be stale or contradictory: groups of facts with the same subject and predicate but different objects (for example two different values for 'project uses_database'). Each conflict lists the triples with their valid_from/valid_to dates and whether each is still current. Read-only. Use it to audit the graph; resolve a real conflict with palace_kg_invalidate on the outdated fact. For one entity's facts without conflict detection use palace_kg_query.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "Entity to inspect (optional)"}
+                    "entity": {"type": "string", "description": "Only check facts where this entity is the subject or object (optional; default is the whole graph)"}
                 }
             }
         },
@@ -2420,13 +2421,13 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_kg_query",
-            "description": "Query the knowledge graph for an entity's relationships.",
+            "description": "Look up stable facts about one entity in the knowledge graph (subject → predicate → object triples added with palace_kg_add). Returns every matching fact with its direction, valid_from/valid_to dates, confidence, and whether it is still current. Read-only. Use it for durable facts such as 'which database does project X use'; use palace_search for free-text memories and palace_kg_timeline for a chronological history.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "Entity to query"},
-                    "as_of": {"type": "string", "description": "Date filter (YYYY-MM-DD, optional)"},
-                    "direction": {"type": "string", "description": "outgoing/incoming/both (default: both)"}
+                    "entity": {"type": "string", "description": "Entity name to look up, e.g. a project, person or tool (matched case-insensitively)"},
+                    "as_of": {"type": "string", "description": "Only return facts that were valid on this date, YYYY-MM-DD (optional; default returns current and ended facts)"},
+                    "direction": {"type": "string", "enum": ["outgoing", "incoming", "both"], "description": "outgoing = facts where the entity is the subject, incoming = where it is the object (default: both)"}
                 },
                 "required": ["entity"]
             }
@@ -2448,114 +2449,114 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_kg_invalidate",
-            "description": "Mark a fact as no longer true.",
+            "description": "Mark a knowledge-graph fact as no longer true by setting its end date. The fact is kept as history (palace_kg_timeline and as_of queries still see it), not deleted. Only a currently open fact with exactly this subject, predicate and object is changed; if none matches, nothing changes. When a fact changes, call this on the old fact first and then palace_kg_add for the new one.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "subject": {"type": "string"},
-                    "predicate": {"type": "string"},
-                    "object": {"type": "string"},
-                    "ended": {"type": "string", "description": "YYYY-MM-DD (default: today)"}
+                    "subject": {"type": "string", "description": "Subject of the fact to end, as it was added"},
+                    "predicate": {"type": "string", "description": "Predicate of the fact to end, e.g. uses_database"},
+                    "object": {"type": "string", "description": "Object of the fact to end"},
+                    "ended": {"type": "string", "description": "Date the fact stopped being true, YYYY-MM-DD (default: today)"}
                 },
                 "required": ["subject", "predicate", "object"]
             }
         },
         {
             "name": "palace_kg_timeline",
-            "description": "Chronological timeline of facts, optionally for one entity.",
+            "description": "List knowledge-graph facts in chronological order of valid_from (up to 100), including facts that have since been invalidated, so you can see how something changed over time. Read-only. Use it for 'what happened when' questions; use palace_kg_query for an entity's facts on a given date, and palace_diary_search for session history.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "Entity to filter by (optional)"}
+                    "entity": {"type": "string", "description": "Only include facts where this entity is the subject or object (optional; default is every fact)"}
                 }
             }
         },
         {
             "name": "palace_kg_stats",
-            "description": "Knowledge graph overview: entities, triples, relationship types.",
+            "description": "Return summary counts for the knowledge graph: number of entities, total triples, current versus ended facts, and the relationship types (predicates) in use. Read-only, no arguments. Use it to see whether the graph is populated or which predicates exist before calling palace_kg_query; for the drawer store use palace_status, and for the room graph use palace_graph_stats.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
             "name": "palace_seed_adoption_facts",
-            "description": "Seed durable KG facts for the current project and four supported Palace clients.",
+            "description": "Write Palace's standard setup facts into the knowledge graph: the supported clients (Cursor, Codex, Claude Code, Claude Desktop), the memory protocol steps, and the memory routing rules, linked to the given project. Safe to re-run: facts that already exist are left unchanged and outdated ones are invalidated, and the result reports inserted, unchanged and invalidated counts. Use it once when adopting Palace in a project; for your own facts use palace_kg_add.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": {"type": "string", "description": "Project/entity name to seed facts for"}
+                    "project": {"type": "string", "description": "Project or entity name the facts are linked to (default: 'current project')"}
                 }
             }
         },
         {
             "name": "palace_traverse",
-            "description": "Walk the palace graph from a room. Find connected ideas across wings.",
+            "description": "Explore related topics by walking outward from a room. Two rooms are connected when they share a wing; the walk goes breadth-first up to max_hops and returns up to 50 rooms with their wings, halls, drawer count, hop distance, and the wings they connect through. If the room does not exist it returns close name suggestions. Read-only. Use it to discover related areas; to find content use palace_search, and for explicit links you created use palace_follow_tunnels.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "start_room": {"type": "string", "description": "Room to start from"},
-                    "max_hops": {"type": "integer", "description": "How many connections to follow (default: 2)"}
+                    "start_room": {"type": "string", "description": "Exact room name to start from (see palace_list_rooms)"},
+                    "max_hops": {"type": "integer", "description": "How many connection steps to follow (default: 2)"}
                 },
                 "required": ["start_room"]
             }
         },
         {
             "name": "palace_find_tunnels",
-            "description": "Find rooms that bridge two wings.",
+            "description": "Find rooms that appear in more than one wing, i.e. shared topics that bridge projects (for example a 'testing' room in two repos). These bridges are computed from drawer placement, unlike the stored links made by palace_create_tunnel. Returns up to 50 rooms, most drawers first, with their wings, halls, drawer count and most recent date. Read-only. Use it to spot cross-project knowledge.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "wing_a": {"type": "string"},
-                    "wing_b": {"type": "string"}
+                    "wing_a": {"type": "string", "description": "Only rooms that include this wing (optional)"},
+                    "wing_b": {"type": "string", "description": "Only rooms that also include this second wing (optional)"}
                 }
             }
         },
         {
             "name": "palace_graph_stats",
-            "description": "Palace graph overview: total rooms, tunnel connections, edges between wings.",
+            "description": "Return summary statistics for the room graph: total rooms, how many rooms bridge two or more wings, rooms per wing, and the top bridging rooms. Read-only, no arguments. Use it for a quick map of how projects overlap before calling palace_find_tunnels or palace_traverse; for knowledge-graph counts use palace_kg_stats.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
             "name": "palace_create_tunnel",
-            "description": "Create a persisted tunnel between two wing/room pairs.",
+            "description": "Store an explicit link (tunnel) between a room in one wing and a room in another, so palace_follow_tunnels can jump between related areas, e.g. an API repo's 'auth' room and a frontend repo's 'login' room. Wing names are normalised to slugs. The tunnel id is derived from its endpoints and kind, so creating the same tunnel twice is a no-op that returns the same id. Use it when the user points out a relationship palace_find_tunnels cannot infer.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "wing_a": {"type": "string"},
-                    "room_a": {"type": "string"},
-                    "wing_b": {"type": "string"},
-                    "room_b": {"type": "string"},
-                    "kind": {"type": "string"}
+                    "wing_a": {"type": "string", "description": "Wing of the first endpoint"},
+                    "room_a": {"type": "string", "description": "Room of the first endpoint"},
+                    "wing_b": {"type": "string", "description": "Wing of the second endpoint"},
+                    "room_b": {"type": "string", "description": "Room of the second endpoint"},
+                    "kind": {"type": "string", "description": "Free-form label for the relationship, e.g. depends_on (default: explicit)"}
                 },
                 "required": ["wing_a", "room_a", "wing_b", "room_b"]
             }
         },
         {
             "name": "palace_list_tunnels",
-            "description": "List persisted tunnels.",
+            "description": "List the explicit tunnels stored with palace_create_tunnel, newest first, with their ids, both wing/room endpoints, kind and creation time. Read-only. Use it to review links or find a tunnel_id for palace_delete_tunnel; to see the tunnels at one specific room use palace_follow_tunnels.",
             "inputSchema": {"type": "object", "properties": {
-                "wing": {"type": "string"},
-                "kind": {"type": "string"}
+                "wing": {"type": "string", "description": "Only tunnels with an endpoint in this wing (optional)"},
+                "kind": {"type": "string", "description": "Only tunnels with this kind label (optional)"}
             }}
         },
         {
             "name": "palace_delete_tunnel",
-            "description": "Delete a persisted tunnel.",
+            "description": "Permanently delete one explicit tunnel by id. Only the link is removed; the rooms and their drawers are untouched. Returns success=false if no tunnel had that id. Get ids from palace_list_tunnels or palace_follow_tunnels. Use only when the link is wrong or the user asks.",
             "inputSchema": {"type": "object", "properties": {
-                "tunnel_id": {"type": "string"}
+                "tunnel_id": {"type": "string", "description": "Id of the tunnel to delete"}
             }, "required": ["tunnel_id"]}
         },
         {
             "name": "palace_follow_tunnels",
-            "description": "Follow persisted tunnels from a wing/room pair.",
+            "description": "List the explicit tunnels that touch one room in one wing, in either direction, so you can jump to the linked rooms elsewhere (then search or list drawers there). Read-only; returns each tunnel's id, endpoints, kind and creation time. Only stored tunnels from palace_create_tunnel are followed; for rooms related by shared wings use palace_traverse.",
             "inputSchema": {"type": "object", "properties": {
-                "wing": {"type": "string"},
-                "room": {"type": "string"}
+                "wing": {"type": "string", "description": "Wing of the room to start from"},
+                "room": {"type": "string", "description": "Room to start from"}
             }, "required": ["wing", "room"]}
         },
         {
             "name": "palace_get_drawer",
-            "description": "Get a drawer by ID.",
+            "description": "Fetch one drawer (a stored memory chunk) by its id, with its full content, wing, room, hall, source file, importance, timestamps and metadata. Read-only; returns an error if the id does not exist. Use it to read the whole drawer behind a search hit or citation; use palace_explain for provenance only and palace_search when you do not know the id.",
             "inputSchema": {"type": "object", "properties": {
-                "drawer_id": {"type": "string"}
+                "drawer_id": {"type": "string", "description": "Drawer id, as returned by palace_search or palace_list_drawers"}
             }, "required": ["drawer_id"]}
         },
         {
@@ -2570,25 +2571,25 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_update_drawer",
-            "description": "Update drawer content and refresh metadata.",
+            "description": "Replace a drawer's content in place, keeping its id, wing, room and source. The old text is overwritten (no history kept), and the embedding, hall, detected entities and preference data are recomputed so search reflects the new text. Returns success=false if the id does not exist. Use it to correct a memory without changing its id; to add a new memory use palace_add_drawer, and to remove one use palace_forget.",
             "inputSchema": {"type": "object", "properties": {
-                "drawer_id": {"type": "string"},
-                "content": {"type": "string"}
+                "drawer_id": {"type": "string", "description": "Id of the drawer to overwrite"},
+                "content": {"type": "string", "description": "New full content; replaces the existing text entirely"}
             }, "required": ["drawer_id", "content"]}
         },
         {
             "name": "palace_hook_settings",
-            "description": "Return hook settings.",
+            "description": "Report whether Palace's automatic client hooks are enabled: save_enabled (periodic memory saves during a session) and precompact_enabled (saving before the client compacts context). Read-only, no arguments, and both are currently always true. Use it only to check hook behaviour; hooks themselves are installed with the palace CLI, not through MCP.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
             "name": "palace_memories_filed_away",
-            "description": "Acknowledge that memories have been filed.",
+            "description": "Signal that you have finished filing memories after a save prompt from a Palace hook. It stores nothing and always returns success=true; call it after palace_diary_write / palace_add_drawer when a hook asked you to save, so the hook knows the save step is done. No arguments, no side effects.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
             "name": "palace_list_agents",
-            "description": "List agent diary wings.",
+            "description": "List the agent names that have a diary in this palace (for example claude-code, codex, cursor). Read-only, no arguments. Use it to find which agent_name to pass to palace_diary_read, or to see who else has worked here before searching all diaries with palace_diary_search all_agents=true.",
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
@@ -2609,12 +2610,12 @@ fn tool_list() -> Value {
         },
         {
             "name": "palace_diary_read",
-            "description": "Read your recent diary entries.",
+            "description": "Read an agent's most recent diary entries, newest first, with date, topic, session id, tags and text. Read-only. Use it to review what an agent did lately in order; use palace_diary_search to find entries about a subject, and palace_session_context for warm-start context at session start.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "agent_name": {"type": "string", "description": "Your agent name (required)"},
-                    "last_n": {"type": "integer", "description": "Number of recent entries (default: 10)"}
+                    "agent_name": {"type": "string", "description": "Agent whose diary to read, usually your own name (see palace_list_agents)"},
+                    "last_n": {"type": "integer", "description": "Number of most recent entries to return (default: 10)"}
                 },
                 "required": ["agent_name"]
             }
