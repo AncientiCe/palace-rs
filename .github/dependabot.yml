@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    # One PR a week for routine bumps; security fixes still come as their own
+    # PRs as soon as an advisory lands.
+    groups:
+      cargo:
+        patterns: ["*"]
+    ignore:
+      # Pinned to an exact release candidate on purpose; bump it by hand.
+      - dependency-name: ort
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
