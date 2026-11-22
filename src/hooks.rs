@@ -670,7 +670,9 @@ impl ProjectScope {
                     .get("project_path")
                     .and_then(Value::as_str)
                     .filter(|p| !p.trim().is_empty())
-                    .map(|p| crate::miner::wing_slug_from_dir(std::path::Path::new(p)))
+                    // Registry-aware, so a repo whose wing was renamed
+                    // (folder mempalace-rs, wing palace_rs) still matches.
+                    .and_then(|p| project_wing(conn, p))
             })
             .or_else(|| diary_project_tag(text));
         project.is_none_or(|slug| &slug == current)
@@ -864,7 +866,10 @@ fn session_start_recall(conn: &Connection, cwd: &str) -> Option<String> {
     let path = std::path::Path::new(cwd);
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let project = canonical.to_string_lossy().to_string();
-    let wing = crate::miner::wing_slug_from_dir(&canonical);
+    // The registered wing, not the folder slug: a renamed wing (folder
+    // mempalace-rs, wing palace_rs) would otherwise never match.
+    let wing =
+        project_wing(conn, cwd).unwrap_or_else(|| crate::miner::wing_slug_from_dir(&canonical));
 
     let mut sections: Vec<String> = Vec::new();
 

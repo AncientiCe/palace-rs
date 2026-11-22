@@ -1513,7 +1513,10 @@ fn tool_diary_search(conn: &Connection, args: &Value) -> Value {
     if let Some(hits) = results.get("results").and_then(|v| v.as_array()) {
         let mut hits = hits.clone();
         if let Some(project) = project_path.as_deref() {
-            hits.retain(|hit| hit_project_path(conn, hit).as_deref() == Some(project));
+            hits.retain(|hit| {
+                hit_project_path(conn, hit)
+                    .is_some_and(|stored| same_project_path(&stored, project))
+            });
         }
         hits.truncate(limit);
         json!({
@@ -1537,6 +1540,29 @@ fn hit_project_path(conn: &Connection, hit: &Value) -> Option<String> {
         .get("project_path")
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+/// Whether two recorded project paths name the same folder. Agents record
+/// paths in different shapes (`D:\Dev\x`, `D:/Dev/x/`, and the hooks'
+/// canonical `\\?\D:\Dev\x` on Windows), so compare a normalised form:
+/// no verbatim prefix, forward slashes, no trailing slash, and on Windows
+/// case-insensitive.
+pub(crate) fn same_project_path(a: &str, b: &str) -> bool {
+    fn key(path: &str) -> String {
+        let path = path.trim();
+        let path = path
+            .strip_prefix(r"\\?\UNC\")
+            .map(|rest| format!(r"\\{rest}"))
+            .unwrap_or_else(|| path.strip_prefix(r"\\?\").unwrap_or(path).to_string());
+        let path = path.replace('\\', "/");
+        let path = path.trim_end_matches('/');
+        if cfg!(windows) {
+            path.to_lowercase()
+        } else {
+            path.to_string()
+        }
+    }
+    key(a) == key(b)
 }
 
 /// Gather recent diary drawers, newest first.
@@ -1565,8 +1591,7 @@ pub(crate) fn recent_diary_drawers(
                 d.metadata
                     .get("project_path")
                     .and_then(|v| v.as_str())
-                    .map(|stored| stored == p)
-                    .unwrap_or(false)
+                    .is_some_and(|stored| same_project_path(stored, p))
             })
         })
         .take(take)
@@ -2879,6 +2904,23 @@ fn compact_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_project_path_ignores_path_shape() {
+        assert!(same_project_path("/work/proj", "/work/proj/"));
+        assert!(same_project_path(r"\\?\D:\Dev\proj", r"D:\Dev\proj"));
+        assert!(same_project_path(r"D:\Dev\proj\", "D:/Dev/proj"));
+        assert!(same_project_path(
+            r"\\?\UNC\server\share\proj",
+            r"\\server\share\proj"
+        ));
+        assert!(!same_project_path("/work/proj", "/work/proj2"));
+        assert_eq!(
+            same_project_path(r"D:\Dev\Proj", r"d:\dev\proj"),
+            cfg!(windows),
+            "case only folds on Windows"
+        );
+    }
 
     #[test]
     fn initialize_result_advertises_protocol_instructions() {

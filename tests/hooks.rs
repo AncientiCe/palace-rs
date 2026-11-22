@@ -584,6 +584,46 @@ fn session_start_injects_recent_diary_for_project() {
     );
 }
 
+#[test]
+fn session_start_recall_finds_renamed_wing_and_differently_shaped_paths() {
+    // The repo folder is `my-folder` but its registered wing is
+    // `renamed_wing`, and the diary recorded the path in a different shape
+    // (trailing slash, not canonical) than the hook's canonical cwd.
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("my-folder");
+    std::fs::create_dir(&folder).unwrap();
+    let canonical = std::fs::canonicalize(&folder).unwrap();
+    let conn = test_db();
+    palace::store::set_wing_mined(&conn, "renamed_wing", &canonical.to_string_lossy()).unwrap();
+    remember(&conn, TOKIO_DECISION, "renamed_wing");
+
+    let raw = folder.to_string_lossy().to_string();
+    let recorded = format!("{raw}{}", std::path::MAIN_SEPARATOR);
+    let config = palace::config::PalaceConfig::new();
+    palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_write",
+        &json!({
+            "agent_name": "claude",
+            "entry": "Traced the flaky upload test to a shared temp directory.",
+            "project_path": recorded,
+            "topic": "flaky-test"
+        }),
+    );
+
+    let ctx = claude_session_start(&conn, json!({"session_id": "abc", "cwd": raw}));
+    assert!(
+        ctx.contains("Project knowledge (wing `renamed_wing`)"),
+        "project knowledge must come from the registered wing: {ctx}"
+    );
+    assert!(ctx.contains("tokio"), "{ctx}");
+    assert!(
+        ctx.contains("flaky upload test"),
+        "diary recorded with a differently shaped path must still match: {ctx}"
+    );
+}
+
 fn add_preference(conn: &rusqlite::Connection, text: &str, chunk: usize, importance: f64) {
     palace::store::add_drawer(
         conn,
