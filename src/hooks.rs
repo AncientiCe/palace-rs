@@ -200,36 +200,72 @@ const BUSY_SESSION_PROMPTS: i64 = 2;
 /// A session with at least this many tracked tool calls counts as real work.
 const BUSY_SESSION_TOOL_CALLS: i64 = 3;
 
+/// Upper bound (bytes) on the context injected at session start. Claude Code
+/// saves hook output over 10,000 characters to a file and injects only a short
+/// preview, so anything past the limit never reaches the agent. Bytes are never
+/// fewer than characters, so measuring bytes stays safely under that limit.
+pub const SESSION_START_BUDGET: usize = 9_000;
+
+const PROTOCOL_HEADING: &str = "# Palace Memory Protocol: MANDATORY";
+
+/// The protocol in brief, used when the full text does not fit the budget.
+/// The full text also reaches the agent through the MCP server instructions
+/// and the rule file `palace install` writes.
+const SHORT_PROTOCOL: &str = "**Palace is the ONLY persistent memory.** Never write memories to a \
+    client's built-in memory files; file them in Palace. SESSION START: `palace_status` → \
+    `palace_session_context(agent_name)` → `palace_diary_search`. BEFORE ANSWERING questions \
+    about past decisions, preferences or history: `palace_search` + `palace_kg_query`. AFTER \
+    WORK: `palace_diary_write`, plus `palace_kg_add` for stable facts. The full protocol is in \
+    the palace MCP server instructions.";
+
 /// Build the session-start response: inject the protocol AND — when a palace DB
-/// is available — the user's standing rules (`general/preferences`, verbatim)
-/// plus real warm-start recall (recent diary + project knowledge for the
-/// session's cwd) so memory is in context deterministically, without the
-/// agent having to call any palace tool. Cursor additionally exports
-/// `PALACE_SESSION_ID` so later hooks can correlate the session; Claude/Codex
-/// use the `hookSpecificOutput` shape instead. Fail-open: a missing/empty DB
-/// just yields the protocol text alone.
+/// is available — the user's standing rules (`general/preferences`) plus real
+/// warm-start recall (recent diary + project knowledge for the session's cwd)
+/// so memory is in context deterministically, without the agent having to call
+/// any palace tool. Cursor additionally exports `PALACE_SESSION_ID` so later
+/// hooks can correlate the session; Claude/Codex use the `hookSpecificOutput`
+/// shape instead. Fail-open: a missing/empty DB just yields the protocol text.
+///
+/// The whole context stays within [`SESSION_START_BUDGET`]. Space goes first to
+/// the short protocol and the (already bounded) project recall, then to the
+/// standing rules; the full protocol replaces the short one only if it still
+/// fits, since the agent also gets it from the MCP server instructions.
 pub fn session_start_response(
     conn: Option<&Connection>,
     input: &Value,
     client: HookClient,
 ) -> Result<String> {
-    let mut context = format!(
-        "# Palace Memory Protocol: MANDATORY\n\n{}",
-        crate::install::RULE_BODY
-    );
+    let full_protocol = format!("{PROTOCOL_HEADING}\n\n{}", crate::install::RULE_BODY);
+    let short_protocol = format!("{PROTOCOL_HEADING}\n\n{SHORT_PROTOCOL}");
+    let mut sections: Vec<String> = Vec::new();
+    let mut remaining = SESSION_START_BUDGET.saturating_sub(short_protocol.len());
     if let Some(conn) = conn {
-        // Standing rules apply to every project and client, so they go first and
-        // do not depend on the cwd.
-        if let Some(preferences) = standing_preferences(conn) {
-            context.push_str("\n\n");
-            context.push_str(&preferences);
+        let cwd = cwd(input);
+        let recall = session_start_recall(conn, cwd).filter(|recall| recall.len() + 2 <= remaining);
+        let recall_len = recall.as_ref().map_or(0, |recall| recall.len() + 2);
+        let scope = ProjectScope::new(conn, cwd);
+        // Standing rules go first in the output; they get whatever the protocol
+        // and recall leave.
+        if let Some(preferences) =
+            standing_preferences(conn, &scope, remaining.saturating_sub(recall_len + 2))
+        {
+            remaining = remaining.saturating_sub(preferences.len() + 2);
+            sections.push(preferences);
         }
-        let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
-        if let Some(recall) = session_start_recall(conn, cwd) {
-            context.push_str("\n\n");
-            context.push_str(&recall);
+        if let Some(recall) = recall {
+            remaining = remaining.saturating_sub(recall_len);
+            sections.push(recall);
         }
     }
+    let protocol = if full_protocol.len() <= remaining + short_protocol.len() {
+        full_protocol
+    } else {
+        short_protocol
+    };
+    let context = std::iter::once(protocol)
+        .chain(sections)
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let mut response = client.context_output(HookEvent::SessionStart, context);
     if client == HookClient::Cursor {
         if let Some(session_id) = input.get("session_id").and_then(Value::as_str) {
@@ -669,15 +705,26 @@ fn project_wing(conn: &Connection, cwd: &str) -> Option<String> {
 /// Where the user's standing rules live: injected verbatim at every session start.
 const PREFERENCES_WING: &str = "general";
 const PREFERENCES_ROOM: &str = "preferences";
-/// Cap on standing rules injected at session start; importance-5 rules are
-/// always kept, even past the cap.
+/// Cap on standing rules injected at session start. `palace_remember` files
+/// everything at importance 5, so importance cannot exempt a rule from the cap.
 const STANDING_PREFERENCES_LIMIT: usize = 20;
 /// Upper bound on rows read from the preferences room before ranking.
 const STANDING_PREFERENCES_SCAN: usize = 500;
+/// Longest a single standing rule may be in the injected block (characters);
+/// longer ones are shortened and can be read in full by drawer id.
+const STANDING_PREFERENCE_MAX_CHARS: usize = 300;
+/// Space kept back for the closing "N more rules" line.
+const STANDING_PREFERENCES_FOOTER_RESERVE: usize = 240;
+/// How much of a rule's opening is read to decide which project it is for.
+const SCOPE_HEAD_CHARS: usize = 100;
 
-/// Build the standing-instructions block: every drawer in `general/preferences`,
-/// verbatim, ranked by importance then recency. `None` when the room is empty.
-fn standing_preferences(conn: &Connection) -> Option<String> {
+/// Build the standing-instructions block from `general/preferences`, ranked by
+/// importance then recency, within `budget` bytes. Rules whose opening names
+/// another registered project are left out, each rule is shortened to
+/// [`STANDING_PREFERENCE_MAX_CHARS`], and anything left out is counted in a
+/// closing line that points at `palace_preference_search`, so a rule is never
+/// dropped without notice. `None` when the room is empty.
+fn standing_preferences(conn: &Connection, scope: &ProjectScope, budget: usize) -> Option<String> {
     let mut drawers = crate::store::list_drawers(
         conn,
         &crate::store::DrawerFilter {
@@ -692,21 +739,112 @@ fn standing_preferences(conn: &Connection) -> Option<String> {
     }
     // list_drawers is newest-first; a stable sort keeps that order within a tier.
     drawers.sort_by(|a, b| b.importance.total_cmp(&a.importance));
-    let mut kept = 0;
-    drawers.retain(|d| {
-        kept += 1;
-        kept <= STANDING_PREFERENCES_LIMIT || d.importance >= 5.0
-    });
 
-    let mut lines = vec![format!(
+    let header = format!(
         "# Standing instructions (override defaults) from Palace `{PREFERENCES_WING}/{PREFERENCES_ROOM}`\n\
          These are the user's standing rules. They take priority over harness or tool defaults \
-         (for example built-in file-memory or commit-attribution instructions)."
-    )];
+         (for example built-in file-memory or commit-attribution instructions). Entries ending \
+         in … are shortened: read the full rule with `palace_get_drawer(drawer_id)`."
+    );
+    let mut block = header.clone();
+    let mut other_projects = 0usize;
+    let mut not_shown = 0usize;
+    let mut shown = 0usize;
     for d in &drawers {
-        lines.push(format!("- ({}) {}", d.id, d.content.trim()));
+        if scoped_to_other_project(&d.content, scope) {
+            other_projects += 1;
+            continue;
+        }
+        let line = format!(
+            "\n- ({}) {}",
+            d.id,
+            compact(&d.content, STANDING_PREFERENCE_MAX_CHARS)
+        );
+        let fits = block.len() + line.len() + STANDING_PREFERENCES_FOOTER_RESERVE <= budget;
+        if shown < STANDING_PREFERENCES_LIMIT && fits {
+            block.push_str(&line);
+            shown += 1;
+        } else {
+            not_shown += 1;
+        }
     }
-    Some(lines.join("\n"))
+
+    let mut omitted = Vec::new();
+    if not_shown > 0 {
+        omitted.push(format!(
+            "{not_shown} more standing rule(s) did not fit here"
+        ));
+    }
+    if other_projects > 0 {
+        omitted.push(format!(
+            "{other_projects} rule(s) for other projects were left out"
+        ));
+    }
+    if !omitted.is_empty() {
+        block.push_str(&format!(
+            "\n- {}. Call `palace_preference_search` to read them.",
+            omitted.join("; ")
+        ));
+    }
+    if block.len() > budget {
+        // Not even the header fits: say where the rules are instead.
+        let pointer = format!(
+            "# Standing instructions: {} rule(s) in Palace `{PREFERENCES_WING}/{PREFERENCES_ROOM}`; \
+             call `palace_preference_search` to read them.",
+            drawers.len()
+        );
+        return (pointer.len() <= budget).then_some(pointer);
+    }
+    (shown > 0 || !omitted.is_empty()).then_some(block)
+}
+
+/// Whether a standing rule's opening names another registered project (and not
+/// the current one), e.g. `PREFERENCE (angel-arena, 2026-11-13): …` seen from a
+/// different repo. Rules marked for all projects are always kept, and without a
+/// known current project nothing is filtered.
+fn scoped_to_other_project(text: &str, scope: &ProjectScope) -> bool {
+    if scope.foreign.is_empty() {
+        return false;
+    }
+    let head = text
+        .chars()
+        .take(SCOPE_HEAD_CHARS)
+        .collect::<String>()
+        .to_lowercase()
+        .replace('-', "_");
+    if ["all projects", "every project", "all agents"]
+        .iter()
+        .any(|marker| head.contains(marker))
+    {
+        return false;
+    }
+    if scope
+        .wing
+        .as_deref()
+        .is_some_and(|current| names_wing(&head, current))
+    {
+        return false;
+    }
+    scope.foreign.iter().any(|wing| names_wing(&head, wing))
+}
+
+/// Whether `head` (lowercased, `-` folded to `_`) names `wing` as a whole word,
+/// written either with underscores or with spaces.
+fn names_wing(head: &str, wing: &str) -> bool {
+    let wing = wing.to_lowercase().replace('-', "_");
+    if wing.chars().count() < 3 {
+        return false;
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let spaced = wing.replace('_', " ");
+    let names = |needle: &str| {
+        head.match_indices(needle).any(|(at, _)| {
+            let before = head[..at].chars().next_back();
+            let after = head[at + needle.len()..].chars().next();
+            !before.is_some_and(is_word) && !after.is_some_and(is_word)
+        })
+    };
+    names(&wing) || names(&spaced)
 }
 
 /// How many recent diary entries / project drawers to surface at session start.

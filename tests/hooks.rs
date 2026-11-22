@@ -640,7 +640,7 @@ fn session_start_injects_standing_preferences_without_cwd() {
 }
 
 #[test]
-fn session_start_caps_standing_preferences_but_keeps_importance_five() {
+fn session_start_caps_standing_preferences_ranked_by_importance() {
     let conn = test_db();
     for i in 0..25 {
         add_preference(&conn, &format!("minor rule number {i:02}"), i, 3.0);
@@ -653,6 +653,115 @@ fn session_start_caps_standing_preferences_but_keeps_importance_five() {
     );
     let minor = ctx.matches("minor rule number").count();
     assert_eq!(minor, 19, "cap of 20 includes the importance-5 rule: {ctx}");
+    assert!(
+        ctx.contains("6 more standing rule(s) did not fit here"),
+        "left-out rules must be counted, not dropped silently: {ctx}"
+    );
+}
+
+#[test]
+fn session_start_cap_applies_when_every_rule_is_importance_five() {
+    // palace_remember files everything at importance 5; that must not
+    // exempt every rule from the cap.
+    let conn = test_db();
+    for i in 0..25 {
+        add_preference(&conn, &format!("remembered rule number {i:02}"), i, 5.0);
+    }
+    let ctx = claude_session_start(&conn, json!({"session_id": "abc"}));
+    assert_eq!(ctx.matches("remembered rule number").count(), 20, "{ctx}");
+    assert!(ctx.contains("5 more standing rule(s)"), "{ctx}");
+}
+
+#[test]
+fn session_start_stays_within_budget_with_many_long_rules() {
+    let conn = test_db();
+    let config = palace::config::PalaceConfig::new();
+    palace::mcp_server::dispatch_tool(
+        &conn,
+        &config,
+        "palace_diary_write",
+        &json!({
+            "agent_name": "claude",
+            "entry": "Investigated the payment_refunded DLQ and found the retry loop bug.",
+            "project_path": "/proj",
+            "topic": "dlq-investigation"
+        }),
+    );
+    let filler = "and this rule keeps going with more detail ".repeat(20);
+    for i in 0..60 {
+        add_preference(&conn, &format!("long rule {i:02}: {filler}"), i, 5.0);
+    }
+
+    let ctx = claude_session_start(&conn, json!({"session_id": "abc", "cwd": "/proj"}));
+    assert!(
+        ctx.len() <= palace::hooks::SESSION_START_BUDGET,
+        "session start must fit the budget, got {} bytes",
+        ctx.len()
+    );
+    assert!(ctx.contains("Palace Memory Protocol"), "{ctx}");
+    assert!(
+        ctx.contains("Standing instructions (override defaults)"),
+        "{ctx}"
+    );
+    assert!(ctx.contains("long rule"), "{ctx}");
+    assert!(ctx.contains('…'), "long rules are shortened: {ctx}");
+    assert!(
+        ctx.contains("payment_refunded DLQ"),
+        "project recall still fits: {ctx}"
+    );
+    assert!(
+        ctx.contains("palace_preference_search"),
+        "left-out rules point at preference search: {ctx}"
+    );
+}
+
+#[test]
+fn session_start_leaves_out_rules_for_other_projects() {
+    let conn = test_db();
+    palace::store::set_wing_mined(&conn, "otherproj", "/work/otherproj").unwrap();
+    palace::store::set_wing_mined(&conn, "proj", "/work/proj").unwrap();
+    add_preference(
+        &conn,
+        "PREFERENCE (otherproj, 2026-11-13): use PostgreSQL only.",
+        0,
+        5.0,
+    );
+    add_preference(
+        &conn,
+        "PREFERENCE (all projects, reaffirmed in otherproj): no .md files.",
+        1,
+        5.0,
+    );
+    add_preference(
+        &conn,
+        "proj: run the full test suite before commits.",
+        2,
+        5.0,
+    );
+    add_preference(&conn, "USER RULE: never clone competitor repos.", 3, 5.0);
+
+    let ctx = claude_session_start(&conn, json!({"session_id": "abc", "cwd": "/work/proj"}));
+    assert!(!ctx.contains("use PostgreSQL only"), "{ctx}");
+    assert!(
+        ctx.contains("no .md files"),
+        "all-projects rule kept: {ctx}"
+    );
+    assert!(
+        ctx.contains("full test suite"),
+        "current project kept: {ctx}"
+    );
+    assert!(ctx.contains("never clone"), "unscoped rule kept: {ctx}");
+    assert!(
+        ctx.contains("1 rule(s) for other projects were left out"),
+        "{ctx}"
+    );
+
+    // Inside its own project the rule is injected.
+    let ctx = claude_session_start(
+        &conn,
+        json!({"session_id": "abc", "cwd": "/work/otherproj"}),
+    );
+    assert!(ctx.contains("use PostgreSQL only"), "{ctx}");
 }
 
 #[test]
