@@ -1,0 +1,46 @@
+# Image for Glama (https://glama.ai/mcp/servers/AncientiCe/palace-rs), which
+# builds the server to inspect its MCP tools and score the listing. It is not
+# the supported way to run palace: use scripts/install.sh, Homebrew or the
+# .mcpb bundle (see README).
+#
+# It installs the released Linux binary rather than compiling from source, so
+# the build stays fast. Debian 13 is needed: the binary is linked on Ubuntu
+# 24.04 against glibc 2.39 and GCC 14's libstdc++. Only x86_64 is shipped.
+#
+#   docker build -f Dockerfile.glama -t palace-glama .
+#   docker run --rm -i palace-glama
+FROM debian:trixie-slim
+
+# Release tag to install, with or without the leading "v". "latest" follows
+# the newest GitHub release, so the image needs no bump per release.
+ARG PALACE_VERSION=latest
+ARG TARGET=x86_64-unknown-linux-gnu
+
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl libssl3t64; \
+    rm -rf /var/lib/apt/lists/*; \
+    repo="https://github.com/AncientiCe/palace-rs"; \
+    if [ "$PALACE_VERSION" = "latest" ]; then \
+      tag="$(curl -fsSLo /dev/null -w '%{url_effective}' "$repo/releases/latest")"; \
+      tag="${tag##*/}"; \
+    else \
+      case "$PALACE_VERSION" in v*) tag="$PALACE_VERSION" ;; *) tag="v$PALACE_VERSION" ;; esac; \
+    fi; \
+    version="${tag#v}"; \
+    tmp="$(mktemp -d)"; cd "$tmp"; \
+    curl -fsSLO "$repo/releases/download/$tag/palace-$version-$TARGET.tar.gz"; \
+    curl -fsSLO "$repo/releases/download/$tag/palace-$TARGET.sha256"; \
+    sha256sum -c "palace-$TARGET.sha256"; \
+    tar -xzf "palace-$version-$TARGET.tar.gz"; \
+    install -m 0755 "$(find . -type f -name palace | head -n 1)" /usr/local/bin/palace; \
+    cd /; rm -rf "$tmp"; \
+    palace --version
+
+# Palace keeps its SQLite file and embedding model cache under ~/.palace.
+RUN useradd --create-home palace
+USER palace
+WORKDIR /home/palace
+
+# MCP over stdio.
+ENTRYPOINT ["palace", "mcp"]

@@ -1,0 +1,2 @@
+# Dockerfile.glama copies nothing from the repo; keep the build context empty.
+*
