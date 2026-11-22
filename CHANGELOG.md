@@ -6,6 +6,15 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Changed
+
+- **Clearer MCP tool descriptions.** 21 tools (the knowledge-graph, tunnel and
+  graph tools, `palace_gain`, `palace_recall_check`, `palace_conflicts`,
+  `palace_get_drawer`, `palace_update_drawer`, `palace_diary_read`,
+  `palace_list_agents`, `palace_hook_settings` and
+  `palace_memories_filed_away`) now say when to use them instead of their
+  neighbours, what they return or change, and what each parameter means.
+
 ## [0.20.6] - 2026-11-22
 
 ### Security
