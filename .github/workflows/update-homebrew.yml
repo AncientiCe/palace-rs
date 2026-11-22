@@ -54,7 +54,7 @@ jobs:
           echo "Linux x86_64 SHA256: ${LINUX_CHECKSUM}"
 
       - name: Checkout homebrew-palace
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: AncientiCe/homebrew-palace
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -89,7 +89,7 @@ jobs:
           mv Formula/palace.rb.tmp Formula/palace.rb
 
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v5
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-palace
