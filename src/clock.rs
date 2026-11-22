@@ -25,7 +25,7 @@ pub fn ago_rfc3339(ago: SignedDuration) -> String {
 
 /// Today's date in the local time zone, as `YYYY-MM-DD`.
 pub fn local_date() -> String {
-    jiff::Zoned::now().strftime("%Y-%m-%d").to_string()
+    jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string()
 }
 
 /// Parse an RFC 3339 string with any offset.

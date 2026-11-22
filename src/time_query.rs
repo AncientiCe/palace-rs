@@ -280,12 +280,15 @@ fn month(name: &str) -> Option<u32> {
 
 /// The UTC calendar date of `at`.
 fn date_of(at: Timestamp) -> Date {
-    at.to_zoned(TimeZone::UTC).date()
+    at.to_zoned_datetime(TimeZone::UTC).date()
 }
 
 /// `date` at `hour` o'clock UTC.
 fn at_hour(date: Date, hour: i8) -> Option<Timestamp> {
-    let zoned = date.at(hour, 0, 0, 0).to_zoned(TimeZone::UTC).ok()?;
+    let zoned = date
+        .at(hour, 0, 0, 0)
+        .to_zoned_datetime(TimeZone::UTC)
+        .ok()?;
     Some(zoned.timestamp())
 }
 
