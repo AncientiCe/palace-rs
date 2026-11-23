@@ -69,6 +69,15 @@ fn palace_tool_strips_the_mcp_prefix() {
 }
 
 #[test]
+fn palace_tool_recognises_the_claude_plugin_naming() {
+    assert_eq!(
+        palace_tool("mcp__plugin_palace_palace__palace_diary_write"),
+        Some("palace_diary_write")
+    );
+    assert_eq!(palace_tool("mcp__plugin_other_palace__palace_search"), None);
+}
+
+#[test]
 fn palace_tool_recognises_cursor_mcp_naming() {
     assert_eq!(palace_tool("MCP:palace_search"), Some("palace_search"));
     assert_eq!(

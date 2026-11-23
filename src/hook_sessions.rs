@@ -14,6 +14,9 @@ use crate::usage::SAVE_TOOLS;
 
 /// MCP tool-name prefix under which agents expose Palace's tools.
 const PALACE_TOOL_PREFIX: &str = "mcp__palace__";
+/// Claude Code names a plugin's MCP tools `mcp__plugin_<plugin>_<server>__<tool>`,
+/// so the Palace plugin's tools arrive under this prefix.
+const PALACE_PLUGIN_TOOL_PREFIX: &str = "mcp__plugin_palace_palace__";
 /// Cursor reports MCP calls as `MCP:<tool>` with no server name.
 const CURSOR_MCP_PREFIX: &str = "MCP:";
 /// Sessions untouched for this long are pruned.
@@ -30,11 +33,14 @@ pub struct SessionActivity {
 
 /// The Palace tool name behind an agent's MCP tool name, if it is one.
 pub fn palace_tool(tool_name: &str) -> Option<&str> {
-    tool_name.strip_prefix(PALACE_TOOL_PREFIX).or_else(|| {
-        tool_name
-            .strip_prefix(CURSOR_MCP_PREFIX)
-            .filter(|tool| tool.starts_with("palace_"))
-    })
+    tool_name
+        .strip_prefix(PALACE_TOOL_PREFIX)
+        .or_else(|| tool_name.strip_prefix(PALACE_PLUGIN_TOOL_PREFIX))
+        .or_else(|| {
+            tool_name
+                .strip_prefix(CURSOR_MCP_PREFIX)
+                .filter(|tool| tool.starts_with("palace_"))
+        })
 }
 
 /// Record a submitted prompt, pruning long-idle sessions.

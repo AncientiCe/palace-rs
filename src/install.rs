@@ -90,6 +90,8 @@ pub struct ClientStatus {
     /// True if the rule exists but lacks memory-vs-code-search routing guidance.
     pub rule_weak: bool,
     pub hook_installed: bool,
+    /// The Claude Code plugin supplies the MCP server and hooks.
+    pub via_plugin: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -198,8 +200,16 @@ pub fn install_clients(options: &InstallOptions) -> Result<InstallReport> {
     let mut report = InstallReport::default();
     for client in expand_clients(options) {
         let path = config_path(options, client)?;
+        // The Claude Code plugin brings its own MCP server and hooks, so a
+        // user-scope install only keeps the rule and clears Palace's copies.
+        let via_plugin = client == Client::Claude
+            && options.scope == Scope::User
+            && claude_plugin_enabled(&options.home_dir);
 
         let changed = match mcp_format(client) {
+            _ if via_plugin => {
+                remove_json_client(&path, mcp_format(client), None, options.dry_run)?
+            }
             McpFormat::Codex => write_codex_client(&path, &options.binary_path, options.dry_run)?,
             McpFormat::Goose => write_goose_client(&path, &options.binary_path, options.dry_run)?,
             format => {
@@ -240,7 +250,11 @@ pub fn install_clients(options: &InstallOptions) -> Result<InstallReport> {
                 } else {
                     report.hook_unchanged.push(hooks_json);
                 }
-            } else if let Some((path, changed)) = install_client_hooks(options, client)? {
+            } else if let Some((path, changed)) = if via_plugin {
+                uninstall_client_hooks(options, client)?
+            } else {
+                install_client_hooks(options, client)?
+            } {
                 if changed {
                     report.hook_changed.push(path);
                 } else {
@@ -333,18 +347,20 @@ pub fn doctor(options: &InstallOptions) -> Result<DoctorReport> {
         let expected = path_to_string(&options.binary_path);
         let rule_installed = rule_installed(&target)?;
         let rule_weak = rule_is_weak(&target)?;
-        let hook_installed =
-            options.scope == Scope::User && client_hook_installed(&options.home_dir, client);
+        let via_plugin = client == Client::Claude && claude_plugin_enabled(&options.home_dir);
+        let hook_installed = via_plugin
+            || (options.scope == Scope::User && client_hook_installed(&options.home_dir, client));
         clients.push(ClientStatus {
             client,
             path,
-            configured: command.is_some(),
-            points_to_expected_binary: command.as_deref() == Some(expected.as_str()),
+            configured: via_plugin || command.is_some(),
+            points_to_expected_binary: via_plugin || command.as_deref() == Some(expected.as_str()),
             command,
             rule_path: target.path,
             rule_installed,
             rule_weak,
             hook_installed,
+            via_plugin,
         });
     }
     let adoption_warnings = adoption_warnings(&clients);
@@ -466,7 +482,9 @@ pub fn print_doctor_report(report: &DoctorReport) {
 
     println!("  {}", "─".repeat(52));
     for status in &report.clients {
-        let state = if status.points_to_expected_binary {
+        let state = if status.via_plugin {
+            "✓ configured by the Claude Code plugin"
+        } else if status.points_to_expected_binary {
             "✓ configured"
         } else if status.configured {
             "⚠ configured elsewhere"
@@ -484,7 +502,9 @@ pub fn print_doctor_report(report: &DoctorReport) {
         };
         println!("      {rule_state}");
         if client_has_hooks(status.client) {
-            let hook_state = if status.hook_installed {
+            let hook_state = if status.via_plugin {
+                "✓ memory hooks from the Claude Code plugin"
+            } else if status.hook_installed {
                 "✓ memory hooks installed (session-start, post-tool-use recall, stop save)"
             } else {
                 "✗ memory hooks missing. Run: palace install"
@@ -1599,8 +1619,39 @@ pub fn session_start_hook_response() -> Result<String> {
 /// Handle a hook event received on stdin and write the response to stdout.
 /// Called as `palace hook session-start --client <cursor|claude|codex>` by the
 /// per-client hook scripts/commands. `client` selects the output dialect.
-pub fn run_hook(event: &str, client: &str) -> Result<()> {
-    crate::hooks::run(event, crate::hooks::HookClient::parse(client))
+pub fn run_hook(event: &str, client: &str, from_plugin: bool) -> Result<()> {
+    let hook_client = crate::hooks::HookClient::parse(client);
+    // The Claude Code plugin registers the same hooks that `palace install`
+    // writes to settings.json. While the plugin is enabled, the settings.json
+    // copies answer with an empty object so each event runs once.
+    if hook_client == crate::hooks::HookClient::Claude
+        && !from_plugin
+        && home_dir().is_ok_and(|home| claude_plugin_enabled(&home))
+    {
+        println!("{{}}");
+        return Ok(());
+    }
+    crate::hooks::run(event, hook_client)
+}
+
+/// Name of the Palace plugin in Claude Code (`plugin/.claude-plugin/plugin.json`).
+pub const CLAUDE_PLUGIN_NAME: &str = "palace";
+
+/// Whether the Palace plugin is enabled in Claude Code's user settings
+/// (`enabledPlugins` holds `"palace@<marketplace>": true`).
+pub fn claude_plugin_enabled(home_dir: &Path) -> bool {
+    let Ok(settings) = read_json_object(&home_dir.join(".claude").join("settings.json")) else {
+        return false;
+    };
+    let prefix = format!("{CLAUDE_PLUGIN_NAME}@");
+    settings
+        .get("enabledPlugins")
+        .and_then(Value::as_object)
+        .is_some_and(|plugins| {
+            plugins
+                .iter()
+                .any(|(key, on)| key.starts_with(&prefix) && on.as_bool() == Some(true))
+        })
 }
 
 fn hook_script_names() -> Vec<String> {

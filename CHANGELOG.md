@@ -15,6 +15,16 @@ This Rust implementation uses its own `0.x` version track.
   `~/.gemini/config` or `~/.gemini/antigravity` exists, so a Gemini-CLI-only
   machine is left alone. With `--scope project` it writes
   `.agents/mcp_config.json` and `.agents/rules/palace.md`. No hooks yet.
+- **Claude Code plugin.** The repository is now a Claude Code plugin
+  marketplace: `/plugin marketplace add AncientiCe/palace-rs`, then
+  `/plugin install palace@palace-rs`. The plugin registers the `palace mcp`
+  server and the same four hooks `palace install` writes, and needs the
+  `palace` binary on `PATH`. While it is enabled, `palace install` keeps only
+  the Claude Code rule and removes its own MCP entry and hooks, `palace doctor`
+  reports Claude Code as configured by the plugin, and hooks from an earlier
+  install stay silent so each event runs once. Calls to the plugin's tools
+  (`mcp__plugin_palace_palace__*`) count as Palace use for the per-session
+  reminders.
 
 ## [0.20.9] - 2026-11-23
 

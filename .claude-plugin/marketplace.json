@@ -1,0 +1,17 @@
+{
+  "name": "palace-rs",
+  "description": "Palace: local-first memory for coding agents.",
+  "owner": {
+    "name": "AncientiCe",
+    "url": "https://github.com/AncientiCe"
+  },
+  "plugins": [
+    {
+      "name": "palace",
+      "source": "./plugin",
+      "description": "Palace MCP server and memory hooks for Claude Code. Install the palace binary first.",
+      "category": "productivity",
+      "tags": ["memory", "mcp", "local-first"]
+    }
+  ]
+}

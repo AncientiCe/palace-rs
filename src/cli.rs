@@ -337,6 +337,11 @@ enum Commands {
         /// Client dialect for the response (cursor, claude, or codex)
         #[arg(long, default_value = "cursor")]
         client: String,
+        /// Set by the Claude Code plugin's hooks. Without it, a Claude hook
+        /// stays silent while the plugin is enabled, so the hooks that
+        /// `palace install` wrote don't run a second time.
+        #[arg(long)]
+        plugin: bool,
     },
 }
 
@@ -994,8 +999,12 @@ pub fn run() -> Result<()> {
 
         Commands::Embeddings { action } => handle_embeddings(&config, action)?,
 
-        Commands::Hook { event, client } => {
-            crate::install::run_hook(&event, &client)?;
+        Commands::Hook {
+            event,
+            client,
+            plugin,
+        } => {
+            crate::install::run_hook(&event, &client, plugin)?;
         }
     }
 

@@ -116,6 +116,22 @@ brew update && brew upgrade palace
 When a release changes the memory protocol rule (the CHANGELOG says so), run
 `palace install` again afterwards so your agents get the new rule text.
 
+**Claude Code plugin.** After installing the binary with one of the methods
+above, Claude Code users can add Palace as a plugin instead of running
+`palace install --client claude`:
+
+```
+/plugin marketplace add AncientiCe/palace-rs
+/plugin install palace@palace-rs
+```
+
+The plugin brings the MCP server and the memory hooks, and calls `palace` from
+your `PATH`. It can't write `~/.claude/CLAUDE.md`, so run `palace install` too
+if you want the always-on rule. While the plugin is enabled, `palace install`
+writes only the rule and removes its own Claude Code MCP entry and hooks, so
+nothing runs twice. Hooks left in `settings.json` by an earlier install stay
+silent while the plugin is on.
+
 **MCP registry / MCPB bundle.** Palace is listed in the official
 [MCP registry](https://registry.modelcontextprotocol.io) as
 `io.github.ancientice/palace-rs`. Each release also ships a `palace-<version>.mcpb`
