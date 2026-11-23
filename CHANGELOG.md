@@ -6,6 +6,8 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.20.10] - 2026-11-23
+
 ### Added
 
 - **Antigravity.** `palace install --client antigravity` registers the MCP
