@@ -6,6 +6,16 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.20.9] - 2026-11-23
+
+### Security
+
+- **`cookie` 0.18.3 ([RUSTSEC-2026-0594]).** `cookie` 0.18.1, pulled in by
+  `ureq` through `cookie_store`, can repeat private-cookie nonces in processes
+  that fork.
+
+[RUSTSEC-2026-0594]: https://rustsec.org/advisories/RUSTSEC-2026-0594
+
 ### Fixed
 
 - **The OpenCode plugin now loads in OpenCode V2.** V2 rejected the plugin
