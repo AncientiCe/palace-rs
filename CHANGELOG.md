@@ -6,6 +6,16 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Added
+
+- **Antigravity.** `palace install --client antigravity` registers the MCP
+  server in `~/.gemini/config/mcp_config.json` and writes an always-on rule to
+  `~/.gemini/config/rules/palace.md`. It keeps out of `~/.gemini/GEMINI.md`,
+  which Gemini CLI owns. `--client all` includes Antigravity only when
+  `~/.gemini/config` or `~/.gemini/antigravity` exists, so a Gemini-CLI-only
+  machine is left alone. With `--scope project` it writes
+  `.agents/mcp_config.json` and `.agents/rules/palace.md`. No hooks yet.
+
 ## [0.20.9] - 2026-11-23
 
 ### Security

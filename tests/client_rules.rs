@@ -1256,6 +1256,37 @@ fn install_windsurf_writes_mcp_config_and_global_rules() {
 }
 
 #[test]
+fn install_antigravity_writes_mcp_config_and_own_rule_file() {
+    let temp = TempDir::new().unwrap();
+    let binary_path = fake_binary(temp.path());
+    let opts = options(temp.path(), &binary_path, vec![Client::Antigravity]);
+    let report = install_clients(&opts).unwrap();
+
+    let dir = temp.path().join(".gemini/config");
+    let config = read_json(&dir.join("mcp_config.json"));
+    assert_eq!(
+        config["mcpServers"]["palace"]["args"],
+        serde_json::json!(["mcp"])
+    );
+    let rule = fs::read_to_string(dir.join("rules/palace.md")).unwrap();
+    assert!(rule.starts_with("---\ntrigger: always_on\n---\n"));
+    assert_full_protocol(&rule);
+    // GEMINI.md belongs to Gemini CLI; Antigravity must not claim it.
+    assert!(!temp.path().join(".gemini/GEMINI.md").exists());
+    assert!(report.hook_changed.is_empty() && report.hook_unchanged.is_empty());
+
+    let status = &doctor(&opts).unwrap().clients[0];
+    assert!(status.points_to_expected_binary, "{status:?}");
+    assert!(status.rule_installed, "{status:?}");
+
+    uninstall_clients(&opts).unwrap();
+    assert!(read_json(&dir.join("mcp_config.json"))["mcpServers"]
+        .get("palace")
+        .is_none());
+    assert!(!dir.join("rules/palace.md").exists());
+}
+
+#[test]
 fn install_opencode_registers_local_server_and_instruction_file() {
     let temp = TempDir::new().unwrap();
     let binary_path = fake_binary(temp.path());
@@ -1327,6 +1358,8 @@ fn install_all_includes_new_clients_only_when_detected() {
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .collect();
     assert!(paths.iter().any(|p| p.ends_with(".gemini/settings.json")));
+    // `~/.gemini` alone is Gemini CLI, not Antigravity.
+    assert!(!temp.path().join(".gemini/config").exists(), "{paths:?}");
     assert!(!temp.path().join(".codeium").exists(), "{paths:?}");
     assert!(!temp.path().join(".config/opencode").exists(), "{paths:?}");
     assert!(!vscode_user_dir(temp.path()).exists(), "{paths:?}");
@@ -1345,6 +1378,7 @@ fn project_scoped_install_covers_new_clients() {
             Client::Gemini,
             Client::Vscode,
             Client::Windsurf,
+            Client::Antigravity,
             Client::OpenCode,
         ],
     );
@@ -1364,6 +1398,12 @@ fn project_scoped_install_covers_new_clients() {
     }
     let windsurf = fs::read_to_string(project.join(".windsurf/rules/palace.md")).unwrap();
     assert!(windsurf.starts_with("---\ntrigger: always_on\n---\n"));
+    assert!(
+        read_json(&project.join(".agents/mcp_config.json"))["mcpServers"]["palace"].is_object()
+    );
+    let antigravity = fs::read_to_string(project.join(".agents/rules/palace.md")).unwrap();
+    assert!(antigravity.starts_with("---\ntrigger: always_on\n---\n"));
+    assert_full_protocol(&antigravity);
 }
 
 #[test]

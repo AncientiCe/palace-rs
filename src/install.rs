@@ -39,6 +39,7 @@ pub enum Client {
     Gemini,
     Vscode,
     Windsurf,
+    Antigravity,
     OpenCode,
     Cline,
     Zed,
@@ -118,6 +119,7 @@ impl fmt::Display for Client {
             Client::Gemini => f.write_str("gemini"),
             Client::Vscode => f.write_str("vscode"),
             Client::Windsurf => f.write_str("windsurf"),
+            Client::Antigravity => f.write_str("antigravity"),
             Client::OpenCode => f.write_str("opencode"),
             Client::Cline => f.write_str("cline"),
             Client::Zed => f.write_str("zed"),
@@ -139,6 +141,7 @@ impl std::str::FromStr for Client {
             "gemini" | "gemini-cli" => Ok(Client::Gemini),
             "vscode" | "copilot" | "vscode-copilot" => Ok(Client::Vscode),
             "windsurf" => Ok(Client::Windsurf),
+            "antigravity" => Ok(Client::Antigravity),
             "opencode" => Ok(Client::OpenCode),
             "cline" => Ok(Client::Cline),
             "zed" => Ok(Client::Zed),
@@ -508,10 +511,11 @@ pub fn print_doctor_report(report: &DoctorReport) {
 
 /// Clients that `all` configures only when they are installed on this machine,
 /// so `palace install` never creates config folders for agents the user lacks.
-const DETECTED_CLIENTS: [Client; 7] = [
+const DETECTED_CLIENTS: [Client; 8] = [
     Client::Gemini,
     Client::Vscode,
     Client::Windsurf,
+    Client::Antigravity,
     Client::OpenCode,
     Client::Cline,
     Client::Zed,
@@ -551,6 +555,7 @@ fn client_detected(home_dir: &Path, client: Client) -> bool {
         Client::Gemini => home_dir.join(".gemini").is_dir(),
         Client::Vscode => vscode_user_dir(home_dir).is_dir(),
         Client::Windsurf => windsurf_dir(home_dir).is_dir(),
+        Client::Antigravity => antigravity_detected(home_dir),
         Client::OpenCode => opencode_dir(home_dir).is_dir(),
         Client::Cline => cline_dir(home_dir).is_dir(),
         Client::Zed => zed_dir(home_dir).is_dir(),
@@ -598,6 +603,18 @@ fn windsurf_dir(home_dir: &Path) -> PathBuf {
     home_dir.join(".codeium").join("windsurf")
 }
 
+/// Antigravity's global config folder. It sits inside `~/.gemini`, which Gemini
+/// CLI also uses, so Palace keeps its Antigravity files apart from Gemini's.
+fn antigravity_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(".gemini").join("config")
+}
+
+/// Antigravity is installed when its config folder or its app-data folder
+/// (`~/.gemini/antigravity`) exists; `~/.gemini` alone only means Gemini CLI.
+fn antigravity_detected(home_dir: &Path) -> bool {
+    antigravity_dir(home_dir).is_dir() || home_dir.join(".gemini").join("antigravity").is_dir()
+}
+
 /// OpenCode's global config folder; it uses `~/.config` on every OS.
 fn opencode_dir(home_dir: &Path) -> PathBuf {
     home_dir.join(".config").join("opencode")
@@ -626,6 +643,12 @@ fn config_path(options: &InstallOptions, client: Client) -> Result<PathBuf> {
                 .join("mcp.json")),
         },
         Client::Windsurf => Ok(windsurf_dir(&options.home_dir).join("mcp_config.json")),
+        Client::Antigravity => match options.scope {
+            Scope::User => Ok(antigravity_dir(&options.home_dir).join("mcp_config.json")),
+            Scope::Project => Ok(project_dir_for(options, client)?
+                .join(".agents")
+                .join("mcp_config.json")),
+        },
         Client::OpenCode => match options.scope {
             Scope::User => Ok(opencode_dir(&options.home_dir).join("opencode.json")),
             Scope::Project => Ok(project_dir_for(options, client)?.join("opencode.json")),
@@ -651,7 +674,7 @@ fn project_dir_for(options: &InstallOptions, client: Client) -> Result<&PathBuf>
 /// How a client's MCP config file registers servers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum McpFormat {
-    /// JSON `mcpServers.palace = { command, args }` (Cursor, Claude, Gemini, Windsurf).
+    /// JSON `mcpServers.palace = { command, args }` (Cursor, Claude, Gemini, Windsurf, Antigravity).
     McpServers,
     /// JSON `servers.palace = { type: "stdio", command, args }` (VS Code).
     VscodeServers,
@@ -783,6 +806,11 @@ fn rule_target(options: &InstallOptions, client: Client) -> Result<RuleTarget> {
             windsurf_dir(&options.home_dir).join("memories/global_rules.md")
         }
         (Client::Windsurf, Scope::Project) => project_dir()?.join(".windsurf/rules/palace.md"),
+        // Its own rule file, not ~/.gemini/GEMINI.md, which Gemini CLI owns.
+        (Client::Antigravity, Scope::User) => {
+            antigravity_dir(&options.home_dir).join("rules/palace.md")
+        }
+        (Client::Antigravity, Scope::Project) => project_dir()?.join(".agents/rules/palace.md"),
         (Client::OpenCode, Scope::User) => opencode_dir(&options.home_dir).join("palace.md"),
         (Client::OpenCode, Scope::Project) => project_dir()?.join("AGENTS.md"),
         (Client::Cline, Scope::User) => cline_dir(&options.home_dir).join("rules/palace.md"),
@@ -798,6 +826,7 @@ fn rule_target(options: &InstallOptions, client: Client) -> Result<RuleTarget> {
         (Client::Cursor, _)
         | (Client::Vscode, Scope::User)
         | (Client::Windsurf, Scope::Project)
+        | (Client::Antigravity, _)
         | (Client::OpenCode, Scope::User)
         | (Client::Cline, Scope::User) => RuleKind::Standalone,
         (Client::All, _) => return Err(anyhow!("all is not a concrete client")),
@@ -1261,6 +1290,7 @@ fn display_client_name(client: Client) -> &'static str {
         Client::Gemini => "Gemini CLI",
         Client::Vscode => "VS Code",
         Client::Windsurf => "Windsurf",
+        Client::Antigravity => "Antigravity",
         Client::OpenCode => "OpenCode",
         Client::Cline => "Cline",
         Client::Zed => "Zed",
@@ -1298,7 +1328,7 @@ fn standalone_rule_text(client: Client, profile: Profile) -> String {
     let frontmatter = match client {
         Client::Cursor => "---\ndescription: Consult Palace memory before answering about remembered facts\nalwaysApply: true\n---\n\n",
         Client::Vscode => "---\ndescription: Consult Palace memory before answering about remembered facts\napplyTo: \"**\"\n---\n\n",
-        Client::Windsurf => "---\ntrigger: always_on\n---\n\n",
+        Client::Windsurf | Client::Antigravity => "---\ntrigger: always_on\n---\n\n",
         _ => "",
     };
     format!("{frontmatter}# Palace Memory Protocol: MANDATORY\n\n{body}\n")
@@ -2080,7 +2110,8 @@ fn nested_hook_installed(path: &Path, defs: &[NestedHook]) -> bool {
 
 /// Install the automatic memory hooks for a client at user scope. Returns the
 /// hook config path and whether it changed, or `None` for clients without
-/// hooks (Cursor is handled separately; Claude Desktop and Windsurf have none).
+/// hooks (Cursor is handled separately; Claude Desktop, Windsurf and Antigravity
+/// have none).
 fn install_client_hooks(
     options: &InstallOptions,
     client: Client,
@@ -2244,6 +2275,9 @@ fn no_hooks_note(client: Client) -> Option<&'static str> {
         Client::Windsurf => {
             Some("Cascade hooks cannot inject context; Devin Local reuses the Claude Code hooks")
         }
+        Client::Antigravity => Some(
+            "Palace does not register Antigravity hooks yet; the always-on rule carries the protocol",
+        ),
         Client::Zed => Some(
             "Zed's agent has no hooks; external agents (Claude Code, Gemini CLI, Codex) use their own Palace setup",
         ),
