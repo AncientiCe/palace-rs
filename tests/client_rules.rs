@@ -1439,6 +1439,8 @@ fn install_opencode_writes_plugin_with_binary_path() {
     assert!(plugin.contains(&format!("const PALACE = {literal}")));
     assert!(!plugin.contains("__PALACE_BINARY__"));
     assert!(plugin.contains("--client"));
+    // OpenCode V2 needs a default export with an id and setup(); V1 calls server().
+    assert!(plugin.contains("export default { id: \"palace\", setup, server }"));
     assert!(doctor(&opts).unwrap().clients[0].hook_installed);
 
     uninstall_clients(&opts).unwrap();

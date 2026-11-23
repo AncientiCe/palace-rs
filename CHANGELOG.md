@@ -6,6 +6,16 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The OpenCode plugin now loads in OpenCode V2.** V2 rejected the plugin
+  written by `palace install --client opencode` because it had no default
+  export, so V2 users got the MCP tools but no automatic recall. The plugin
+  now default-exports `{ id, setup, server }`: V2 calls `setup` (prompt,
+  context, tool and idle hooks), V1 1.18.29 and newer calls `server` with the
+  same hooks as before. Each hook call now times out after 8 seconds and
+  fails open. Rerun `palace install --client opencode` to pick it up.
+
 ## [0.20.8] - 2026-11-22
 
 ### Fixed

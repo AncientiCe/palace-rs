@@ -2,16 +2,28 @@
 // Rerun `palace install --client opencode` to update it; `palace uninstall`
 // removes it. Every hook fails open: if Palace is unavailable, OpenCode runs
 // exactly as it would without this plugin.
+//
+// One default export serves both plugin APIs: OpenCode V2 reads `id` and
+// calls `setup(ctx)`; OpenCode V1 (1.18.29 and newer) calls `server(input)`.
 import { spawn } from "node:child_process"
 
 const PALACE = "__PALACE_BINARY__"
 const INVESTIGATION_TOOLS = new Set(["read", "grep", "glob", "bash"])
+const HOOK_TIMEOUT_MS = 8000
 
 // Run `palace hook <event> --client opencode` with `payload` on stdin and
-// resolve to its JSON response, or `{}` on any failure.
+// resolve to its JSON response, or `{}` on any failure or timeout.
 function palaceHook(event, payload) {
   return new Promise((resolve) => {
     let out = ""
+    let done = false
+    let timer
+    const finish = (value) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      resolve(value)
+    }
     let child
     try {
       child = spawn(PALACE, ["hook", event, "--client", "opencode"], {
@@ -19,16 +31,22 @@ function palaceHook(event, payload) {
         windowsHide: true,
       })
     } catch {
-      resolve({})
+      finish({})
       return
     }
+    timer = setTimeout(() => {
+      try {
+        child.kill()
+      } catch {}
+      finish({})
+    }, HOOK_TIMEOUT_MS)
     child.stdout.on("data", (chunk) => (out += chunk))
-    child.on("error", () => resolve({}))
+    child.on("error", () => finish({}))
     child.on("close", () => {
       try {
-        resolve(JSON.parse(out.trim() || "{}"))
+        finish(JSON.parse(out.trim() || "{}"))
       } catch {
-        resolve({})
+        finish({})
       }
     })
     child.stdin.on("error", () => {})
@@ -36,32 +54,100 @@ function palaceHook(event, payload) {
   })
 }
 
-export const PalacePlugin = async ({ client, directory }) => {
-  // Context waiting to be added to a session's next system prompt.
+// Per-session context waiting to be added to the next system prompt.
+function createQueue() {
   const pending = new Map()
+  return {
+    add(sessionID, text) {
+      if (!sessionID || !text) return
+      const prior = pending.get(sessionID)
+      pending.set(sessionID, prior ? `${prior}\n\n${text}` : text)
+    },
+    take(sessionID) {
+      const text = sessionID && pending.get(sessionID)
+      if (text) pending.delete(sessionID)
+      return text || undefined
+    },
+  }
+}
+
+// OpenCode V2.
+async function setup(ctx) {
+  const cwd = ctx.location?.directory ?? process.cwd()
+  const queue = createQueue()
+  const started = new Set()
   // Sessions already nudged to save, so the stop nudge never loops.
   const nudged = new Set()
 
-  const queue = (sessionID, text) => {
-    if (!sessionID || !text) return
-    const prior = pending.get(sessionID)
-    pending.set(sessionID, prior ? `${prior}\n\n${text}` : text)
+  // V2 has no session-created hook; run session-start on a session's first
+  // prompt or model request instead.
+  const ensureStarted = async (sessionID) => {
+    if (!sessionID || started.has(sessionID)) return
+    started.add(sessionID)
+    const res = await palaceHook("session-start", { cwd, session_id: sessionID })
+    queue.add(sessionID, res.additional_context)
   }
+
+  await ctx.session.hook("prompt", async (event) => {
+    await ensureStarted(event.sessionID)
+    const res = await palaceHook("user-prompt-submit", {
+      cwd,
+      session_id: event.sessionID,
+      prompt: event.prompt?.text ?? "",
+    })
+    queue.add(event.sessionID, res.additional_context)
+  })
+
+  // Runs before every agent-loop model request, including tool continuations.
+  await ctx.session.hook("context", async (event) => {
+    await ensureStarted(event.sessionID)
+    const text = queue.take(event.sessionID)
+    if (text) event.system.push({ type: "text", text })
+  })
+
+  await ctx.tool.hook("execute.after", async (event) => {
+    if (event.status !== "completed" || !INVESTIGATION_TOOLS.has(event.tool)) return
+    const res = await palaceHook("post-tool-use", {
+      cwd,
+      session_id: event.sessionID,
+      tool_name: event.tool,
+      tool_input: event.input ?? {},
+    })
+    // Delivered with the continuation request through the context hook.
+    queue.add(event.sessionID, res.additional_context)
+  })
+
+  await ctx.session.hook("experimental.idle", async (event) => {
+    const id = event.sessionID
+    if (!id || nudged.has(id) || (event.background?.length ?? 0) > 0) return
+    const res = await palaceHook("stop", { cwd, session_id: id })
+    if (res.followup_message) {
+      nudged.add(id)
+      await ctx.session.prompt({ sessionID: id, text: res.followup_message }).catch(() => {})
+    }
+  })
+}
+
+// OpenCode V1.
+async function server({ client, directory } = {}) {
+  const queue = createQueue()
+  // Sessions already nudged to save, so the stop nudge never loops.
+  const nudged = new Set()
 
   return {
     event: async ({ event }) => {
       if (event.type === "session.created") {
         const id = event.properties?.info?.id
         const res = await palaceHook("session-start", { cwd: directory, session_id: id })
-        queue(id, res.additional_context)
+        queue.add(id, res.additional_context)
       } else if (event.type === "session.idle") {
         const id = event.properties?.sessionID
         if (!id || nudged.has(id)) return
         const res = await palaceHook("stop", { cwd: directory, session_id: id })
         if (res.followup_message) {
           nudged.add(id)
-          client.session
-            .prompt({ path: { id }, body: { parts: [{ type: "text", text: res.followup_message }] } })
+          client?.session
+            ?.prompt({ path: { id }, body: { parts: [{ type: "text", text: res.followup_message }] } })
             .catch(() => {})
         }
       }
@@ -77,15 +163,12 @@ export const PalacePlugin = async ({ client, directory }) => {
         session_id: input.sessionID,
         prompt,
       })
-      queue(input.sessionID, res.additional_context)
+      queue.add(input.sessionID, res.additional_context)
     },
 
     "experimental.chat.system.transform": async (input, output) => {
-      const text = input.sessionID && pending.get(input.sessionID)
-      if (text) {
-        output.system.push(text)
-        pending.delete(input.sessionID)
-      }
+      const text = queue.take(input.sessionID)
+      if (text) output.system.push(text)
     },
 
     "tool.execute.after": async (input, output) => {
@@ -100,3 +183,5 @@ export const PalacePlugin = async ({ client, directory }) => {
     },
   }
 }
+
+export default { id: "palace", setup, server }
