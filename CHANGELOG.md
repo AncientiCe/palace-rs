@@ -6,6 +6,8 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.20.11] - 2026-11-24
+
 ### Changed
 
 - **Neutral wording for recalled preferences.** The session-start block now
