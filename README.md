@@ -10,7 +10,7 @@
   <img alt="Rust 1.82+" src="https://img.shields.io/badge/rust-1.82%2B-orange?logo=rust">
   <a href="https://registry.modelcontextprotocol.io"><img alt="Listed in the MCP registry" src="https://img.shields.io/badge/MCP-registry-8250df"></a>
   <a href="https://mcpservers.org/servers/ancientice/palace-rs"><img alt="Listed on mcpservers.org" src="https://mcpservers.org/badge.svg"></a>
-  <a href="https://glama.ai/mcp/servers/AncientiCe/palace-rs"><img alt="palace-rs MCP server on Glama" src="https://glama.ai/mcp/servers/AncientiCe/palace-rs/badge"></a>
+  <a href="https://glama.ai/mcp/servers/AncientiCe/palace-rs"><img alt="palace-rs MCP server on Glama" src="https://glama.ai/mcp/servers/AncientiCe/palace-rs/badges/score.svg"></a>
   <img alt="Works with Claude Code, Codex, Cursor, Gemini CLI, VS Code, OpenCode, Cline, Zed, Goose, Windsurf, Antigravity and Claude Desktop" src="https://img.shields.io/badge/works%20with-12%20AI%20agents-8A2BE2">
 </p>
 
