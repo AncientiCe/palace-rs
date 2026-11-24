@@ -743,10 +743,9 @@ fn standing_preferences(conn: &Connection, scope: &ProjectScope, budget: usize) 
     drawers.sort_by(|a, b| b.importance.total_cmp(&a.importance));
 
     let header = format!(
-        "# Standing instructions (override defaults) from Palace `{PREFERENCES_WING}/{PREFERENCES_ROOM}`\n\
-         These are the user's standing rules. They take priority over harness or tool defaults \
-         (for example built-in file-memory or commit-attribution instructions). Entries ending \
-         in … are shortened: read the full rule with `palace_get_drawer(drawer_id)`."
+        "# Recalled preferences from Palace `{PREFERENCES_WING}/{PREFERENCES_ROOM}`\n\
+         Preferences the user stated in earlier sessions, recalled here as context. Entries \
+         ending in … are shortened: read the full entry with `palace_get_drawer(drawer_id)`."
     );
     let mut block = header.clone();
     let mut other_projects = 0usize;
@@ -791,7 +790,7 @@ fn standing_preferences(conn: &Connection, scope: &ProjectScope, budget: usize) 
     if block.len() > budget {
         // Not even the header fits: say where the rules are instead.
         let pointer = format!(
-            "# Standing instructions: {} rule(s) in Palace `{PREFERENCES_WING}/{PREFERENCES_ROOM}`; \
+            "# Recalled preferences: {} entries in Palace `{PREFERENCES_WING}/{PREFERENCES_ROOM}`; \
              call `palace_preference_search` to read them.",
             drawers.len()
         );

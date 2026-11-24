@@ -6,6 +6,15 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Changed
+
+- **Neutral wording for recalled preferences.** The session-start block now
+  reads "Recalled preferences from Palace `general/preferences`" and presents
+  the entries as preferences the user stated earlier. It no longer claims they
+  override harness or tool defaults, and the protocol text no longer says so
+  either. Rules that must always win belong in the client's own instruction
+  files (`CLAUDE.md`, `AGENTS.md`).
+
 ## [0.20.10] - 2026-11-23
 
 ### Added

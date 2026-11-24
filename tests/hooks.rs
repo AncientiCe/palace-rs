@@ -658,12 +658,9 @@ fn session_start_injects_standing_preferences_verbatim() {
     remember(&conn, TOKIO_DECISION, "proj");
 
     let ctx = claude_session_start(&conn, json!({"session_id": "abc", "cwd": "/work/proj"}));
-    assert!(
-        ctx.contains("Standing instructions (override defaults)"),
-        "{ctx}"
-    );
+    assert!(ctx.contains("Recalled preferences from Palace"), "{ctx}");
     assert!(ctx.contains(rule), "rule must be injected verbatim: {ctx}");
-    let prefs_at = ctx.find("Standing instructions").unwrap();
+    let prefs_at = ctx.find("Recalled preferences").unwrap();
     let recall_at = ctx.find("Recalled from Palace memory").unwrap();
     assert!(
         prefs_at < recall_at,
@@ -739,10 +736,7 @@ fn session_start_stays_within_budget_with_many_long_rules() {
         ctx.len()
     );
     assert!(ctx.contains("Palace Memory Protocol"), "{ctx}");
-    assert!(
-        ctx.contains("Standing instructions (override defaults)"),
-        "{ctx}"
-    );
+    assert!(ctx.contains("Recalled preferences from Palace"), "{ctx}");
     assert!(ctx.contains("long rule"), "{ctx}");
     assert!(ctx.contains('…'), "long rules are shortened: {ctx}");
     assert!(
