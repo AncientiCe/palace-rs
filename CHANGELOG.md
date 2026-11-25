@@ -6,6 +6,8 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+## [0.20.12] - 2026-11-25
+
 ### Changed
 
 - **Feedback hint comes sooner and returns until answered.** The feedback
