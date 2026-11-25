@@ -6,6 +6,17 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Changed
+
+- **Feedback hint comes sooner and returns until answered.** The feedback
+  link in `palace_session_context` now first appears after 5 MCP sessions
+  (was 10). If you don't answer, it returns after another 5 sessions, but
+  never more than once a week, and after 3 unanswered hints only once a
+  month. Running `palace feedback` counts as an answer and pauses it for 30
+  days; the new `palace feedback --done` does the same without opening the
+  page, for when you posted from the link. `PALACE_FEEDBACK_DISABLED=1`
+  still turns it off.
+
 ## [0.20.11] - 2026-11-24
 
 ### Changed

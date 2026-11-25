@@ -2,9 +2,16 @@
 //!
 //! Palace never sends feedback anywhere. It builds a link to a pre-filled
 //! discussion that the user reads, edits, and posts themselves. The MCP server
-//! counts its own sessions in the local `meta` table; after enough sessions,
-//! `palace_session_context` carries one hint telling the agent to share that
-//! link once. The hint then stays quiet for [`PROMPT_INTERVAL_DAYS`].
+//! counts its own sessions in the local `meta` table; every
+//! [`SESSIONS_BETWEEN_PROMPTS`] sessions, `palace_session_context` carries one
+//! hint telling the agent to share that link once.
+//!
+//! Palace can't see whether anyone posted, so running `palace feedback`
+//! (or `palace feedback --done`) stands in for a reply and quiets the hint for
+//! [`REPLIED_QUIET_DAYS`]. Without a reply the hint returns after another
+//! [`SESSIONS_BETWEEN_PROMPTS`] sessions, but never sooner than
+//! [`MIN_DAYS_BETWEEN_PROMPTS`], and after [`MAX_IGNORED_PROMPTS`] unanswered
+//! hints it backs off to once every [`BACKOFF_DAYS`].
 
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -34,16 +41,25 @@ pub fn take_star_ask(config_dir: &std::path::Path) -> Option<String> {
 pub const DISCUSSION_URL: &str = "https://github.com/AncientiCe/palace-rs/discussions/new";
 const CATEGORY: &str = "feedback";
 
-/// MCP sessions before the first hint.
-pub const SESSIONS_BEFORE_PROMPT: u64 = 10;
-/// Days between hints.
-pub const PROMPT_INTERVAL_DAYS: i64 = 30;
+/// MCP sessions before the first hint, and between unanswered hints.
+pub const SESSIONS_BETWEEN_PROMPTS: u64 = 5;
+/// Fewest days between two hints, however many sessions run.
+pub const MIN_DAYS_BETWEEN_PROMPTS: i64 = 7;
+/// Unanswered hints in a row before the hint backs off to [`BACKOFF_DAYS`].
+pub const MAX_IGNORED_PROMPTS: u64 = 3;
+/// Days between hints once [`MAX_IGNORED_PROMPTS`] went unanswered.
+pub const BACKOFF_DAYS: i64 = 30;
+/// Days the hint stays quiet after the user runs `palace feedback`.
+pub const REPLIED_QUIET_DAYS: i64 = 30;
 
 /// Set to `1` (or any non-empty value other than `0`/`false`) to never show the hint.
 pub const DISABLE_ENV: &str = "PALACE_FEEDBACK_DISABLED";
 
 const KEY_SESSIONS: &str = "feedback_mcp_sessions";
 const KEY_LAST_PROMPT: &str = "feedback_last_prompt";
+const KEY_SESSIONS_AT_PROMPT: &str = "feedback_sessions_at_prompt";
+const KEY_IGNORED: &str = "feedback_unanswered_prompts";
+const KEY_REPLIED: &str = "feedback_last_replied";
 const KEY_CLIENT: &str = "feedback_last_client";
 
 /// The non-private facts the link pre-fills. Nothing from the palace itself.
@@ -130,6 +146,13 @@ pub fn session_client() -> Option<String> {
     SESSION_CLIENT.get().cloned()
 }
 
+/// Record that the user answered the hint (ran `palace feedback`), so it stays
+/// quiet for [`REPLIED_QUIET_DAYS`] and the unanswered count starts over.
+pub fn mark_replied(conn: &Connection, now: jiff::Timestamp) -> Result<()> {
+    write(conn, KEY_REPLIED, &crate::clock::rfc3339(now))?;
+    write(conn, KEY_IGNORED, "0")
+}
+
 /// The hint for `palace_session_context`, when one is due. Records that it was
 /// shown, so it appears once per interval.
 pub fn take_due_prompt(
@@ -140,16 +163,31 @@ pub fn take_due_prompt(
     if disabled() {
         return Ok(None);
     }
-    let sessions = read_u64(conn, KEY_SESSIONS)?.unwrap_or(0);
-    if sessions < SESSIONS_BEFORE_PROMPT {
+    let since = |key| -> Result<Option<jiff::SignedDuration>> {
+        Ok(read(conn, key)?
+            .and_then(|value| crate::clock::parse(&value))
+            .map(|then| now.duration_since(then)))
+    };
+    if since(KEY_REPLIED)?.is_some_and(|gap| gap < crate::clock::days(REPLIED_QUIET_DAYS)) {
         return Ok(None);
     }
-    let last = read(conn, KEY_LAST_PROMPT)?.and_then(|value| crate::clock::parse(&value));
-    if last.is_some_and(|last| now.duration_since(last) < crate::clock::days(PROMPT_INTERVAL_DAYS))
-    {
+    let sessions = read_u64(conn, KEY_SESSIONS)?.unwrap_or(0);
+    let at_prompt = read_u64(conn, KEY_SESSIONS_AT_PROMPT)?.unwrap_or(0);
+    if sessions.saturating_sub(at_prompt) < SESSIONS_BETWEEN_PROMPTS {
+        return Ok(None);
+    }
+    let ignored = read_u64(conn, KEY_IGNORED)?.unwrap_or(0);
+    let min_gap = if ignored >= MAX_IGNORED_PROMPTS {
+        BACKOFF_DAYS
+    } else {
+        MIN_DAYS_BETWEEN_PROMPTS
+    };
+    if since(KEY_LAST_PROMPT)?.is_some_and(|gap| gap < crate::clock::days(min_gap)) {
         return Ok(None);
     }
     write(conn, KEY_LAST_PROMPT, &crate::clock::rfc3339(now))?;
+    write(conn, KEY_SESSIONS_AT_PROMPT, &sessions.to_string())?;
+    write(conn, KEY_IGNORED, &(ignored + 1).to_string())?;
 
     let info = FeedbackInfo::current(profile, session_client());
     Ok(Some(json!({
@@ -157,9 +195,10 @@ pub fn take_due_prompt(
         "instruction": format!(
             "Once, after the current task is done (never mid-task), tell the user in one short \
              sentence that they can share feedback about Palace with the maintainer as a public \
-             GitHub discussion, and give this link. Nothing is sent unless they post it. Do not \
-             ask again or follow up; this hint returns in {PROMPT_INTERVAL_DAYS} days. To turn it \
-             off: {DISABLE_ENV}=1."
+             GitHub discussion, and give this link. Nothing is sent unless they post it. Also \
+             say that running `palace feedback --done` after posting pauses this reminder for \
+             {REPLIED_QUIET_DAYS} days. Do not ask again or follow up in this session. To turn \
+             it off: {DISABLE_ENV}=1."
         ),
     })))
 }
@@ -264,39 +303,71 @@ mod tests {
         assert_eq!(last_client(&conn).as_deref(), Some("cursor"));
     }
 
+    fn sessions(conn: &Connection, count: u64) {
+        for _ in 0..count {
+            note_mcp_session(conn, None).unwrap();
+        }
+    }
+
+    fn due(conn: &Connection, at: jiff::Timestamp) -> bool {
+        take_due_prompt(conn, Profile::Coding, at)
+            .unwrap()
+            .is_some()
+    }
+
     #[test]
-    fn prompt_waits_for_sessions_then_respects_interval() {
-        // Runs in one test so the env-var check cannot race another test.
+    fn prompt_schedule() {
+        // One test, so the env-var checks cannot race another test.
         std::env::remove_var(DISABLE_ENV);
+        let days = crate::clock::days;
         let conn = conn();
         let now = jiff::Timestamp::now();
-        for _ in 0..SESSIONS_BEFORE_PROMPT - 1 {
-            note_mcp_session(&conn, None).unwrap();
-        }
-        assert!(take_due_prompt(&conn, Profile::Coding, now)
-            .unwrap()
-            .is_none());
 
-        note_mcp_session(&conn, None).unwrap();
+        // First hint after five sessions.
+        sessions(&conn, SESSIONS_BETWEEN_PROMPTS - 1);
+        assert!(!due(&conn, now));
+        sessions(&conn, 1);
         let hint = take_due_prompt(&conn, Profile::Coding, now)
             .unwrap()
             .unwrap();
         assert!(hint["url"].as_str().unwrap().starts_with(DISCUSSION_URL));
+        assert!(hint["instruction"]
+            .as_str()
+            .unwrap()
+            .contains("palace feedback --done"));
 
-        let soon = now + crate::clock::days(PROMPT_INTERVAL_DAYS - 1);
-        assert!(take_due_prompt(&conn, Profile::Coding, soon)
-            .unwrap()
-            .is_none());
-        let later = now + crate::clock::days(PROMPT_INTERVAL_DAYS);
-        assert!(take_due_prompt(&conn, Profile::Coding, later)
-            .unwrap()
-            .is_some());
+        // Unanswered: needs five more sessions and at least a week.
+        let week = now + days(MIN_DAYS_BETWEEN_PROMPTS);
+        assert!(!due(&conn, week), "no new sessions yet");
+        sessions(&conn, SESSIONS_BETWEEN_PROMPTS);
+        assert!(!due(&conn, week - days(1)), "sessions alone are not enough");
+        assert!(due(&conn, week), "second hint");
+
+        // Third unanswered hint, then the back-off to a month.
+        sessions(&conn, SESSIONS_BETWEEN_PROMPTS);
+        let two_weeks = week + days(MIN_DAYS_BETWEEN_PROMPTS);
+        assert!(due(&conn, two_weeks), "third hint");
+        sessions(&conn, SESSIONS_BETWEEN_PROMPTS);
+        let three_weeks = two_weeks + days(MIN_DAYS_BETWEEN_PROMPTS);
+        assert!(!due(&conn, three_weeks), "backed off after three");
+        let backoff = two_weeks + days(BACKOFF_DAYS);
+        assert!(due(&conn, backoff), "monthly after back-off");
+
+        // A reply quiets it for a month and resets the unanswered count.
+        mark_replied(&conn, backoff).unwrap();
+        sessions(&conn, SESSIONS_BETWEEN_PROMPTS);
+        assert!(!due(&conn, backoff + days(REPLIED_QUIET_DAYS - 1)));
+        let after_reply = backoff + days(REPLIED_QUIET_DAYS);
+        assert!(due(&conn, after_reply));
+        sessions(&conn, SESSIONS_BETWEEN_PROMPTS);
+        assert!(
+            due(&conn, after_reply + days(MIN_DAYS_BETWEEN_PROMPTS)),
+            "weekly again after the reset"
+        );
 
         std::env::set_var(DISABLE_ENV, "1");
-        let much_later = later + crate::clock::days(PROMPT_INTERVAL_DAYS);
-        assert!(take_due_prompt(&conn, Profile::Coding, much_later)
-            .unwrap()
-            .is_none());
+        sessions(&conn, SESSIONS_BETWEEN_PROMPTS);
+        assert!(!due(&conn, after_reply + days(365)));
         std::env::remove_var(DISABLE_ENV);
     }
 }

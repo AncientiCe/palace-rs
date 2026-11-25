@@ -128,6 +128,9 @@ enum Commands {
         /// Print the link without opening a browser
         #[arg(long)]
         no_open: bool,
+        /// You already posted feedback: pause the reminder without opening anything
+        #[arg(long)]
+        done: bool,
     },
     /// Show automatic MCP usage gains and estimated savings
     Gain {
@@ -571,15 +574,26 @@ pub fn run() -> Result<()> {
             crate::miner::status(&conn, &db_path)?;
         }
 
-        Commands::Feedback { no_open } => {
+        Commands::Feedback { no_open, done } => {
             let db_path = config.palace_db_path();
-            let client = if db_path.exists() {
-                crate::db::open(&db_path)
-                    .ok()
-                    .and_then(|conn| crate::feedback::last_client(&conn))
+            let conn = if db_path.exists() {
+                crate::db::open(&db_path).ok()
             } else {
                 None
             };
+            // Palace can't see whether anything was posted; running this
+            // command is the stand-in for a reply. Best-effort.
+            if let Some(conn) = &conn {
+                let _ = crate::feedback::mark_replied(conn, jiff::Timestamp::now());
+            }
+            if done {
+                println!(
+                    "\n  Thanks for the feedback. The reminder is paused for {} days.\n",
+                    crate::feedback::REPLIED_QUIET_DAYS
+                );
+                return Ok(());
+            }
+            let client = conn.as_ref().and_then(crate::feedback::last_client);
             let info = crate::feedback::FeedbackInfo::current(config.profile(), client);
             let url = crate::feedback::discussion_url(&info);
             println!("\n  Share feedback as a public GitHub discussion. Nothing is sent until you post it.");
