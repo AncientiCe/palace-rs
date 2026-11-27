@@ -11,6 +11,8 @@ cargo test --all-features
 cargo audit
 ```
 
+Releases: bump `version` in `plugin/.claude-plugin/plugin.json` to the new `Cargo.toml` version in the same release commit (see AGENTS.md section 11).
+
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
 

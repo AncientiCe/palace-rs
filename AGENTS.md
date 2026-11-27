@@ -102,6 +102,13 @@ Fix any failure before marking the task complete.
 
 ---
 
+## 11. Bump the Plugin Version With Every Release
+
+- **Every release must set `version` in `plugin/.claude-plugin/plugin.json` to the new `Cargo.toml` version, in the same release commit.** Claude Code only offers plugin users an update when this version changes. If it's left behind, they stay on the old plugin.
+- `tests/claude_plugin.rs` checks that the two versions match, so a missed bump fails CI. Fix it by bumping `plugin.json`, never by loosening the test.
+
+---
+
 ## Quick Reference
 
 | Rule | Action |
@@ -116,5 +123,6 @@ Fix any failure before marking the task complete.
 | No unsafe unwrap/expect | Never use `unwrap()`/`expect()` in production code; handle errors safely |
 | Close running instances | Stop any long-running verification processes when done |
 | Keep changelog current | Add `### Added/Changed/Fixed` entries under `## [Unreleased]` in `CHANGELOG.md` as you build |
+| Plugin version | Each release bumps `plugin/.claude-plugin/plugin.json` `version` to match `Cargo.toml` |
 
 @RTK.md
