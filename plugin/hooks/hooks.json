@@ -4,14 +4,36 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "palace hook session-start --client claude --plugin" }
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/palace.js",
+              "hook",
+              "session-start",
+              "--client",
+              "claude",
+              "--plugin"
+            ]
+          }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "palace hook user-prompt-submit --client claude --plugin" }
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/palace.js",
+              "hook",
+              "user-prompt-submit",
+              "--client",
+              "claude",
+              "--plugin"
+            ]
+          }
         ]
       }
     ],
@@ -19,14 +41,36 @@
       {
         "matcher": "Grep|Read|Glob|mcp__plugin_palace_palace__.*",
         "hooks": [
-          { "type": "command", "command": "palace hook post-tool-use --client claude --plugin" }
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/palace.js",
+              "hook",
+              "post-tool-use",
+              "--client",
+              "claude",
+              "--plugin"
+            ]
+          }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "palace hook stop --client claude --plugin" }
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/palace.js",
+              "hook",
+              "stop",
+              "--client",
+              "claude",
+              "--plugin"
+            ]
+          }
         ]
       }
     ]

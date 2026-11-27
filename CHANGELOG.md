@@ -6,6 +6,17 @@ This Rust implementation uses its own `0.x` version track.
 
 ## [Unreleased]
 
+### Changed
+
+- **Claude Code plugin starts palace through a shipped node launcher.** The
+  plugin's MCP server and hooks now run `node plugin/scripts/palace.js …`,
+  which starts the `palace` binary on PATH with stdio passed through, instead
+  of calling `palace` directly. This is the form the Claude plugin directory
+  asks for, and it starts the same way on Windows, macOS and Linux. If
+  `palace` isn't installed, the hooks stay out of the way and the MCP server
+  says how to install it. The plugin manifest now carries a `version` (kept
+  equal to the crate version) and an icon.
+
 ## [0.20.12] - 2026-11-25
 
 ### Changed

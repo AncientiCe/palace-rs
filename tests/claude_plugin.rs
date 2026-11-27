@@ -38,15 +38,18 @@ fn binary(home: &Path) -> PathBuf {
     home.join("bin").join("palace")
 }
 
+/// The plugin starts the user's palace binary through this shipped node file,
+/// for both the MCP server and the hooks.
+const PLUGIN_LAUNCHER: &str = "${CLAUDE_PLUGIN_ROOT}/scripts/palace.js";
+
 /// `(event, matcher, "<cli-event> --client claude")` for every hook handler.
-fn hook_entries(config: &Value, strip: &dyn Fn(&str) -> String) -> Vec<(String, String, String)> {
+fn hook_entries(config: &Value, strip: &dyn Fn(&Value) -> String) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     for (event, groups) in config["hooks"].as_object().unwrap() {
         for group in groups.as_array().unwrap() {
             let matcher = group["matcher"].as_str().unwrap_or("").to_string();
             for handler in group["hooks"].as_array().unwrap() {
-                let command = handler["command"].as_str().unwrap();
-                out.push((event.clone(), matcher.clone(), strip(command)));
+                out.push((event.clone(), matcher.clone(), strip(handler)));
             }
         }
     }
@@ -71,16 +74,26 @@ fn plugin_hooks_match_what_install_writes() {
     install_clients(&options(temp.path())).unwrap();
     let installed = repo_file_from(&temp.path().join(".claude/settings.json"));
 
-    let from_install = hook_entries(&installed, &|command| {
+    let from_install = hook_entries(&installed, &|handler| {
+        let command = handler["command"].as_str().unwrap();
         let (_, rest) = command.split_once(" hook ").unwrap();
         rest.to_string()
     });
-    let from_plugin = hook_entries(&repo_file("plugin/hooks/hooks.json"), &|command| {
-        command
-            .strip_prefix("palace hook ")
-            .and_then(|rest| rest.strip_suffix(" --plugin"))
-            .unwrap_or_else(|| panic!("plugin hook must run `palace hook … --plugin`: {command}"))
-            .to_string()
+    let from_plugin = hook_entries(&repo_file("plugin/hooks/hooks.json"), &|handler| {
+        assert_eq!(handler["type"], "command", "{handler}");
+        assert_eq!(handler["command"], "node", "{handler}");
+        let args: Vec<&str> = handler["args"]
+            .as_array()
+            .unwrap_or_else(|| panic!("plugin hook needs args: {handler}"))
+            .iter()
+            .map(|arg| arg.as_str().unwrap())
+            .collect();
+        match args.as_slice() {
+            [launcher, "hook", rest @ .., "--plugin"] if *launcher == PLUGIN_LAUNCHER => {
+                rest.join(" ")
+            }
+            _ => panic!("plugin hook must run `node {PLUGIN_LAUNCHER} hook … --plugin`: {handler}"),
+        }
     })
     .into_iter()
     .map(|(event, matcher, command)| {
@@ -109,7 +122,18 @@ fn plugin_and_marketplace_names_agree() {
     assert_eq!(entry["source"], "./plugin");
     // The PostToolUse matcher is built from the plugin and server names.
     let mcp = repo_file("plugin/.mcp.json");
-    assert_eq!(mcp["mcpServers"]["palace"]["args"], json!(["mcp"]));
+    assert_eq!(mcp["mcpServers"]["palace"]["command"], "node");
+    assert_eq!(
+        mcp["mcpServers"]["palace"]["args"],
+        json!([PLUGIN_LAUNCHER, "mcp"])
+    );
+    let launcher = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/scripts/palace.js");
+    assert!(launcher.is_file(), "missing {}", launcher.display());
+    // Claude Code only picks up plugin updates when the version changes.
+    assert_eq!(plugin["version"], env!("CARGO_PKG_VERSION"));
+    assert!(Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("plugin/.claude-plugin/icon.png")
+        .is_file());
     assert_eq!(
         PLUGIN_TOOL_MATCHER,
         format!("mcp__plugin_{CLAUDE_PLUGIN_NAME}_palace__.*")

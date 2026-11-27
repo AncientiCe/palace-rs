@@ -1,8 +1,11 @@
 {
   "mcpServers": {
     "palace": {
-      "command": "palace",
-      "args": ["mcp"]
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/palace.js",
+        "mcp"
+      ]
     }
   }
 }
